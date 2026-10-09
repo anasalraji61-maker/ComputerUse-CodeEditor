@@ -4,6 +4,7 @@
 
 ## T0 — تهيئة المستودع
 الحالة: TODO
+0. **أولاً:** احذف أي ملفات ويب/Node ولّدها AI Studio (`package.json`, `tsconfig.json`, `vite.config.ts`, `index.html`, `server.ts`, `metadata.json`, مجلد `src/`). المشروع بايثون فقط (RULES.md بند 7).
 1. تأكد أن `.gitignore` و`.env.example` و`requirements.txt` و`README.md` موجودة وصحيحة؛ ولا يحتوي أي ملف على مفاتيح أو بيانات شخصية (المستودع **عام**).
 2. أنشئ هيكل `assistant/` (ملفات `__init__.py` فارغة) و`assistant/tests/`.
 3. أضف اختباراً بسيطاً `assistant/tests/test_smoke.py` يتحقق أن الحزمة تُستورد.
