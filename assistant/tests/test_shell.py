@@ -39,8 +39,17 @@ try:
             shell.run(forbidden_cmd)
             print(f"FAIL: كان يجب رفض النمط غير المصرح به: {forbidden_cmd}", file=sys.stderr)
             sys.exit(1)
-        except CommandNotAllowedError:
-            pass  # صحيح ومطلوب (R4)
+        except (CommandNotAllowedError, CommandInjectionError):
+            pass  # صحيح ومطلوب (رفض كنمط غير مسموح أو كحقن رموز)
+
+    # فحص صريح لـ python -c خالي من أي رموز محظورة ليتوقع CommandNotAllowedError تحديداً
+    clean_python_c = ["python", "-c", "print(1)"]
+    try:
+        shell.run(clean_python_c)
+        print(f"FAIL: كان يجب رفض النمط غير المصرح به: {clean_python_c}", file=sys.stderr)
+        sys.exit(1)
+    except CommandNotAllowedError:
+        pass  # صحيح ومطلوب (R4)
 
     # 3. R14 (أ) و R5: رفض أي cmd[0] يحتوي على فواصل مسار مثل C:\x\python.exe أو ./script.sh
     for path_cmd in [

@@ -109,7 +109,7 @@ class FileManager:
             counter += 1
 
     def create_dir(self, dir_path: Union[str, Path]) -> Path:
-        """إنشاء مجلد داخل الجذر وتوثيقه في سجل التراجع."""
+        """إنشاء مجلد داخل الجذر وتوثيقه في سجل التراجع مع التراجع إن فشل الحفظ."""
         p = self.validate_path(dir_path)
         if p.exists():
             return p
@@ -118,11 +118,19 @@ class FileManager:
             "action": "create_dir",
             "path": str(p),
         })
-        self._save_journal()
+        try:
+            self._save_journal()
+        except Exception:
+            self.journal.pop()
+            try:
+                p.rmdir()
+            except Exception:
+                pass
+            raise
         return p
 
     def move(self, src: Union[str, Path], dest: Union[str, Path]) -> Path:
-        """نقل ملف أو مجلد مع تجنب التعارض وتسجيل العملية للتراجع."""
+        """نقل ملف أو مجلد مع تجنب التعارض وتسجيل العملية للتراجع والتراجع إن فشل الحفظ."""
         source = self.validate_path(src)
         if not source.exists():
             raise FileNotFoundError(f"الملف المصدر غير موجود: {source}")
@@ -137,11 +145,19 @@ class FileManager:
             "src": str(source),
             "dest": str(final_dest),
         })
-        self._save_journal()
+        try:
+            self._save_journal()
+        except Exception:
+            self.journal.pop()
+            try:
+                shutil.move(str(final_dest), str(source))
+            except Exception:
+                pass
+            raise
         return final_dest
 
     def copy(self, src: Union[str, Path], dest: Union[str, Path]) -> Path:
-        """نسخ ملف أو مجلد مع منع نسخ المجلد إلى داخل نفسه (R12) وتسجيل العملية."""
+        """نسخ ملف أو مجلد مع منع نسخ المجلد إلى داخل نفسه وتسجيل العملية والتراجع إن فشل الحفظ."""
         source = self.validate_path(src)
         if not source.exists():
             raise FileNotFoundError(f"الملف المصدر غير موجود: {source}")
@@ -167,11 +183,22 @@ class FileManager:
             "dest": str(final_dest),
             "is_dir": source.is_dir(),
         })
-        self._save_journal()
+        try:
+            self._save_journal()
+        except Exception:
+            self.journal.pop()
+            try:
+                if source.is_dir():
+                    shutil.rmtree(str(final_dest))
+                else:
+                    final_dest.unlink()
+            except Exception:
+                pass
+            raise
         return final_dest
 
     def rename(self, src: Union[str, Path], new_name: str) -> Path:
-        """إعادة تسمية ملف أو مجلد مع رفض أي فواصل مسار أو .. (R12)."""
+        """إعادة تسمية ملف أو مجلد مع تجنب التعارض والتراجع إن فشل الحفظ."""
         if not isinstance(new_name, str) or not new_name.strip():
             raise ValueError("يجب تحديد اسم جديد صالح.")
 
@@ -193,11 +220,19 @@ class FileManager:
             "src": str(source),
             "dest": str(final_dest),
         })
-        self._save_journal()
+        try:
+            self._save_journal()
+        except Exception:
+            self.journal.pop()
+            try:
+                final_dest.rename(source)
+            except Exception:
+                pass
+            raise
         return final_dest
 
     def delete(self, target: Union[str, Path]) -> Path:
-        """لا يوجد حذف نهائي: النقل إلى مجلد .trash داخل الجذر مع سجل تراجع."""
+        """لا يوجد حذف نهائي: النقل إلى مجلد .trash مع التراجع إن فشل حفظ السجل."""
         p = self.validate_path(target)
         if not p.exists():
             raise FileNotFoundError(f"الملف المراد حذفه غير موجود: {p}")
@@ -211,7 +246,15 @@ class FileManager:
             "original_path": str(p),
             "trash_path": str(final_dest),
         })
-        self._save_journal()
+        try:
+            self._save_journal()
+        except Exception:
+            self.journal.pop()
+            try:
+                shutil.move(str(final_dest), str(p))
+            except Exception:
+                pass
+            raise
         return final_dest
 
     def permanent_delete(self, target: Union[str, Path]):
