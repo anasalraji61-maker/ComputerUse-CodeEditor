@@ -1,4 +1,4 @@
-"""أدوات الملفات الآمنة مع قيد المجلد الجذر وسجل التراجع ومنع الحذف النهائي."""
+"""أدوات الملفات الآمنة مع قيد المجلد الجذر وحماية المسارات وسجل التراجع ومنع الحذف النهائي."""
 import json
 import shutil
 import hashlib
@@ -7,7 +7,12 @@ from typing import Union, List, Dict, Any, Optional
 
 
 class PathOutOfBoundsError(Exception):
-    """استثناء عند محاولة الوصول إلى مسار خارج المجلد الجذر المسموح به."""
+    """استثناء عند محاولة الوصول إلى مسار خارج المجلد الجذر المسموح به أو عبر روابط غير آمنة."""
+    pass
+
+
+class ProtectedPathError(Exception):
+    """استثناء عند محاولة التلاعب بالمسارات النظامية المحمية (الجذر، السلة، سجل التراجع)."""
     pass
 
 
@@ -17,15 +22,15 @@ class PermanentDeleteForbidden(Exception):
 
 
 class FileManager:
-    """إدارة آمنة للملفات محصورة داخل مجلد جذر مسموح مع سجل تراجع كامل."""
+    """إدارة آمنة للملفات محصورة داخل مجلد جذر مسموح مع سجل تراجع محمي ومنع قاطع للحذف النهائي."""
 
     def __init__(self, allowed_root: Union[str, Path]):
         self.allowed_root = Path(allowed_root).resolve()
         if not self.allowed_root.exists():
             self.allowed_root.mkdir(parents=True, exist_ok=True)
-        self.trash_dir = self.allowed_root / ".trash"
+        self.trash_dir = (self.allowed_root / ".trash").resolve()
         self.trash_dir.mkdir(parents=True, exist_ok=True)
-        self.journal_path = self.allowed_root / ".undo_journal.json"
+        self.journal_path = (self.allowed_root / ".undo_journal.json").resolve()
         self.journal: List[Dict[str, Any]] = self._load_journal()
 
     def _load_journal(self) -> List[Dict[str, Any]]:
@@ -37,35 +42,55 @@ class FileManager:
         return []
 
     def _save_journal(self):
-        try:
-            self.journal_path.write_text(
-                json.dumps(self.journal, ensure_ascii=False, indent=2),
-                encoding="utf-8"
-            )
-        except Exception:
-            pass
+        """حفظ سجل التراجع في JSON مع رفع استثناء عند الفشل لضمان عدم ضياع التوثيق (R11)."""
+        data = json.dumps(self.journal, ensure_ascii=False, indent=2)
+        self.journal_path.write_text(data, encoding="utf-8")
 
-    def validate_path(self, path: Union[str, Path]) -> Path:
-        """التحقق من أن المسار يقع تماماً داخل المجلد الجذر المسموح به."""
+    def validate_path(self, path: Union[str, Path], allow_trash_internal: bool = False) -> Path:
+        """التحقق الأمني الصارم من المسار (R7 و R8):
+
+        - داخل الجذر المسموح.
+        - فحص الروابط الرمزية (symlinks) للتأكد من عدم الإشارة لخارج الجذر.
+        - رفض استهداف الجذر نفسه أو ملف السجل أو مجلد السلة مباشرة.
+        """
         p = Path(path)
+        # تتبع وفحص الروابط الرمزية قبل أو أثناء الحل
         if not p.is_absolute():
-            resolved = (self.allowed_root / p).resolve()
+            unresolved = self.allowed_root / p
         else:
-            resolved = p.resolve()
+            unresolved = p
 
-        # التأكد من أن المسار داخل الجذر
+        resolved = unresolved.resolve()
+
+        # فحص الخروج من الجذر المسموح
         try:
             resolved.relative_to(self.allowed_root)
         except ValueError:
-            raise PathOutOfBoundsError(f"المسار '{path}' خارج المجلد الجذر المسموح به '{self.allowed_root}'.")
+            raise PathOutOfBoundsError(f"المسار '{path}' يقع خارج المجلد الجذر المسموح به '{self.allowed_root}'.")
 
-        # فحص الروابط الرمزية (symlinks) للتأكد من عدم الإشارة لخارج الجذر
-        if resolved.is_symlink():
-            target = resolved.resolve()
-            try:
-                target.relative_to(self.allowed_root)
-            except ValueError:
-                raise PathOutOfBoundsError(f"الرابط الرمزي '{path}' يشير إلى مسار خارج الجذر.")
+        # فحص إذا كان هناك رابط رمزي في المسار يشير إلى خارج الجذر
+        curr = unresolved
+        while curr != self.allowed_root and curr != curr.parent:
+            if curr.is_symlink():
+                target = curr.resolve()
+                try:
+                    target.relative_to(self.allowed_root)
+                except ValueError:
+                    raise PathOutOfBoundsError(f"الرابط الرمزي '{curr}' يشير إلى هدف خارج الجذر: '{target}'.")
+            curr = curr.parent
+
+        # R7: حماية المسارات الخاصة (الجذر، السجل، السلة)
+        if resolved == self.allowed_root:
+            raise ProtectedPathError("لا يمكن استهداف المجلد الجذر نفسه في العمليات.")
+
+        if resolved == self.journal_path:
+            raise ProtectedPathError("لا يمكن استهداف ملف سجل التراجع المحمي مباشرة.")
+
+        if resolved == self.trash_dir and not allow_trash_internal:
+            raise ProtectedPathError("لا يمكن استهداف مجلد سلة المحذوفات .trash مباشرة.")
+
+        if self.trash_dir in resolved.parents and not allow_trash_internal:
+            raise ProtectedPathError("المسار يقع داخل سلة المحذوفات .trash المحمية.")
 
         return resolved
 
@@ -116,12 +141,18 @@ class FileManager:
         return final_dest
 
     def copy(self, src: Union[str, Path], dest: Union[str, Path]) -> Path:
-        """نسخ ملف مع تجنب التعارض وتسجيل العملية للتراجع."""
+        """نسخ ملف أو مجلد مع منع نسخ المجلد إلى داخل نفسه (R12) وتسجيل العملية."""
         source = self.validate_path(src)
         if not source.exists():
             raise FileNotFoundError(f"الملف المصدر غير موجود: {source}")
 
         destination = self.validate_path(dest)
+
+        # R12: منع نسخ مجلد إلى داخل نفسه أو إلى مجلد فرعي منه
+        if source.is_dir():
+            if destination == source or source in destination.parents:
+                raise ValueError(f"لا يمكن نسخ المجلد '{source}' إلى داخل نفسه أو مجلد فرعي منه '{destination}'.")
+
         destination.parent.mkdir(parents=True, exist_ok=True)
         final_dest = self._get_unique_path(destination)
 
@@ -140,7 +171,14 @@ class FileManager:
         return final_dest
 
     def rename(self, src: Union[str, Path], new_name: str) -> Path:
-        """إعادة تسمية ملف أو مجلد داخل نفس المجلد مع تجنب التعارض."""
+        """إعادة تسمية ملف أو مجلد مع رفض أي فواصل مسار أو .. (R12)."""
+        if not isinstance(new_name, str) or not new_name.strip():
+            raise ValueError("يجب تحديد اسم جديد صالح.")
+
+        # R12: رفض أي فواصل مسار أو مسارات نسبية تحوّل التسمية إلى نقل
+        if "/" in new_name or "\\" in new_name or ".." in new_name or new_name in (".", ".."):
+            raise ValueError(f"الاسم الجديد '{new_name}' غير صالح ويجب ألا يحتوي على فواصل مسارات أو '..'.")
+
         source = self.validate_path(src)
         if not source.exists():
             raise FileNotFoundError(f"الملف المصدر غير موجود: {source}")
@@ -181,48 +219,59 @@ class FileManager:
         raise PermanentDeleteForbidden("الحذف النهائي محظور نهائياً بموجب قواعد الأمان. استخدم دالة delete للنقل إلى سلة المحذوفات.")
 
     def undo_last(self) -> bool:
-        """التراجع عن آخر عملية مسجلة في السجل."""
+        """التراجع عن آخر عملية مع التحقق الأمني من المسارات (R8)، وعدم الحذف النهائي (R9)، وعدم فقدان السجل عند الفشل (R10)."""
         if not self.journal:
             return False
 
-        op = self.journal.pop()
+        # R10: نقرأ العملية من نهاية السجل دون حذفها مسبقاً
+        op = self.journal[-1]
         action = op.get("action")
 
         try:
             if action in ("move", "rename"):
-                src = Path(op["src"])
-                dest = Path(op["dest"])
+                # R8: إعادة التحقق من المسارات عبر validate_path
+                src = self.validate_path(op["src"])
+                dest = self.validate_path(op["dest"])
                 if dest.exists():
                     src.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(dest), str(src))
+                    # R10: عدم الكتابة فوق ملف موجود بالتراجع
+                    final_src = self._get_unique_path(src)
+                    shutil.move(str(dest), str(final_src))
 
             elif action == "copy":
-                dest = Path(op["dest"])
+                # R9: تراجع النسخ ينقل الناتج إلى سلة المحذوفات بدل حذفه نهائياً
+                dest = self.validate_path(op["dest"])
                 if dest.exists():
-                    if op.get("is_dir"):
-                        shutil.rmtree(str(dest))
-                    else:
-                        dest.unlink()
+                    dest_trash = self.trash_dir / dest.name
+                    final_trash = self._get_unique_path(dest_trash)
+                    shutil.move(str(dest), str(final_trash))
 
             elif action == "create_dir":
-                p = Path(op["path"])
+                p = self.validate_path(op["path"])
                 if p.exists() and p.is_dir():
-                    try:
+                    # إن كان المجلد يحتوي على ملفات، يُنقل للسلة لحماية الملفات
+                    if any(p.iterdir()):
+                        p_trash = self.trash_dir / p.name
+                        shutil.move(str(p), str(self._get_unique_path(p_trash)))
+                    else:
                         p.rmdir()
-                    except OSError:
-                        pass
 
             elif action == "delete":
-                orig = Path(op["original_path"])
-                trash = Path(op["trash_path"])
+                # R8: التحقق من المسارات مع السماح الداخلي بالسلة
+                orig = self.validate_path(op["original_path"])
+                trash = self.validate_path(op["trash_path"], allow_trash_internal=True)
                 if trash.exists():
                     orig.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(trash), str(orig))
+                    final_orig = self._get_unique_path(orig)
+                    shutil.move(str(trash), str(final_orig))
 
+            # R10: نحذف العملية من السجل ونحفظ فقط بعد نجاح التراجع الفعلي
+            self.journal.pop()
             self._save_journal()
             return True
-        except Exception:
-            self._save_journal()
+
+        except Exception as err:
+            # R10: في حال حدوث أي خطأ، تبقى العملية في السجل ولا تضيع
             return False
 
     def undo_all(self) -> int:

@@ -1,10 +1,14 @@
-"""أداة إدارة حزم winget المقتصرة على العرض (list) والتحديث (upgrade) فقط مع دعم المحاكاة للاختبارات."""
+"""أداة إدارة حزم winget المقتصرة على العرض (list) والتحديث (upgrade) فقط مع فحص دقيق للمدخلات."""
+import re
 import subprocess
 from typing import Callable, List, Optional, Tuple
 
+PACKAGE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+QUERY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+\- ]*$")
+
 
 class WingetTool:
-    """إدارة برامج ويندوز عبر winget مع حصر العمليات في list وupgrade فقط ودعم دالة تشغيل قابلة للاستبدال."""
+    """إدارة برامج ويندوز عبر winget مع حصر العمليات في list وupgrade وفحص الأنماط لمنع تمرير خيارات عشوائية."""
 
     def __init__(self, runner: Optional[Callable[[List[str]], Tuple[int, str, str]]] = None):
         self.runner = runner or self._default_runner
@@ -24,23 +28,23 @@ class WingetTool:
         return result.returncode, result.stdout, result.stderr
 
     def list_packages(self, query: Optional[str] = None) -> Tuple[int, str, str]:
-        """عرض البرامج المثبتة أو البحث عن برنامج محدد."""
+        """عرض البرامج المثبتة أو البحث عن برنامج محدد بنمط آمن يمنع الخيارات."""
         cmd = ["winget", "list"]
-        if query:
-            # تنظيف الاستعلام للتأكد من خلوه من الأحرف الخطرة
+        if query is not None:
             clean_query = query.strip()
-            if any(c in clean_query for c in {"&", "|", ">", "<", ";", "`", "$"}):
-                raise ValueError("استعلام winget يحتوي على رموز محظورة.")
-            cmd.extend(["-q", clean_query])
+            if clean_query:
+                if not QUERY_PATTERN.match(clean_query) or clean_query.startswith("-"):
+                    raise ValueError(f"استعلام winget غير صالح أو يبدأ بشرطة: '{query}'")
+                cmd.extend(["-q", clean_query])
         return self.runner(cmd)
 
     def upgrade_package(self, package_id: str) -> Tuple[int, str, str]:
-        """تحديث برنامج محدد عبر معرف الحزمة (package_id)."""
-        clean_id = package_id.strip()
-        if not clean_id:
+        """تحديث برنامج محدد عبر معرف الحزمة (package_id) بنمط صريح يمنع الخيارات."""
+        if not package_id or not isinstance(package_id, str):
             raise ValueError("معرّف الحزمة مطلوب لتحديث البرنامج.")
-        if any(c in clean_id for c in {"&", "|", ">", "<", ";", "`", "$", " "}):
-            raise ValueError("معرّف الحزمة يحتوي على رموز أو مسافات غير صالحة.")
+        clean_id = package_id.strip()
+        if not PACKAGE_ID_PATTERN.match(clean_id) or clean_id.startswith("-"):
+            raise ValueError(f"معرّف الحزمة غير صالح أو يبدأ بشرطة: '{package_id}'")
 
         cmd = ["winget", "upgrade", "--id", clean_id, "--accept-source-agreements", "--accept-package-agreements"]
         return self.runner(cmd)
