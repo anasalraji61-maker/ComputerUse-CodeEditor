@@ -17,3 +17,5 @@ tools/.last_tested
 .vscode/
 .idea/
 Thumbs.db
+tools/sync.log
+tools/.last_tested
