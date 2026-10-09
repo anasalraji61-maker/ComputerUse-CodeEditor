@@ -1,0 +1,19 @@
+# أسرار — لا ترفع أبدا
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+# بايثون
+__pycache__/
+*.pyc
+.venv/
+venv/
+# محلي
+tools/sync.log
+tools/.last_tested
+*.log
+.vscode/
+.idea/
+Thumbs.db
