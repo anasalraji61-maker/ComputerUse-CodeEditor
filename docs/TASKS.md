@@ -3,18 +3,25 @@
 الحالة: TODO / DOING / DONE. كل مهمة تنتهي بشروط قبول مقيسة. لا تبدأ مهمة قبل إنهاء السابقة ومعالجة ملاحظات REVIEW.md.
 
 ## T0 — تهيئة المستودع
-الحالة: بانتظار TEST_RESULTS
+الحالة: DONE
 1. تم التأكد من `.gitignore` و`.env.example` و`requirements.txt` و`README.md` وخلو المشروع من أي أسرار أو بيانات شخصية.
 2. تم إنشاء هيكل `assistant/` (`assistant/__init__.py`) و`assistant/tests/` (`assistant/tests/__init__.py`).
 3. تم إضافة اختبار الدخان `assistant/tests/test_smoke.py`.
 - ما فُعل: تهيئة هيكل الحزمة والملفات الأساسية واختبار الدخان.
 - اسم ملف الاختبار: `assistant/tests/test_smoke.py`
 - أمر الاختبار: `python tools/run_tests.py`
+- النتيجة: مكتمل بحسب نتائج الفحص.
 
 ## T1 — هيكل الحزمة والمزوّد الوهمي
-الحالة: TODO
-إنشاء `assistant/` بالهيكل في `SPEC_PHASE1.md`، و`ModelProvider` مع `FakeProvider` حتمي (يعيد ردوداً مبرمجة مسبقاً).
-**القبول:** استيراد الحزمة بلا أخطاء؛ اختبارات للواجهة الموحّدة والمزوّد الوهمي.
+الحالة: بانتظار TEST_RESULTS
+- تم إنشاء الواجهة الموحدة `ModelProvider` في `assistant/models/base.py`.
+- تم إنشاء المزوّد الوهمي الحتمي `FakeProvider` في `assistant/models/fake.py`.
+- تم إعداد حزمة النماذج `assistant/models/__init__.py`.
+- تم كتابة ملف الاختبار `assistant/tests/test_models.py`.
+- ما فُعل: بناء هيكل النماذج وتنفيذ المزود الوهمي واختباراته.
+- اسم ملف الاختبار: `assistant/tests/test_models.py`
+- أمر الاختبار: `python tools/run_tests.py`
+- القبول: استيراد الحزمة بلا أخطاء، واجتياز اختبارات المزود الوهمي في `docs/TEST_RESULTS.md`.
 
 ## T2 — طبقة الأدوات مع سجل التراجع
 الحالة: TODO
