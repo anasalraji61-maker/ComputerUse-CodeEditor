@@ -3,12 +3,13 @@
 الحالة: TODO / DOING / DONE. كل مهمة تنتهي بشروط قبول مقيسة. لا تبدأ مهمة قبل إنهاء السابقة ومعالجة ملاحظات REVIEW.md.
 
 ## T0 — تهيئة المستودع
-الحالة: TODO
-0. **أولاً:** احذف أي ملفات ويب/Node ولّدها AI Studio (`package.json`, `tsconfig.json`, `vite.config.ts`, `index.html`, `server.ts`, `metadata.json`, مجلد `src/`). المشروع بايثون فقط (RULES.md بند 7).
-1. تأكد أن `.gitignore` و`.env.example` و`requirements.txt` و`README.md` موجودة وصحيحة؛ ولا يحتوي أي ملف على مفاتيح أو بيانات شخصية (المستودع **عام**).
-2. أنشئ هيكل `assistant/` (ملفات `__init__.py` فارغة) و`assistant/tests/`.
-3. أضف اختباراً بسيطاً `assistant/tests/test_smoke.py` يتحقق أن الحزمة تُستورد.
-**القبول:** يظهر `test_smoke.py` بحالة PASS في `docs/TEST_RESULTS.md`.
+الحالة: بانتظار TEST_RESULTS
+1. تم التأكد من `.gitignore` و`.env.example` و`requirements.txt` و`README.md` وخلو المشروع من أي أسرار أو بيانات شخصية.
+2. تم إنشاء هيكل `assistant/` (`assistant/__init__.py`) و`assistant/tests/` (`assistant/tests/__init__.py`).
+3. تم إضافة اختبار الدخان `assistant/tests/test_smoke.py`.
+- ما فُعل: تهيئة هيكل الحزمة والملفات الأساسية واختبار الدخان.
+- اسم ملف الاختبار: `assistant/tests/test_smoke.py`
+- أمر الاختبار: `python tools/run_tests.py`
 
 ## T1 — هيكل الحزمة والمزوّد الوهمي
 الحالة: TODO
