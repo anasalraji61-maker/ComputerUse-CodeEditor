@@ -3,16 +3,10 @@ import json
 from pathlib import Path
 from typing import Tuple, Dict, Any, Optional
 
-from assistant.planner import Planner, PlanStep
-from assistant.executor import Executor
-from assistant.verifier import Verifier
+from assistant.runner import TaskRunner
 from assistant.reporter import ExecutionReport
-from assistant.safety import SafetyGuard, KillSwitch
-from assistant.budget import BudgetTracker
+from assistant.safety import KillSwitch
 from assistant.ledger import SQLiteLedger
-from assistant.tools.files import FileManager
-from assistant.tools.shell import ShellTool
-from assistant.tools.winget import WingetTool
 from assistant.models.fake import FakeProvider
 
 
@@ -26,80 +20,21 @@ def run_benchmark_pipeline(
     user_approved: bool = False,
     mock_winget_runner: Optional[Any] = None,
 ) -> ExecutionReport:
-    """تشغيل دورة العمل الكاملة: التخطيط ← التنفيذ ← التدقيق المستقل ← التقرير وتحديث الدفتر."""
-    ks = kill_switch or KillSwitch()
-    safety = SafetyGuard(kill_switch=ks)
-    budget = BudgetTracker(max_steps=12, max_tokens=4000, max_points=10)
-    fm = FileManager(allowed_root=allowed_root)
-    shell = ShellTool()
-    winget = WingetTool(runner=mock_winget_runner) if mock_winget_runner else WingetTool()
+    """غلاف رفيع حول TaskRunner (R21): المنسّق الحقيقي في assistant/runner.py.
 
-    planner = Planner(provider=provider)
-    executor = Executor(
-        file_manager=fm,
-        safety_guard=safety,
-        budget_tracker=budget,
-        kill_switch=ks,
-        shell_tool=shell,
-        winget_tool=winget,
-        user_approved=user_approved,
+    user_approved هنا يمثّل مُوافِقاً آلياً للاختبارات فقط؛ في التطبيق الفعلي تُسأل الواجهة لكل خطوة.
+    """
+    approver = (lambda step: True) if user_approved else None
+    runner = TaskRunner(
+        allowed_root=allowed_root,
+        provider=provider,
+        ledger=ledger,
+        kill_switch=kill_switch,
+        approver=approver,
+        winget_runner=mock_winget_runner,
+        max_steps=12,
     )
-    verifier = Verifier(allowed_root=allowed_root)
-
-    # 1. تقدير الكلفة وتسجيل بدء المهمة في الدفتر
-    est_points = ledger.estimate_cost(objective, steps_count=4)
-    ledger.record_task_start(task_id, objective, est_points)
-
-    plan_steps = planner.plan(objective)
-    executor_evidence = []
-    execution_failed = False
-    failure_msg = None
-
-    # 2. التنفيذ خطوة بخطوة مع مراقبة الأمان والميزانية والإيقاف
-    try:
-        for step in plan_steps:
-            ks.check()
-            info = executor.execute_step(step)
-            executor_evidence.append(info)
-            if not info.get("success"):
-                execution_failed = True
-                failure_msg = f"فشل الخطوة {step.step_id}"
-                break
-    except Exception as exc:
-        execution_failed = True
-        failure_msg = str(exc)
-
-    # 3. التدقيق المستقل على القرص
-    if not execution_failed:
-        is_verified, verified_evidence, verifier_errors = verifier.verify_plan(plan_steps, executor_evidence)
-    else:
-        is_verified = False
-        verified_evidence = executor_evidence
-        verifier_errors = [failure_msg or "انقطع التنفيذ قبل الاكتمال"]
-
-    final_success = (not execution_failed) and is_verified
-
-    # 4. تحديث الدفتر
-    actual_charge = budget.current_points if final_success else 0
-    if final_success:
-        ledger.record_task_success(task_id, charged_points=actual_charge)
-    else:
-        ledger.record_task_failure(task_id, reason=str(verifier_errors), is_platform_failure=False)
-
-    # 5. توليد التقرير العربي الشامل بالأدلة وطريقة التراجع
-    report = ExecutionReport(
-        task_id=task_id,
-        objective=objective,
-        success=final_success,
-        executed_steps=executor.executed_log,
-        evidence=verified_evidence,
-        failures=verifier_errors if not final_success else [],
-        points_charged=actual_charge,
-        undo_available=True,
-        undo_journal_path=str(fm.journal_path),
-    )
-
-    return report
+    return runner.run(task_id, objective)
 
 
 # --- مولدات الاستجابات المبرمجة للمهام الخمس ---

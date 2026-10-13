@@ -16,6 +16,7 @@ class ExecutionReport:
         points_charged: int = 0,
         undo_available: bool = True,
         undo_journal_path: Optional[str] = None,
+        approvals: Optional[List[str]] = None,
     ):
         self.task_id = task_id
         self.objective = objective
@@ -26,6 +27,7 @@ class ExecutionReport:
         self.points_charged = points_charged
         self.undo_available = undo_available
         self.undo_journal_path = undo_journal_path
+        self.approvals = approvals or []
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -37,6 +39,7 @@ class ExecutionReport:
             "failures": self.failures,
             "points_charged": self.points_charged,
             "undo_available": self.undo_available,
+            "approvals": self.approvals,
         }
 
     def render_arabic_text(self) -> str:
@@ -73,6 +76,12 @@ class ExecutionReport:
                 lines.append(f"- ⚠️ {fail}")
         else:
             lines.append("- لا يوجد أي فشل.")
+
+        if self.approvals:
+            lines.append("")
+            lines.append("## قرارات الموافقة:")
+            for a in self.approvals:
+                lines.append(f"- {a}")
 
         lines.append("")
         lines.append(f"## الكلفة بالنقاط: {self.points_charged} نقطة.")

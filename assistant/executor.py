@@ -1,12 +1,16 @@
-"""وحدة المنفّذ (Executor) — تنفيذ الخطوات حصراً عبر بوابات الأمان والميزانية وزر الإيقاف."""
-from typing import Dict, Any, List, Optional
+"""وحدة المنفّذ (Executor) — تنفيذ الخطوات حصراً عبر بوابات الأمان والموافقة والميزانية وزر الإيقاف."""
 from pathlib import Path
+from typing import Callable, Dict, Any, List, Optional
+
 from assistant.planner import PlanStep
-from assistant.safety import SafetyGuard, KillSwitch
+from assistant.safety import SafetyGuard, SafetyLevel, KillSwitch
 from assistant.budget import BudgetTracker
 from assistant.tools.files import FileManager
 from assistant.tools.shell import ShellTool
 from assistant.tools.winget import WingetTool
+
+# مُوافِق لكل خطوة: يستلم الخطوة ويعيد True/False. الافتراضي: الرفض (R16).
+Approver = Callable[[PlanStep], bool]
 
 
 class ExecutionInterruptedError(Exception):
@@ -15,7 +19,7 @@ class ExecutionInterruptedError(Exception):
 
 
 class Executor:
-    """المنفّذ الصارم الذي لا يستدعي أي أداة إلا بالمرور الإلزامي عبر Safety ثم Budget."""
+    """المنفّذ الصارم: لا تُستدعى أي أداة إلا بعد Safety ثم موافقة الخطوة (إن لزم) ثم Budget."""
 
     def __init__(
         self,
@@ -25,7 +29,7 @@ class Executor:
         kill_switch: Optional[KillSwitch] = None,
         shell_tool: Optional[ShellTool] = None,
         winget_tool: Optional[WingetTool] = None,
-        user_approved: bool = False,
+        approver: Optional[Approver] = None,
     ):
         self.file_manager = file_manager
         self.safety_guard = safety_guard
@@ -33,71 +37,85 @@ class Executor:
         self.kill_switch = kill_switch or safety_guard.kill_switch
         self.shell_tool = shell_tool
         self.winget_tool = winget_tool
-        self.user_approved = user_approved
+        self.approver = approver  # None = رفض كل الإجراءات الخطرة
 
         self.executed_log: List[str] = []
         self.collected_evidence: List[Dict[str, Any]] = []
+        self.approval_log: List[str] = []
+
+    def _decide_approval(self, step: PlanStep) -> bool:
+        """طلب موافقة لهذه الخطوة تحديداً وتسجيل القرار."""
+        if self.approver is None:
+            decision = False
+        else:
+            decision = bool(self.approver(step))
+        self.approval_log.append(
+            f"الخطوة {step.step_id} ({step.action_type} → {step.target}): "
+            + ("تمت الموافقة" if decision else "رُفضت")
+        )
+        return decision
 
     def execute_step(self, step: PlanStep) -> Dict[str, Any]:
-        """تنفيذ خطوة واحدة مع التحقق الإلزامي من الأمان والميزانية وزر الإيقاف."""
-        # 1. فحص زر الإيقاف المشترك أولاً
+        """تنفيذ خطوة واحدة مع التحقق الإلزامي من الأمان والموافقة والميزانية وزر الإيقاف."""
         self.kill_switch.check()
 
-        # 2. فحص الأمان الصارم (يرفع ActionForbiddenError أو ApprovalRequiredError)
-        self.safety_guard.check_action(step.action_type, user_approved=self.user_approved)
+        level = self.safety_guard.classify_action(step.action_type)
+        approved = False
+        if level == SafetyLevel.DANGEROUS:
+            approved = self._decide_approval(step)
+        # يرفع ActionForbiddenError / ApprovalRequiredError / EmergencyStopTriggered
+        self.safety_guard.check_action(step.action_type, user_approved=approved)
 
-        # 3. فحص وخصم الميزانية (يرفع BudgetExceededError)
         self.budget_tracker.charge(steps=1, points=1)
-
-        # 4. فحص زر الإيقاف مجدداً قبل استدعاء الأداة
         self.kill_switch.check()
 
-        action = step.action_type.lower()
+        action = step.action_type.strip().lower()
         params = step.params
-        result_info: Dict[str, Any] = {"step_id": step.step_id, "action": action, "success": False}
+        info: Dict[str, Any] = {"step_id": step.step_id, "action": action, "success": False}
 
-        # تنفيذ الأداة المناسبة
-        if action == "create_dir":
+        if action == "inspect":
+            target = step.target.strip()
+            p = self.file_manager.allowed_root if target in (".", "./") else self.file_manager.validate_path(target)
+            info["exists"] = p.exists()
+            if not p.exists():
+                raise FileNotFoundError(f"العنصر المطلوب فحصه غير موجود: {p}")
+            info["kind"] = "dir" if p.is_dir() else "file"
+            info["size"] = p.stat().st_size if p.is_file() else None
+            info["entries"] = len(list(p.iterdir())) if p.is_dir() else None
+            info["path"] = str(p)
+            info["success"] = True
+            self.executed_log.append(f"فحص العنصر: {step.target}")
+
+        elif action == "create_dir":
             created = self.file_manager.create_dir(step.target)
-            result_info["success"] = True
-            result_info["path"] = str(created)
+            info.update(success=True, path=str(created))
             self.executed_log.append(f"تم إنشاء المجلد: {created}")
 
         elif action == "move":
-            dest = params.get("dest", "")
-            moved = self.file_manager.move(step.target, dest)
-            result_info["success"] = True
-            result_info["dest"] = str(moved)
+            moved = self.file_manager.move(step.target, params["dest"])
+            info.update(success=True, dest=str(moved))
             self.executed_log.append(f"تم نقل {step.target} إلى {moved}")
 
         elif action == "copy":
-            dest = params.get("dest", "")
-            copied = self.file_manager.copy(step.target, dest)
-            result_info["success"] = True
-            result_info["dest"] = str(copied)
+            copied = self.file_manager.copy(step.target, params["dest"])
+            info.update(success=True, dest=str(copied))
             self.executed_log.append(f"تم نسخ {step.target} إلى {copied}")
 
         elif action == "rename":
-            new_name = params.get("new_name", "")
-            renamed = self.file_manager.rename(step.target, new_name)
-            result_info["success"] = True
-            result_info["dest"] = str(renamed)
+            renamed = self.file_manager.rename(step.target, params["new_name"])
+            info.update(success=True, dest=str(renamed))
             self.executed_log.append(f"تمت إعادة تسمية {step.target} إلى {renamed.name}")
 
         elif action in ("delete", "trash"):
             deleted = self.file_manager.delete(step.target)
-            result_info["success"] = True
-            result_info["trash_path"] = str(deleted)
+            info.update(success=True, trash_path=str(deleted))
             self.executed_log.append(f"تم نقل {step.target} إلى سلة المحذوفات")
 
         elif action == "winget_upgrade":
             if not self.winget_tool:
                 raise RuntimeError("أداة winget غير مهيأة للمنفذ.")
             code, out, err = self.winget_tool.upgrade_package(step.target)
-            result_info["success"] = (code == 0)
-            result_info["exit_code"] = code
-            result_info["stdout"] = out
-            result_info["stderr"] = err
+            info.update(success=(code == 0), exit_code=code, stdout=out, stderr=err, package=step.target)
             self.executed_log.append(f"ترقية حزمة winget {step.target} (رمز الخروج: {code})")
 
         elif action == "run_command":
@@ -105,16 +123,11 @@ class Executor:
                 raise RuntimeError("أداة shell غير مهيأة للمنفذ.")
             cmd_list = params.get("cmd", [step.target])
             code, out, err = self.shell_tool.run(cmd_list)
-            result_info["success"] = (code == 0)
-            result_info["exit_code"] = code
-            result_info["stdout"] = out
-            result_info["stderr"] = err
+            info.update(success=(code == 0), exit_code=code, stdout=out, stderr=err, cmd=list(cmd_list))
             self.executed_log.append(f"تشغيل الأمر {cmd_list} (رمز الخروج: {code})")
 
-        else:
-            # عملية فحص عامة
-            result_info["success"] = True
-            self.executed_log.append(f"فحص العنصر: {step.target}")
+        else:  # لا يجب الوصول إليه: الجدول الصريح يمنع المجهول
+            raise ExecutionInterruptedError(f"لا يوجد منفّذ للإجراء '{action}'.")
 
-        self.collected_evidence.append(result_info)
-        return result_info
+        self.collected_evidence.append(info)
+        return info

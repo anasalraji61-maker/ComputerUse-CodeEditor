@@ -57,8 +57,37 @@ try:
         ledger.refund("task_001", points=2, reason="تعويض خطأ تجريبي")
         assert ledger.get_balance() == 15  # 18 - 5 + 2 = 15
 
+    # 7. لا تسريب اتصالات (سبب WinError 32): الملف قابل للحذف بعد الاستخدام، ولا ملفات مفتوحة على Linux
+    import os
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        dbp = pathlib.Path(tmp_dir) / "leak.db"
+        fd_dir = pathlib.Path("/proc/self/fd")
+        before = len(list(fd_dir.iterdir())) if fd_dir.exists() else None
+        lg = SQLiteLedger(db_path=dbp, initial_balance=10, spending_limit=10)
+        for i in range(25):
+            lg.get_balance(); lg.get_total_spent(); lg.can_afford(1)
+            lg.record_task_start(f"l{i}", "t", 0)
+            lg.record_task_success(f"l{i}", charged_points=0)
+        if before is not None:
+            assert len(list(fd_dir.iterdir())) <= before + 1, "اتصالات SQLite مفتوحة متسرّبة"
+        # تسجيل نتيجة مرتين لنفس المهمة مرفوض ولا يخصم مرتين
+        lg.record_task_start("dup", "t", 1)
+        lg.record_task_success("dup", charged_points=1)
+        bal = lg.get_balance()
+        try:
+            lg.record_task_success("dup", charged_points=1)
+            raise AssertionError("كان يجب رفض التسجيل المزدوج")
+        except ValueError:
+            pass
+        assert lg.get_balance() == bal
+        os.remove(dbp)
+
     print("PASS: test_ledger completed successfully")
     sys.exit(0)
-except Exception as exc:
-    print(f"FAIL: {exc}", file=sys.stderr)
+except SystemExit:
+    raise
+except BaseException as exc:
+    import traceback
+    traceback.print_exc()
+    print(f"FAIL: {exc!r}", file=sys.stderr)
     sys.exit(1)

@@ -1,9 +1,12 @@
 """أدوات الملفات الآمنة مع قيد المجلد الجذر وحماية المسارات وسجل التراجع ومنع الحذف النهائي."""
 import json
+import os
 import shutil
 import hashlib
 from pathlib import Path
 from typing import Union, List, Dict, Any, Optional
+
+from assistant.safety import KillSwitch, EmergencyStopTriggered
 
 
 class PathOutOfBoundsError(Exception):
@@ -24,7 +27,8 @@ class PermanentDeleteForbidden(Exception):
 class FileManager:
     """إدارة آمنة للملفات محصورة داخل مجلد جذر مسموح مع سجل تراجع محمي ومنع قاطع للحذف النهائي."""
 
-    def __init__(self, allowed_root: Union[str, Path]):
+    def __init__(self, allowed_root: Union[str, Path], kill_switch: Optional[KillSwitch] = None):
+        self.kill_switch = kill_switch
         self.allowed_root = Path(allowed_root).resolve()
         if not self.allowed_root.exists():
             self.allowed_root.mkdir(parents=True, exist_ok=True)
@@ -108,6 +112,38 @@ class FileManager:
                 return candidate
             counter += 1
 
+    def _check_stop(self):
+        if self.kill_switch is not None:
+            self.kill_switch.check()
+
+    def _copy_tree(self, source: Path, dest: Path):
+        """نسخ مجلد ملفاً ملفاً مع فحص زر الإيقاف (R23). عند الإيقاف يُنقل الناتج الجزئي إلى السلة."""
+        created_any = False
+        try:
+            dest.mkdir(parents=True, exist_ok=False)
+            created_any = True
+            for current, dirs, files in os.walk(str(source), followlinks=False):
+                self._check_stop()
+                cur = Path(current)
+                rel = cur.relative_to(source)
+                for d in dirs:
+                    if (cur / d).is_symlink():
+                        raise PathOutOfBoundsError(f"روابط رمزية داخل المجلد غير مدعومة: {cur / d}")
+                    (dest / rel / d).mkdir(parents=True, exist_ok=True)
+                for name in files:
+                    self._check_stop()
+                    f = cur / name
+                    if f.is_symlink():
+                        raise PathOutOfBoundsError(f"روابط رمزية داخل المجلد غير مدعومة: {f}")
+                    shutil.copy2(str(f), str(dest / rel / name))
+        except BaseException:
+            if created_any and dest.exists():
+                try:
+                    shutil.move(str(dest), str(self._get_unique_path(self.trash_dir / ("partial_" + dest.name))))
+                except Exception:
+                    pass
+            raise
+
     def create_dir(self, dir_path: Union[str, Path]) -> Path:
         """إنشاء مجلد داخل الجذر وتوثيقه في سجل التراجع مع التراجع إن فشل الحفظ."""
         p = self.validate_path(dir_path)
@@ -173,8 +209,9 @@ class FileManager:
         final_dest = self._get_unique_path(destination)
 
         if source.is_dir():
-            shutil.copytree(str(source), str(final_dest))
+            self._copy_tree(source, final_dest)
         else:
+            self._check_stop()
             shutil.copy2(str(source), str(final_dest))
 
         self.journal.append({

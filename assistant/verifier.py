@@ -1,112 +1,250 @@
-"""وحدة المدقّق المستقل (Verifier) — فحص الحالة الفعلية على القرص دون الوثوق بكلام المنفّذ."""
+"""وحدة المدقّق المستقل (Verifier) — لقطة قبل التنفيذ ومقارنة بعده على القرص دون الوثوق بكلام المنفّذ."""
 import hashlib
+import json
+import os
+import re
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
 from assistant.planner import PlanStep
-from assistant.tools.files import FileManager
+from assistant.safety import MUTATING_ACTIONS
+
+VersionProbe = Callable[[str], Tuple[int, str, str]]
+
+
+class PathEscapeError(Exception):
+    """مسار يقع خارج الجذر المسموح."""
+    pass
 
 
 class Verifier:
-    """المدقّق المستقل: لا يعتمد على كلام المنفّذ، بل يفحص القرص والحالة المادية بنفسه."""
+    """المدقّق المستقل: يحسب بنفسه ما يتوقعه من الخطة، ويقارن بالحالة الفعلية على القرص."""
 
-    def __init__(self, allowed_root: Path):
+    def __init__(self, allowed_root: Path, version_probe: Optional[VersionProbe] = None):
         self.allowed_root = Path(allowed_root).resolve()
+        self.trash_dir = self.allowed_root / ".trash"
+        # version_probe(package_id) -> (code, stdout, stderr)؛ بدونه لا يُقبل أي تدقيق لـ winget (فشل مغلق).
+        self.version_probe = version_probe
 
+    # ---------- أدوات مساعدة ----------
     def calculate_hash(self, file_path: Path) -> str:
-        """حساب بصمة SHA-256 للتأكد القاطع من المحتوى على القرص."""
         h = hashlib.sha256()
         with open(file_path, "rb") as f:
             while chunk := f.read(65536):
                 h.update(chunk)
         return h.hexdigest()
 
-    def verify_step_evidence(self, step: PlanStep, executor_info: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], Optional[str]]:
-        """التحقق المادي المستقل من نتيجة خطوة تنفيذية معينة."""
-        action = step.action_type.lower()
-        evidence: Dict[str, Any] = {"item": step.target, "action": action}
+    def confine(self, path: Any) -> Path:
+        """حلّ المسار والتأكد من وجوده داخل الجذر (R17)."""
+        if not isinstance(path, (str, Path)) or str(path).strip() == "":
+            raise PathEscapeError("مسار فارغ أو غير صالح.")
+        p = Path(path)
+        if not p.is_absolute():
+            p = self.allowed_root / p
+        resolved = p.resolve()
+        try:
+            resolved.relative_to(self.allowed_root)
+        except ValueError:
+            raise PathEscapeError(f"المسار '{path}' خارج الجذر المسموح.")
+        return resolved
 
-        if action == "create_dir":
-            p = self.allowed_root / step.target
-            if not p.exists() or not p.is_dir():
-                return False, evidence, f"المجلد المطلوب '{step.target}' غير موجود فعلياً على القرص."
-            evidence["type"] = "مجلد موجود"
-            evidence["value"] = str(p)
-            return True, evidence, None
+    def digest(self, path: Path) -> Optional[str]:
+        """بصمة SHA-256 لملف، أو بصمة شجرة لمجلد (أسماء + محتوى)."""
+        if not path.exists():
+            return None
+        if path.is_file():
+            return "F:" + self.calculate_hash(path)
+        h = hashlib.sha256()
+        for current, dirs, files in os.walk(str(path), followlinks=False):
+            dirs.sort()
+            cur = Path(current)
+            rel = cur.relative_to(path).as_posix()
+            h.update(("D|" + rel + "\n").encode("utf-8"))
+            for name in sorted(files):
+                f = cur / name
+                if f.is_symlink():
+                    h.update(("L|" + (rel + "/" + name) + "|" + os.readlink(str(f)) + "\n").encode("utf-8"))
+                else:
+                    h.update(("F|" + (rel + "/" + name) + "|" + self.calculate_hash(f) + "\n").encode("utf-8"))
+        return "T:" + h.hexdigest()
 
-        elif action in ("move", "copy", "rename"):
-            dest_str = executor_info.get("dest") or step.params.get("dest")
-            if not dest_str:
-                return False, evidence, f"لم يتم العثور على مسار الوجهة للخطوة {step.step_id}."
-            dest_path = Path(dest_str)
-            if not dest_path.is_absolute():
-                dest_path = self.allowed_root / dest_path
+    @staticmethod
+    def _is_unique_variant(expected: Path, actual: Path) -> bool:
+        """الاسم الفعلي يساوي المتوقع أو صيغته الفريدة 'name (n).ext'."""
+        if actual == expected:
+            return True
+        return (
+            actual.parent == expected.parent
+            and actual.suffix == expected.suffix
+            and re.fullmatch(re.escape(expected.stem) + r" \(\d+\)", actual.stem) is not None
+        )
 
-            if not dest_path.exists():
-                return False, evidence, f"الملف الوجهة '{dest_path}' غير موجود فعلياً على القرص."
+    # ---------- اللقطة قبل التنفيذ (R18) ----------
+    def snapshot(self, step: PlanStep) -> Dict[str, Any]:
+        snap: Dict[str, Any] = {"step_id": step.step_id, "action": step.action_type.lower()}
+        action = snap["action"]
+        if action in ("move", "copy", "rename", "delete", "trash", "create_dir", "inspect"):
+            try:
+                tp = self.confine(step.target if step.target not in (".", "./") else self.allowed_root)
+            except PathEscapeError as exc:
+                snap["invalid"] = str(exc)
+                return snap
+            snap["exists"] = tp.exists()
+            snap["kind"] = "dir" if tp.is_dir() else ("file" if tp.is_file() else None)
+            if action in ("move", "copy", "rename", "delete", "trash"):
+                snap["digest"] = self.digest(tp)
+        return snap
 
-            # التحقق من سلامة الحجم وبصمة الـ Hash إن تم تحديدها
-            expected_hash = step.params.get("expected_hash")
-            actual_hash = self.calculate_hash(dest_path) if dest_path.is_file() else "DIR"
-            if expected_hash and actual_hash != expected_hash:
-                return False, evidence, f"عدم تطابق البصمة للملف '{dest_path.name}': متوقع {expected_hash}، الفعلي {actual_hash}."
+    # ---------- التدقيق بعد التنفيذ ----------
+    def verify_step(
+        self, step: PlanStep, info: Optional[Dict[str, Any]], before: Optional[Dict[str, Any]]
+    ) -> Tuple[bool, Dict[str, Any], Optional[str]]:
+        action = step.action_type.strip().lower()
+        ev: Dict[str, Any] = {"item": step.target, "action": action}
 
-            evidence["type"] = "ملف موجود ومطابق"
-            evidence["value"] = f"SHA256: {actual_hash[:16]}... (الحجم: {dest_path.stat().st_size if dest_path.is_file() else 'مجلد'})"
-            return True, evidence, None
+        def fail(msg: str):
+            ev["type"] = "فشل التدقيق"
+            ev["value"] = msg
+            return False, ev, msg
 
-        elif action in ("delete", "trash"):
-            # التأكد من عدم وجود الملف في مساره الأصلي ووجوده في .trash
-            trash_str = executor_info.get("trash_path")
-            orig_path = self.allowed_root / step.target
-            if orig_path.exists():
-                return False, evidence, f"الملف '{orig_path}' ما زال موجوداً في مساره الأصلي ولم يُنقل للسلة."
-            if trash_str and not Path(trash_str).exists():
-                return False, evidence, f"الملف المحذوف غير موجود في سلة المحذوفات '{trash_str}'."
+        # R17: لا دليل تنفيذ = فشل
+        if not info or info.get("step_id") != step.step_id:
+            return fail(f"لا يوجد دليل تنفيذ للخطوة {step.step_id}؛ لا يُعتبر منفذاً.")
+        if not info.get("success"):
+            return fail(f"المنفّذ أبلغ عن عدم نجاح الخطوة {step.step_id}.")
+        if before is None or before.get("invalid"):
+            return fail(f"لا توجد لقطة صالحة قبل التنفيذ للخطوة {step.step_id}: {(before or {}).get('invalid', 'مفقودة')}")
 
-            evidence["type"] = "نقل آمن للسلة"
-            evidence["value"] = f"منقول إلى: {trash_str}"
-            return True, evidence, None
+        try:
+            if action == "inspect":
+                p = self.confine(step.target if step.target not in (".", "./") else self.allowed_root)
+                if not p.exists():
+                    return fail(f"العنصر '{step.target}' غير موجود فعلياً.")
+                ev["type"] = "فحص فعلي"
+                ev["value"] = ("مجلد" if p.is_dir() else f"ملف بحجم {p.stat().st_size} بايت") + " موجود"
+                return True, ev, None
 
-        elif action in ("winget_upgrade", "run_command"):
-            code = executor_info.get("exit_code", -1)
-            if code != 0:
-                return False, evidence, f"فشل الأمر: رمز الخروج {code} بدلاً من 0."
-            evidence["type"] = "رمز الخروج"
-            evidence["value"] = f"نجاح (0) — {executor_info.get('stdout', '')[:40]}"
-            return True, evidence, None
+            if action == "create_dir":
+                p = self.confine(step.target)
+                if not p.is_dir():
+                    return fail(f"المجلد المطلوب '{step.target}' غير موجود فعلياً على القرص.")
+                ev["type"] = "مجلد موجود"
+                ev["value"] = str(p)
+                return True, ev, None
 
-        # خطوة فحص عامة
-        evidence["type"] = "فحص عام"
-        evidence["value"] = "مكتمل"
-        return True, evidence, None
+            if action in ("move", "copy", "rename"):
+                return self._verify_transfer(step, action, info, before, ev, fail)
 
-    def verify_plan(self, steps: List[PlanStep], executor_evidence: List[Dict[str, Any]]) -> Tuple[bool, List[Dict[str, Any]], List[str]]:
-        """التدقيق الشامل للخطة بأكملها وإعادة قائمة الأدلة المادية وقائمة أسباب الفشل."""
-        all_passed = True
-        evidence_list: List[Dict[str, Any]] = []
-        failure_reasons: List[str] = []
+            if action in ("delete", "trash"):
+                src = self.confine(step.target)
+                if not before.get("exists"):
+                    return fail(f"العنصر '{step.target}' لم يكن موجوداً قبل الحذف.")
+                if src.exists():
+                    return fail(f"'{step.target}' ما زال موجوداً في مساره الأصلي ولم يُنقل للسلة.")
+                tp = self.confine(info.get("trash_path"))
+                if self.trash_dir not in tp.parents:
+                    return fail("مسار السلة المبلغ عنه ليس داخل .trash.")
+                if not tp.exists():
+                    return fail(f"العنصر المحذوف غير موجود في السلة '{tp}'.")
+                if not self._is_unique_variant(self.trash_dir / Path(step.target).name, tp):
+                    return fail("اسم العنصر في السلة لا يطابق اسم الأصل.")
+                if self.digest(tp) != before.get("digest"):
+                    return fail("محتوى العنصر في السلة لا يطابق محتواه قبل الحذف.")
+                ev["type"] = "نقل آمن للسلة"
+                ev["value"] = f"منقول إلى: {tp} (المحتوى مطابق للأصل)"
+                return True, ev, None
 
-        step_map = {ev.get("step_id"): ev for ev in executor_evidence}
+            if action == "winget_upgrade":
+                if info.get("exit_code") != 0:
+                    return fail(f"فشل الأمر: رمز الخروج {info.get('exit_code')} بدلاً من 0.")
+                if self.version_probe is None:
+                    return fail("لا توجد أداة تحقق مستقلة لـ winget؛ لا يمكن تأكيد النجاح.")
+                code, out, _err = self.version_probe(step.target)
+                if code != 0 or step.target.lower() not in (out or "").lower():
+                    return fail(f"الفحص المستقل لم يجد الحزمة '{step.target}' (رمز {code}).")
+                ev["type"] = "رمز الخروج + فحص مستقل"
+                ev["value"] = f"0 والحزمة ظاهرة في list: {step.target}"
+                return True, ev, None
 
-        for step in steps:
-            info = step_map.get(step.step_id, {})
-            passed, ev, error = self.verify_step_evidence(step, info)
-            if not passed:
-                all_passed = False
-                if error:
-                    failure_reasons.append(error)
-            evidence_list.append(ev)
+            if action == "run_command":
+                if info.get("exit_code") != 0:
+                    return fail(f"فشل الأمر: رمز الخروج {info.get('exit_code')} بدلاً من 0.")
+                expected = step.params.get("expected_output")
+                out = str(info.get("stdout", ""))
+                if isinstance(expected, str) and expected and expected not in out:
+                    return fail(f"مخرجات الأمر لا تحتوي النص المتوقع '{expected}'.")
+                ev["type"] = "رمز الخروج"
+                ev["value"] = f"نجاح (0) — {out.strip()[:60]}"
+                return True, ev, None
+        except PathEscapeError as exc:
+            return fail(str(exc))
 
-        # التحقق الإضافي: التأكد من وجود سجل التراجع على القرص وعدم تلفه
-        journal_path = self.allowed_root / ".undo_journal.json"
-        if not journal_path.exists():
-            all_passed = False
-            failure_reasons.append("سجل التراجع .undo_journal.json مفقود على القرص!")
+        return fail(f"لا يوجد تدقيق معرّف للإجراء '{action}'.")
+
+    def _verify_transfer(self, step, action, info, before, ev, fail):
+        if not before.get("exists"):
+            return fail(f"المصدر '{step.target}' لم يكن موجوداً قبل التنفيذ.")
+        src = self.confine(step.target)
+        actual = self.confine(info.get("dest"))
+
+        if action == "rename":
+            expected = src.parent / str(step.params.get("new_name", ""))
         else:
-            evidence_list.append({
-                "item": ".undo_journal.json",
-                "type": "سلامة سجل التراجع",
-                "value": "موجود وموثق على القرص",
-            })
+            expected = self.confine(step.params.get("dest"))
+        if not self._is_unique_variant(expected, actual):
+            return fail(f"الوجهة الفعلية '{actual.name}' لا تطابق الوجهة المخططة '{expected.name}'.")
+        if not actual.exists():
+            return fail(f"الوجهة '{actual}' غير موجودة فعلياً على القرص.")
 
-        return all_passed, evidence_list, failure_reasons
+        after_digest = self.digest(actual)
+        if after_digest != before.get("digest"):
+            return fail(f"محتوى الوجهة '{actual.name}' لا يطابق محتوى المصدر قبل التنفيذ.")
+
+        if action in ("move", "rename"):
+            if src.exists() and src != actual:
+                return fail(f"المصدر '{step.target}' ما زال موجوداً بعد {'النقل' if action == 'move' else 'إعادة التسمية'}.")
+        else:  # copy
+            if not src.exists() or self.digest(src) != before.get("digest"):
+                return fail(f"المصدر '{step.target}' تغيّر أو اختفى أثناء النسخ.")
+
+        expected_hash = step.params.get("expected_hash")
+        if expected_hash:
+            if not actual.is_file() or self.calculate_hash(actual) != expected_hash:
+                got = self.calculate_hash(actual) if actual.is_file() else "DIR"
+                return fail(f"عدم تطابق البصمة للملف '{actual.name}': متوقع {expected_hash}، الفعلي {got}.")
+
+        ev["type"] = "ملف موجود ومطابق"
+        ev["value"] = f"{after_digest[:18]}… (مطابق للأصل قبل التنفيذ)"
+        return True, ev, None
+
+    def verify_journal(
+        self,
+        plan_steps: List[PlanStep],
+        befores: Optional[Dict[int, Dict[str, Any]]] = None,
+        journal_start: int = 0,
+    ) -> Tuple[bool, Dict[str, Any], Optional[str]]:
+        """سجل التراجع مطلوب فقط إن غيّرت الخطة شيئاً فعلاً، ويجب أن يكون صالحاً ويحوي عمليات هذه المهمة."""
+        befores = befores or {}
+        need = 0
+        for s in plan_steps:
+            a = s.action_type.strip().lower()
+            if a not in MUTATING_ACTIONS:
+                continue
+            if a == "create_dir" and befores.get(s.step_id, {}).get("exists"):
+                continue  # مجلد موجود أصلاً: لا تغيير ولا إدخال في السجل
+            need += 1
+        ev = {"item": ".undo_journal.json", "type": "سلامة سجل التراجع"}
+        if need == 0:
+            ev["value"] = "غير مطلوب (خطة قراءة فقط)"
+            return True, ev, None
+        jp = self.allowed_root / ".undo_journal.json"
+        try:
+            data = json.loads(jp.read_text(encoding="utf-8"))
+        except Exception:
+            ev["value"] = "مفقود أو تالف"
+            return False, ev, "سجل التراجع .undo_journal.json مفقود أو تالف على القرص!"
+        if not isinstance(data, list) or len(data) - journal_start < need:
+            ev["value"] = "ناقص"
+            return False, ev, f"سجل التراجع لا يحوي عمليات هذه المهمة كاملة (المطلوب {need})."
+        ev["value"] = f"صالح ويحوي {len(data) - journal_start} عملية لهذه المهمة"
+        return True, ev, None

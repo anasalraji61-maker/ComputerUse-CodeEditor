@@ -1,5 +1,6 @@
 """دفتر النقاط المحلي (Ledger) عبر SQLite — رصيد محلي وتقدير الكلفة وسقف الإنفاق."""
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -28,10 +29,19 @@ class SQLiteLedger:
         self.spending_limit = spending_limit
         self._init_db(initial_balance)
 
-    def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path))
+    @contextmanager
+    def _get_connection(self):
+        """اتصال SQLite يُغلق دائماً (يمنع WinError 32 على ويندوز) مع commit/rollback تلقائي."""
+        conn = sqlite3.connect(str(self.db_path), timeout=10)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _init_db(self, initial_balance: int):
         with self._get_connection() as conn:
@@ -61,7 +71,6 @@ class SQLiteLedger:
                     "INSERT INTO account (id, balance, spending_limit, total_spent) VALUES (1, ?, ?, 0)",
                     (initial_balance, self.spending_limit),
                 )
-            conn.commit()
 
     def get_balance(self) -> int:
         """قراءة الرصيد الحالي."""
@@ -114,7 +123,6 @@ class SQLiteLedger:
                 """,
                 (task_id, task_type, estimated_points),
             )
-            conn.commit()
 
     def record_task_success(self, task_id: str, charged_points: int):
         """تسجيل نجاح المهمة وخصم النقاط الفعلية وتحديث سقف الإنفاق."""
@@ -132,15 +140,16 @@ class SQLiteLedger:
                 "UPDATE account SET balance = balance - ?, total_spent = total_spent + ? WHERE id = 1",
                 (charged_points, charged_points),
             )
-            conn.execute(
+            cur_upd = conn.execute(
                 """
                 UPDATE transactions
                 SET charged_points = ?, status = 'SUCCESS', reason = 'اكتملت بنجاح وتدقيق قاطع'
-                WHERE task_id = ?
+                WHERE task_id = ? AND status = 'STARTED'
                 """,
                 (charged_points, task_id),
             )
-            conn.commit()
+            if cur_upd.rowcount == 0:
+                raise ValueError(f"المهمة '{task_id}' غير مسجلة كبادئة أو سُجّلت نتيجتها من قبل.")
 
     def record_task_failure(
         self,
@@ -162,11 +171,10 @@ class SQLiteLedger:
                 """
                 UPDATE transactions
                 SET charged_points = ?, status = 'FAILED', reason = ?
-                WHERE task_id = ?
+                WHERE task_id = ? AND status = 'STARTED'
                 """,
                 (actual_charge, f"فشل: {reason}" + (" (خطأ منصة - لا خصم)" if is_platform_failure else ""), task_id),
             )
-            conn.commit()
 
     def refund(self, task_id: str, points: int, reason: str = "استرجاع نقاط"):
         """استرجاع نقاط مخصومة لحساب المستخدم."""
@@ -182,4 +190,3 @@ class SQLiteLedger:
                 """,
                 (task_id, -points, reason),
             )
-            conn.commit()

@@ -15,9 +15,10 @@ from .safety import SafetyGuard, SafetyLevel, KillSwitch
 from .budget import BudgetTracker, BudgetExceededError
 from .ledger import SQLiteLedger
 from .reporter import ExecutionReport
-from .planner import Planner, PlanStep
+from .planner import Planner, PlanStep, PlanParseError
 from .executor import Executor
 from .verifier import Verifier
+from .runner import TaskRunner
 from .models.base import ModelProvider
 from .models.fake import FakeProvider
 from .tools.files import FileManager
@@ -36,6 +37,8 @@ __all__ = [
     "SQLiteLedger",
     "ExecutionReport",
     "Planner",
+    "PlanParseError",
+    "TaskRunner",
     "PlanStep",
     "Executor",
     "Verifier",
