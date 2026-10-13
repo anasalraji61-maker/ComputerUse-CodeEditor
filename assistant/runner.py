@@ -65,7 +65,21 @@ class TaskRunner:
         return count
 
     # ---------- التنفيذ ----------
-    def run(self, task_id: str, objective: str) -> ExecutionReport:
+    def run(
+        self,
+        task_id: str,
+        objective: str,
+        plan: Optional[List[PlanStep]] = None,
+        progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> ExecutionReport:
+        """plan: خطة جاهزة (معروضة سابقاً على المستخدم) فلا يُعاد التخطيط؛ progress: ردّ نداء للواجهة."""
+        def emit(**ev):
+            if progress is not None:
+                try:
+                    progress(ev)
+                except Exception:
+                    pass  # عطب الواجهة لا يجب أن يكسر التنفيذ
+
         fm = self.file_manager
         journal_start = len(fm.journal)
         self._journal_starts[task_id] = journal_start
@@ -82,7 +96,6 @@ class TaskRunner:
         )
         evidence: List[Dict[str, Any]] = []
         failures: List[str] = []
-        plan: List[PlanStep] = []
         charge = 0
         started = False
         platform_failure = False
@@ -126,9 +139,12 @@ class TaskRunner:
             failures.append(f"لم تبدأ المهمة: {exc}")
             return finish(False)
 
-        # 2. التخطيط
+        # 2. التخطيط (يُتخطى إن وُفّرت خطة جاهزة)
         try:
-            plan = self.planner.plan(objective)
+            if plan is None:
+                plan = self.planner.plan(objective)
+            else:
+                plan = list(plan)
         except PlanParseError as exc:
             failures.append(f"خطة غير صالحة: {exc}")
             platform_failure = True  # خطأ نموذج لا ذنب للمستخدم فيه: لا خصم
@@ -155,13 +171,17 @@ class TaskRunner:
         # 4. تنفيذ وتدقيق مستقل لكل خطوة فور تنفيذها
         befores: Dict[int, Dict[str, Any]] = {}
         try:
-            for step in plan:
+            total = len(plan)
+            for idx, step in enumerate(plan, 1):
                 self.kill_switch.check()
+                emit(event="step_start", index=idx, total=total, step_id=step.step_id,
+                     action=step.action_type, target=step.target)
                 before = self.verifier.snapshot(step)
                 befores[step.step_id] = before
                 info = executor.execute_step(step)
                 ok, ev, err = self.verifier.verify_step(step, info, before)
                 evidence.append(ev)
+                emit(event="step_done", index=idx, total=total, step_id=step.step_id, ok=ok, detail=ev.get("value", ""))
                 if not ok:
                     failures.append(err or f"فشل تدقيق الخطوة {step.step_id}")
                     return finish(False)
