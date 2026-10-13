@@ -51,6 +51,25 @@ class TaskRunner:
         self.verifier = Verifier(allowed_root=self.allowed_root, version_probe=self.version_probe)
         self._journal_starts: Dict[str, int] = {}
 
+    def workspace_listing(self, max_entries: int = 60) -> str:
+        """قائمة مختصرة بمحتويات مجلد العمل (مستويان) لتزويد المخطط بالسياق."""
+        out: List[str] = []
+        try:
+            for p in sorted(self.allowed_root.rglob("*")):
+                rel = p.relative_to(self.allowed_root)
+                if rel.parts[0] in (".trash", ".undo_journal.json") or len(rel.parts) > 2:
+                    continue
+                out.append(rel.as_posix() + ("/" if p.is_dir() else ""))
+                if len(out) >= max_entries:
+                    out.append("… (القائمة مقتطعة)")
+                    break
+        except OSError:
+            pass
+        return "\n".join(out) if out else "(فارغ)"
+
+    def make_plan(self, objective: str) -> List[PlanStep]:
+        return self.planner.plan(objective, context=self.workspace_listing())
+
     # ---------- التراجع الخاص بالمهمة (R22) ----------
     def undo_task(self, task_id: str) -> int:
         """يتراجع فقط عن عمليات هذه المهمة (من نهاية السجل حتى بدايتها)."""
@@ -142,7 +161,7 @@ class TaskRunner:
         # 2. التخطيط (يُتخطى إن وُفّرت خطة جاهزة)
         try:
             if plan is None:
-                plan = self.planner.plan(objective)
+                plan = self.make_plan(objective)
             else:
                 plan = list(plan)
         except PlanParseError as exc:

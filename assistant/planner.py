@@ -78,6 +78,20 @@ def validate_step(item: Any, index: int) -> PlanStep:
     )
 
 
+PLANNER_SYSTEM = """أنت مخطط مهام سطح المكتب. أعد JSON فقط، بلا شرح ولا markdown، بالشكل:
+{"steps": [{"step_id": 1, "action_type": "...", "target": "...", "params": {...}, "acceptance_criteria": "شرط قابل للقياس"}]}
+كل المسارات نسبية إلى مجلد العمل (لا مسارات مطلقة ولا ".."). الإجراءات المسموحة وحقولها:
+- create_dir: target=المجلد
+- move: target=المصدر، params.dest=المسار الكامل الجديد (اسم الملف نفسه مع المجلد)
+- copy: target=المصدر، params.dest=المسار الكامل للنسخة؛ ويمكن params.expected_hash
+- rename: target=المصدر، params.new_name=الاسم الجديد فقط بلا مجلدات
+- delete: target=العنصر (ينتقل إلى سلة المحذوفات ولا يُحذف نهائياً)
+- inspect: target=العنصر (قراءة وفحص فقط)
+- winget_upgrade: target=معرّف الحزمة مثل Git.Git (خطر: يحتاج موافقة)
+- run_command: target=اسم الأمر، params.cmd=قائمة (مسموح فقط: whoami ، python --version ، where <اسم>) (خطر: يحتاج موافقة)
+لا تقترح أي حذف نهائي ولا تغيير إعدادات النظام ولا أي مالية. أنشئ المجلد قبل النقل إليه. استعمل أقل عدد ممكن من الخطوات."""
+
+
 class Planner:
     """المخطط المسؤول عن صياغة خطوات العمل مع شروط القبول القابلة للقياس."""
 
@@ -85,13 +99,11 @@ class Planner:
         self.provider = provider
         self.max_steps = max_steps
 
-    def plan(self, user_prompt: str) -> List[PlanStep]:
-        """توليد الخطة؛ أي رد غير صالح يرفع PlanParseError ولا تُنشأ خطوات بديلة."""
-        system_prompt = (
-            "أنت مخطط مهام سطح المكتب. أعد خطة عمل بصيغة JSON تحتوي على قائمة steps، "
-            "بحيث يكون لكل خطوة: step_id, action_type, target, params, acceptance_criteria. "
-            "الإجراءات المسموحة: " + ", ".join(sorted(k for k in ACTION_LEVELS)) + "."
-        )
+    def plan(self, user_prompt: str, context: str = "") -> List[PlanStep]:
+        """توليد الخطة؛ context = قائمة محتويات مجلد العمل تُضاف لمطالبة النظام. أي رد غير صالح يرفع PlanParseError."""
+        system_prompt = PLANNER_SYSTEM
+        if context:
+            system_prompt += "\n\nمحتويات مجلد العمل الحالي (نسبية):\n" + context
         data = _extract_json(self.provider.generate(user_prompt, system_prompt=system_prompt))
         raw_steps = data.get("steps") if isinstance(data, dict) else data
         if not isinstance(raw_steps, list) or not raw_steps:

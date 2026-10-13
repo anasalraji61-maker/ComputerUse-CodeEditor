@@ -12,15 +12,25 @@ def default_paths():
 
 
 def build_controller(provider=None):
+    """يعيد (المتحكم، ملاحظة للمستخدم). المزوّد من COS_PROVIDER؛ أي خلل في الإعداد يعود للوضع التجريبي مع تنبيه."""
     from assistant.ledger import SQLiteLedger
     from assistant.models.demo import DemoProvider
+    from assistant.models.factory import build_provider
+    from assistant.models.http_base import ProviderConfigError
     from assistant.ui.controller import AssistantController
+
+    notice = ""
+    if provider is None:
+        try:
+            provider, notice = build_provider()
+        except ProviderConfigError as exc:
+            provider, notice = DemoProvider(), f"تنبيه: {exc} — يعمل الآن بالوضع التجريبي."
 
     workspace, data_dir = default_paths()
     workspace.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
     ledger = SQLiteLedger(db_path=data_dir / "ledger.db", initial_balance=100, spending_limit=100)
-    return AssistantController(provider=provider or DemoProvider(), allowed_root=workspace, ledger=ledger)
+    return AssistantController(provider=provider, allowed_root=workspace, ledger=ledger), notice
 
 
 def main() -> int:
@@ -31,9 +41,11 @@ def main() -> int:
         return 1
     from assistant.ui.widget import AssistantWidget
 
-    controller = build_controller()
+    controller, notice = build_controller()
     root = tk.Tk()
-    AssistantWidget(root, controller)
+    widget = AssistantWidget(root, controller)
+    if notice:
+        widget.add_message(notice, "assistant")
     root.mainloop()
     return 0
 

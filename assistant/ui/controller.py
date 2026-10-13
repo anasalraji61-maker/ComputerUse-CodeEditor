@@ -132,7 +132,7 @@ class AssistantController:
     # ---------- 2) الخطة ----------
     def _make_plan(self, text: str):
         try:
-            plan = self.runner.planner.plan(text)
+            plan = self.runner.make_plan(text)
         except PlanParseError as exc:
             with self._lock:
                 self._go(IDLE)
@@ -187,6 +187,11 @@ class AssistantController:
                 self._go(IDLE)
         if event:
             self.emit(event[0], **event[1])
+            totals = getattr(self.provider, "totals", None)
+            if callable(totals):
+                t = totals()
+                if t.get("calls"):
+                    self.emit("status", text=f"استهلاك النموذج حتى الآن: ≈ {t['points']:.2f} نقطة ({t['usd']:.4f}$)")
 
     def _on_progress(self, ev: Dict[str, Any]):
         kind = ev.pop("event", "progress")
