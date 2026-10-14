@@ -145,7 +145,27 @@ class FileManager:
                 out[k] = str(self.allowed_root / Path(v[len(_REL):]))
         return out
 
+    def _adopt_tmp_journal(self) -> None:
+        """انقطاع (انهيار/قطع كهرباء) بعد تنفيذ العملية وقبل استبدال السجل: ملف .tmp الكامل الأحدث يحوي العملية؛ نتبنّاه."""
+        tmp = self.journal_path.with_name(self.journal_path.name + ".tmp")
+        try:
+            if not tmp.is_file():
+                return
+            data = json.loads(tmp.read_text(encoding="utf-8"))
+            ok = isinstance(data, list) and all(isinstance(e, dict) for e in data)
+            newer = (not self.journal_path.exists()) or tmp.stat().st_mtime_ns >= self.journal_path.stat().st_mtime_ns
+            if ok and newer:
+                os.replace(str(tmp), str(self.journal_path))
+            else:
+                tmp.unlink()
+        except Exception:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
     def _load_journal(self) -> List[Dict[str, Any]]:
+        self._adopt_tmp_journal()
         if self.journal_path.exists():
             text = None
             for attempt in range(4):  # قفل مؤقت من مضاد فيروسات/OneDrive لا يعني أن السجل تالف
@@ -176,10 +196,17 @@ class FileManager:
 
     def _save_journal(self):
         """حفظ سجل التراجع في JSON مع رفع استثناء عند الفشل لضمان عدم ضياع التوثيق (R11)."""
-        data = json.dumps([self._entry_to_disk(e) for e in self.journal], ensure_ascii=False, indent=2)
+        data = json.dumps([self._entry_to_disk(e) for e in self.journal], ensure_ascii=True, indent=2)  # ASCII: أسماء بمحارف شاذة (surrogate) لا تكسر الترميز
         tmp = self.journal_path.with_name(self.journal_path.name + ".tmp")
-        tmp.write_text(data, encoding="utf-8")
-        os.replace(str(tmp), str(self.journal_path))  # كتابة ذرّية: لا يبقى سجل نصف مكتوب
+        try:
+            tmp.write_text(data, encoding="utf-8")
+            os.replace(str(tmp), str(self.journal_path))  # كتابة ذرّية: لا يبقى سجل نصف مكتوب
+        except BaseException:
+            try:
+                tmp.unlink()  # مؤقت فاشل لا يبقى فيُتبنّى لاحقاً كسجل
+            except OSError:
+                pass
+            raise
 
     def validate_path(self, path: Union[str, Path], allow_trash_internal: bool = False) -> Path:
         """التحقق الأمني الصارم من المسار (R7 و R8):
@@ -252,6 +279,15 @@ class FileManager:
             for name in list(dirs) + list(files):
                 if name.lower() in _PROTECTED_NAMES or _ALIAS83.match(name):
                     raise ProtectedPathError(f"المجلد يحوي عنصراً محمياً '{name}' فلا يُنسخ/يُنقل/يُحذف عبر المساعد.")
+
+    def _scan_cloud(self, source: Path) -> None:
+        """قبل نسخ ملف/مجلد: هل فيه ملف سحابي كبير غير محمّل؟ (يُكتشف قبل أي تنفيذ لا في منتصف الخطة)"""
+        if source.is_file():
+            check_not_big_cloud_file(source)
+            return
+        for cur, _dirs, files in os.walk(str(source), followlinks=False):
+            for name in files:
+                check_not_big_cloud_file(Path(cur) / name)
 
     def _get_unique_path(self, target: Path) -> Path:
         """توليد مسار فريد في حال وجود تعارض لمنع الكتابة فوق ملفات موجودة."""
@@ -431,7 +467,7 @@ class FileManager:
             raise ValueError("يجب تحديد اسم جديد صالح.")
 
         # R12: رفض أي فواصل مسار أو مسارات نسبية تحوّل التسمية إلى نقل
-        if "/" in new_name or "\\" in new_name or ".." in new_name or new_name in (".", ".."):
+        if "/" in new_name or "\\" in new_name or new_name in (".", ".."):
             raise ValueError(f"الاسم الجديد '{new_name}' غير صالح ويجب ألا يحتوي على فواصل مسارات أو '..'.")
 
         source = self.validate_path(src)

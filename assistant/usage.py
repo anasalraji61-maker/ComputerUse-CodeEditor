@@ -47,8 +47,24 @@ class UsageMeter:
         if not (isinstance(usd, (int, float)) and math.isfinite(usd) and usd > 0):
             return
         with self._lock:
-            data = self._load()
             key = self._today().isoformat()
+            data = None
+            if self.path.exists():
+                for attempt in range(3):  # قفل لحظي: نعيد القراءة بدل أن نعدّه استهلاكاً كاملاً
+                    try:
+                        raw = json.loads(self.path.read_text(encoding="utf-8"))
+                        if isinstance(raw, dict):
+                            data = raw
+                            break
+                    except Exception:
+                        pass
+                    if attempt < 2:
+                        import time as _t
+                        _t.sleep(0.15)
+                if data is None:
+                    return  # غير قابل للقراءة: لا نكتب فوقه (exceeded() يبقى مغلقاً)
+            else:
+                data = {}
             data = {key: float(data.get(key, 0.0) or 0.0) + float(usd)}  # يُبقي اليوم الحالي فقط
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_name(self.path.name + ".tmp")

@@ -11,6 +11,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from assistant.models.base import ModelProvider, CONTEXT_MARKER
+from assistant.models.rules import parse_context
 from assistant.executor import ApprovalTimedOut
 from assistant.planner import PlanStep, PlanParseError, sanitize_display
 from assistant.runner import TaskRunner
@@ -55,6 +56,7 @@ class AssistantController:
         self.runner = self._make_runner(allowed_root)
         self.safety = SafetyGuard(self.kill_switch)
         self._wire_cancel(self.provider)
+        self._accounted = self._usd_total()  # أعلى إجمالي كلفة سُجّل في العدّاد من هذا المزوّد (ما قبل الآن ليس لهذه الجلسة)
 
     def _make_runner(self, root) -> TaskRunner:
         return TaskRunner(
@@ -65,7 +67,13 @@ class AssistantController:
     def _wire_cancel(self, prov):
         """يربط زر الإيقاف بإعادة محاولات HTTP في المزوّد (وفي مزوّدي الموجّه)."""
         check = lambda: self.kill_switch.is_triggered  # noqa: E731
-        for p in [prov] + list(getattr(prov, "providers", {}).values()):
+        inner = getattr(prov, "fallback", None)   # RuleFirstProvider(ModelRouter(...)) في الإنتاج
+        chain = [prov] + ([inner] if inner is not None else [])
+        provs = []
+        for q in chain:
+            provs.append(q)
+            provs.extend(getattr(q, "providers", {}).values())
+        for p in provs:
             if hasattr(p, "cancel_check") and p.cancel_check is None:
                 p.cancel_check = check
 
@@ -146,7 +154,7 @@ class AssistantController:
                 return self.emit("error", text="اكتب طلبك أولاً.")
             if len(text) > MAX_REQUEST_CHARS:
                 return self.emit("error", text=f"الطلب طويل جداً ({len(text)} حرفاً). اختصره إلى أقل من {MAX_REQUEST_CHARS} حرف.")
-            if self._cap_exceeded():
+            if self._cap_exceeded(text):
                 return self.emit("error", text=self.usage_meter.message())
             self.kill_switch.reset()
             self._gen += 1
@@ -157,10 +165,21 @@ class AssistantController:
         self.emit("status", text="أفهم طلبك…")
         self._spawn(self._clarify_then_plan, text, gen)
 
-    def _cap_exceeded(self) -> bool:
-        """سقف الإنفاق اليومي يخص المزوّدات المدفوعة فقط (التي تعدّ الكلفة)؛ الوضع المحلي المجاني لا يُحجب به."""
-        return (self.usage_meter is not None and callable(getattr(self.provider, "totals", None))
-                and self.usage_meter.exceeded())
+    def _cap_exceeded(self, text: str = "") -> bool:
+        """سقف الإنفاق اليومي يخص المزوّدات المدفوعة فقط؛ والطلب الذي تفهمه القواعد المحلية مجاني فلا يُحجب به."""
+        if self.usage_meter is None or not callable(getattr(self.provider, "totals", None)):
+            return False
+        if not self.usage_meter.exceeded():
+            return False
+        rules = getattr(self.provider, "rules", None)
+        if text and rules is not None:
+            try:
+                ctx = parse_context(CONTEXT_MARKER + "\n" + self.runner.workspace_listing())
+                if rules.understands(text, ctx):
+                    return False
+            except Exception:
+                pass
+        return True
 
     def _is_stale(self, gen: int) -> bool:
         """الإيقاف (أو طلب أحدث) رفع الجيل: ناتج هذا الخيط يُهمَل بلا أثر."""
@@ -175,8 +194,12 @@ class AssistantController:
             return 0.0
 
     def _record_spend(self, before: float):
-        """يسجّل كلفة استدعاءات النموذج (فهم/تخطيط) في عدّاد الاستهلاك اليومي حتى لو فشل الطلب."""
-        spent = max(0.0, self._usd_total() - before)
+        """يسجّل كلفة استدعاءات النموذج (فهم/تخطيط) في عدّاد الاستهلاك اليومي حتى لو فشل الطلب.
+        علامة مائية مقفلة: خيطان متداخلان (إيقاف ثم طلب جديد) لا يحسب أحدهما كلفة الآخر مرتين."""
+        total = self._usd_total()
+        with self._lock:
+            spent = max(0.0, total - self._accounted)
+            self._accounted = max(self._accounted, total)
         if spent > 0 and self.usage_meter is not None:
             try:
                 self.usage_meter.add(spent)
@@ -214,7 +237,7 @@ class AssistantController:
         with self._lock:
             if self.state != CLARIFYING:
                 return self.emit("error", text="لا توجد أسئلة بانتظار الإجابة.")
-            if self._cap_exceeded():
+            if self._cap_exceeded(self._request + " " + " ".join(a for a in answers if isinstance(a, str))):
                 self._plan = None
                 self._go(IDLE)
                 return self.emit("error", text=self.usage_meter.message())
@@ -242,13 +265,6 @@ class AssistantController:
         spent = self._record_spend(before)
         if spent > 0:
             self.emit("status", text=f"كلفة التخطيط: {spent:.4f}$")
-        with self._lock:  # فحص الإلغاء والنشر في كتلة واحدة: لا تظهر خطة بعد الإيقاف
-            if gen != self._gen:
-                return
-            self._plan = plan
-            self._request_full = text
-            self._task_id = "task_" + uuid.uuid4().hex[:10]
-            self._go(PLAN_READY)
         steps = [
             {"step_id": s.step_id, "action": s.action_type, "target": s.target,
              "level": self.safety.classify_action(s.action_type).value,
@@ -256,7 +272,15 @@ class AssistantController:
             for s in plan
         ]
         estimate = self._estimate(text, len(plan))
-        self.emit("plan", task_id=self._task_id, steps=steps, estimate=estimate, note=self.runner.last_plan_note)
+        note = self.runner.last_plan_note
+        with self._lock:  # الفحص والنشر والإعلان في كتلة واحدة: لا تظهر خطة (ولا يُفعَّل «ابدأ») بعد الإيقاف
+            if gen != self._gen:
+                return
+            self._plan = plan
+            self._request_full = text
+            self._task_id = "task_" + uuid.uuid4().hex[:10]
+            self._go(PLAN_READY)
+            self.emit("plan", task_id=self._task_id, steps=steps, estimate=estimate, note=note)
 
     def _estimate(self, objective: str, n_steps: int) -> Dict[str, Any]:
         """كلفة المهمة المتوقعة بالنقاط والرصيد الحالي وهل يكفيان، لتُعرض قبل الضغط على «ابدأ»."""
@@ -379,10 +403,10 @@ class AssistantController:
         n = self.runner.undo_task(task_id)
         notes = list(self.runner.file_manager.undo_notes)
         self.runner.file_manager.undo_notes.clear()
-        if n == 0:
-            return self.emit("error", text="لا يوجد ما يمكن التراجع عنه لهذه المهمة (تم سابقاً، أو اختفى ناتجها، أو توجد مهام أحدث).")
         if self.last_task_id == task_id:
             self.last_task_id = None  # تراجع ثانٍ يستهدف المهمة السابقة لا المهمة نفسها
+        if n == 0:
+            return self.emit("error", text="لا يوجد ما يمكن التراجع عنه لهذه المهمة (تم سابقاً، أو اختفى ناتجها، أو توجد مهام أحدث).")
         for note in notes:
             self.emit("status", text=sanitize_display(note, 300))
         self.emit("undo", count=n, task_id=task_id)

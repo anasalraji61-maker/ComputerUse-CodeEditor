@@ -200,7 +200,7 @@ class SQLiteLedger:
             upd = conn.execute(
                 "UPDATE transactions SET charged_points = ?, status = 'FAILED', reason = ? "
                 "WHERE task_id = ? AND status = 'STARTED'",
-                (actual_charge, f"فشل: {reason}" + (" (خطأ منصة - لا خصم)" if is_platform_failure else ""), task_id),
+                (actual_charge, (f"فشل: {reason}" + (" (خطأ منصة - لا خصم)" if is_platform_failure else "")).encode("utf-8", "replace").decode("utf-8"), task_id),
             )
             if upd.rowcount and actual_charge > 0:
                 conn.execute(

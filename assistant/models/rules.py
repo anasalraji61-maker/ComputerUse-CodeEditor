@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .base import ModelProvider, CONTEXT_MARKER
-from ..tools.files import _bad_component
+from ..tools.files import _bad_component, check_not_big_cloud_file, CloudFileNotLocalError
 
 MAX_AUTO_STEPS = 48  # أقل من حد الخطة (50) بهامش
 
@@ -96,7 +96,15 @@ def parse_context(system_prompt: str) -> List[str]:
     if CONTEXT_MARKER not in system_prompt:
         return []
     block = system_prompt.split(CONTEXT_MARKER, 1)[1]
-    return [ln.strip() for ln in block.splitlines() if ln.strip() and ln.strip() != "(فارغ)"]
+    out = []
+    for ln in block.splitlines():
+        t = ln.strip()
+        if not t or t == "(فارغ)":
+            continue
+        if t != ln.rstrip("\r") and not t.startswith("…"):
+            continue  # اسم بمسافة في أوله: لا يمكن استهدافه بأمان بعد تنظيف الخطة، فلا يُعرض للقواعد
+        out.append(t)
+    return out
 
 
 def _step(i: int, action: str, target: str, criteria: str, **params) -> dict:
@@ -801,6 +809,16 @@ class RuleProvider(ModelProvider):
         يحذف المكررات (بموافقة) أو ينقلها لمجلد «مكررات». الملفات المخفية وملفات النظام والفارغة تُتجاهل."""
         if self.workspace is None:
             return Analysis(note="كشف المكررات يحتاج ربط المساعد بمجلد العمل.")
+        import time as _t
+        ckey = (delete, tuple(ents.items()))
+        hit = getattr(self, "_dup_cache", None)
+        if hit and hit[0] == ckey and _t.monotonic() - hit[1] < 3.0:
+            return hit[2]   # نفس الطلب يمرّ على التحليل أكثر من مرة (فهم/توضيح/تخطيط): مسح واحد يكفي
+        res = self._duplicates_scan(delete, ents)
+        self._dup_cache = (ckey, _t.monotonic(), res)
+        return res
+
+    def _duplicates_scan(self, delete: bool, ents: Ents) -> Analysis:
         files = [r for r, d in ents.items() if not d and not any(part.startswith(".") for part in r.split("/"))
                  and r.split("/")[-1].lower() not in SYSTEM_FILES and r.split("/")[0] != "مكررات"]
         by_size: Dict[int, List[Tuple[str, Path]]] = {}
@@ -815,6 +833,10 @@ class RuleProvider(ModelProvider):
             by_hash: Dict[str, List[str]] = {}
             for rel, fp in group:
                 h = hashlib.sha256()
+                try:
+                    check_not_big_cloud_file(fp)  # لا نُنزّل ملفات OneDrive الكبيرة لمجرد البحث عن مكررات
+                except CloudFileNotLocalError:
+                    continue
                 try:
                     with open(fp, "rb") as fh:
                         while chunk := fh.read(1 << 20):

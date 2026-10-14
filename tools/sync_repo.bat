@@ -20,6 +20,7 @@ if errorlevel 1 (
   git rebase --abort >> tools\sync.log 2>&1
   exit /b 4
 )
+git diff --name-only --diff-filter=U 2>nul | findstr . >nul && (echo CONFLICT MARKERS - nothing pushed >> tools\sync.log & exit /b 6)
 if exist ".git\rebase-merge" exit /b 5
 if exist ".git\rebase-apply" exit /b 5
 

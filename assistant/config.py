@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from assistant.tools.files import is_unc_like
+
 
 class WorkspaceError(Exception):
     """مجلد عمل غير مسموح أو غير صالح (رسالة عربية)."""
@@ -35,12 +37,13 @@ def validate_workspace(path) -> Path:
     if path is None or str(path).strip() == "":
         raise WorkspaceError("لم يُحدَّد مجلد.")
     try:
-        from assistant.tools.files import is_unc_like
         if is_unc_like(path):
             raise WorkspaceError("المسارات الشبكية غير مسموحة.")
         p = Path(str(path).strip()).expanduser().resolve()
     except (OSError, RuntimeError, ValueError):
         raise WorkspaceError("مسار غير صالح.")
+    if is_unc_like(str(p)):  # قرص شبكي مربوط (Z:) يُحَلّ إلى \\server\share
+        raise WorkspaceError("مجلد على قرص شبكي غير مدعوم؛ اختر مجلداً محلياً.")
     if not p.exists() or not p.is_dir():
         raise WorkspaceError("المجلد غير موجود.")
     if p.parent == p:

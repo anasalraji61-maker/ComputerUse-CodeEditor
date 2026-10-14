@@ -149,6 +149,10 @@ class TaskRunner:
         a = step.action_type
         if a in ("create_dir", "move", "copy", "rename", "delete", "trash") or (a == "inspect" and step.target not in (".", "./")):
             src = fm.validate_path(step.target)
+            if a in ("move", "copy", "delete", "trash") and src.exists():
+                fm._scan_protected(src)   # مجلد يحوي .git/.ssh… يُرفض الآن لا في منتصف الخطة
+            if a == "copy" and src.exists():
+                fm._scan_cloud(src)
             if a in ("move", "copy"):
                 fm.validate_path(step.params["dest"])
             elif a == "rename":
@@ -173,6 +177,7 @@ class TaskRunner:
         fm = self.file_manager
         journal_start = len(fm.journal)
         prev_start = self._journal_starts.get(task_id)
+        prev_end = self._journal_ends.get(task_id)
         self._journal_starts[task_id] = journal_start
         fm.current_task = task_id
         executor = Executor(
@@ -197,7 +202,13 @@ class TaskRunner:
 
         def finish(success: bool) -> ExecutionReport:
             fm.current_task = None
-            self._journal_ends[task_id] = len(fm.journal)
+            if len(fm.journal) == journal_start and prev_start is not None:
+                # لم تغيّر هذه المحاولة شيئاً: لا نكسر حدود مهمة سابقة بنفس المعرّف
+                self._journal_starts[task_id] = prev_start
+                if prev_end is not None:
+                    self._journal_ends[task_id] = prev_end
+            else:
+                self._journal_ends[task_id] = len(fm.journal)
             if started:
                 if success:
                     try:

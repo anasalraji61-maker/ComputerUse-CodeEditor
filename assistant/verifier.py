@@ -3,12 +3,13 @@ import hashlib
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from assistant.planner import PlanStep
 from assistant.safety import MUTATING_ACTIONS
-from assistant.tools.files import is_unc_like, check_not_big_cloud_file
+from assistant.tools.files import is_unc_like, check_not_big_cloud_file, CloudFileNotLocalError
 
 _NO_UPGRADE = re.compile(r"no (applicable|available) upgrade|no newer package|no installed package|no applicable update", re.I)
 VersionProbe = Callable[[str], Tuple[int, str, str]]
@@ -56,24 +57,32 @@ class Verifier:
             raise PathEscapeError(f"المسار '{path}' خارج الجذر المسموح.")
         return resolved
 
+    def _file_sig(self, f: Path) -> str:
+        """بصمة المحتوى؛ لملف سحابي كبير غير محمّل نستعمل بصمة وصفية (حجم + وقت تعديل) بدل تنزيله بصمت."""
+        try:
+            return self.calculate_hash(f)
+        except CloudFileNotLocalError:
+            st = os.lstat(str(f))
+            return f"CLOUD:{st.st_size}:{st.st_mtime_ns}"
+
     def digest(self, path: Path) -> Optional[str]:
         """بصمة SHA-256 لملف، أو بصمة شجرة لمجلد (أسماء + محتوى)."""
         if not path.exists():
             return None
         if path.is_file():
-            return "F:" + self.calculate_hash(path)
+            return "F:" + self._file_sig(path)
         h = hashlib.sha256()
         for current, dirs, files in os.walk(str(path), followlinks=False):
             dirs.sort()
             cur = Path(current)
             rel = cur.relative_to(path).as_posix()
-            h.update(("D|" + rel + "\n").encode("utf-8"))
+            h.update(("D|" + rel + "\n").encode("utf-8", "surrogatepass"))
             for name in sorted(files):
                 f = cur / name
                 if f.is_symlink():
-                    h.update(("L|" + (rel + "/" + name) + "|" + os.readlink(str(f)) + "\n").encode("utf-8"))
+                    h.update(("L|" + (rel + "/" + name) + "|" + os.readlink(str(f)) + "\n").encode("utf-8", "surrogatepass"))
                 else:
-                    h.update(("F|" + (rel + "/" + name) + "|" + self.calculate_hash(f) + "\n").encode("utf-8"))
+                    h.update(("F|" + (rel + "/" + name) + "|" + self._file_sig(f) + "\n").encode("utf-8", "surrogatepass"))
         return "T:" + h.hexdigest()
 
     @staticmethod
@@ -273,9 +282,15 @@ class Verifier:
             ev["value"] = "غير مطلوب (خطة قراءة فقط)"
             return True, ev, None
         jp = self.allowed_root / ".undo_journal.json"
-        try:
-            data = json.loads(jp.read_text(encoding="utf-8"))
-        except Exception:
+        data = None
+        for attempt in range(4):  # قفل لحظي من مضاد فيروسات/OneDrive لا يعني أن السجل مفقود
+            try:
+                data = json.loads(jp.read_text(encoding="utf-8"))
+                break
+            except Exception:
+                if attempt < 3:
+                    time.sleep(0.25)
+        if data is None:
             ev["value"] = "مفقود أو تالف"
             return False, ev, "سجل التراجع .undo_journal.json مفقود أو تالف على القرص!"
         if not isinstance(data, list) or len(data) - journal_start < need:

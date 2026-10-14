@@ -45,16 +45,26 @@ def main() -> int:
 
     try:
         controller, notice = build_controller()
-    except Exception as exc:  # مجلد عمل غير آمن أو عطب في التهيئة: رسالة واضحة بدل انهيار صامت
+    except Exception as exc:  # مجلد عمل غير آمن أو عطب في التهيئة: نعرض السبب ونتيح اختيار مجلد آخر بدل الخروج
         msg = f"تعذّر تشغيل المساعد: {exc}"
         print(msg, file=sys.stderr)
+        controller = None
         try:
-            from tkinter import messagebox
+            from tkinter import messagebox, filedialog
+            from assistant.config import validate_workspace, load_config, save_config
             r = tk.Tk(); r.withdraw()
-            messagebox.showerror("مساعد المهام", msg)
-        except Exception:
-            pass
-        return 1
+            messagebox.showerror("مساعد المهام", msg + "\nاختر الآن مجلد عمل آخر.")
+            chosen = filedialog.askdirectory(title="اختر مجلد العمل")
+            if chosen:
+                validate_workspace(chosen)
+                cfg = load_config(); cfg["workspace"] = chosen; save_config(cfg)
+                controller, notice = build_controller()
+            r.destroy()
+        except Exception as exc2:
+            print(f"تعذّر: {exc2}", file=sys.stderr)
+            controller = None
+        if controller is None:
+            return 1
     root = tk.Tk()
     widget = AssistantWidget(root, controller)
     if notice:

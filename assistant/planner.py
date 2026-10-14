@@ -102,6 +102,8 @@ def validate_step(item: Any, index: int) -> PlanStep:
         cmd = params.get("cmd", [target])
         if not isinstance(cmd, list) or not cmd or not all(isinstance(c, str) for c in cmd):
             raise PlanParseError(f"الخطوة {raw_id}: params.cmd يجب أن تكون قائمة نصوص غير فارغة.")
+    if target != target.strip():
+        raise PlanParseError(f"الخطوة {raw_id}: الهدف يبدأ أو ينتهي بمسافة؛ لا أستطيع استهدافه بأمان.")
     _clean_text(target, "target", raw_id)
     allowed = {"move": ("dest", "expected_hash"), "copy": ("dest", "expected_hash"),
                "rename": ("new_name",), "run_command": ("cmd",)}.get(action, ())
