@@ -70,6 +70,9 @@ class AssistantController:
         check = lambda: self.kill_switch.is_triggered  # noqa: E731
         inner = getattr(prov, "fallback", None)   # RuleFirstProvider(ModelRouter(...)) في الإنتاج
         chain = [prov] + ([inner] if inner is not None else [])
+        rules = getattr(prov, "rules", None)   # قواعد RuleFirstProvider: تجزئة المكررات تحترم زر الإيقاف
+        if rules is not None:
+            chain.append(rules)
         provs = []
         for q in chain:
             provs.append(q)
@@ -161,6 +164,7 @@ class AssistantController:
             self._gen += 1
             gen = self._gen
             self._request = text
+            self._slots = []
             self._plan = None
             self._go(PLANNING)
         self.emit("status", text="أفهم طلبك…")
@@ -210,12 +214,13 @@ class AssistantController:
 
     def _clarify_then_plan(self, text: str, gen: int):
         before = self._usd_total()
-        questions = self._ask_questions(text)
+        questions, slots = self._ask_questions_slots(text)
         self._record_spend(before)
         if questions:
             with self._lock:
                 if gen != self._gen:
                     return
+                self._slots = slots   # تُعيَّن تحت القفل بعد فحص الجيل: خيط قديم لا يلوّث خانات طلب أحدث
                 self._go(CLARIFYING)
             self.emit("questions", questions=questions)
             return
@@ -224,7 +229,10 @@ class AssistantController:
         self._make_plan(text, gen)
 
     def _ask_questions(self, text: str) -> List[str]:
-        self._slots = []
+        return self._ask_questions_slots(text)[0]
+
+    def _ask_questions_slots(self, text: str):
+        """(الأسئلة، نوع الخانة لكل سؤال). لا يكتب حالة المتحكم؛ الاستدعاء يعيّنها تحت القفل."""
         try:
             raw = self.provider.generate(
                 text, system_prompt=CLARIFY_SYSTEM + "\n\n" + CONTEXT_MARKER + "\n" + self.runner.workspace_listing())
@@ -233,10 +241,9 @@ class AssistantController:
             raw_slots = data.get("slots", []) if isinstance(data, dict) else []
             slots = [raw_slots[i] if i < len(raw_slots) and isinstance(raw_slots[i], str) else None for i in range(len(qs))]
             pairs = [(c, sl) for c, sl in ((sanitize_display(q, 400), sl) for q, sl in zip(qs, slots) if isinstance(q, str)) if c]
-            self._slots = [sl for _, sl in pairs][:MAX_QUESTIONS]   # نوع الخانة الناقصة لكل سؤال (من القواعد فقط)
-            return [c for c, _ in pairs][:MAX_QUESTIONS]
+            return [c for c, _ in pairs][:MAX_QUESTIONS], [sl for _, sl in pairs][:MAX_QUESTIONS]   # الخانة من القواعد فقط
         except Exception:
-            return []  # أي عطب في مرحلة التوضيح لا يمنع التخطيط
+            return [], []  # أي عطب في مرحلة التوضيح لا يمنع التخطيط
 
     def answer_questions(self, answers: List[str]):
         with self._lock:
@@ -309,6 +316,7 @@ class AssistantController:
         with self._lock:
             if self.state in (PLAN_READY, CLARIFYING):
                 self._plan = None
+                self._slots = []
                 self._go(IDLE)
                 self.emit("status", text="أُلغي الطلب.")
 
@@ -398,6 +406,7 @@ class AssistantController:
                 self._gen += 1  # يُهمل ناتج خيط الفهم/التخطيط الجاري ويتحرر المتحكم فوراً
             if self.state in (PLAN_READY, CLARIFYING, PLANNING):
                 self._plan = None
+                self._slots = []
                 self._go(IDLE)
         self.emit("status", text="تم الضغط على الإيقاف." + (" أُلغي الطلب." if was_planning else ""))
 

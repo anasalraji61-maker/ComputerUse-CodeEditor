@@ -18,8 +18,10 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .base import ModelProvider, CONTEXT_MARKER
+from ..safety import EmergencyStopTriggered
 from ..tools.files import _bad_component, check_not_big_cloud_file, CloudFileNotLocalError, _is_link
 
+_DUP_SKIP_DIRS = ("نسخة_احتياطية", "نسخ_احتياطية", "مكررات", "backup", "backups")   # مجلدات لا تدخل مقارنة المكررات (نسخ احتياطية متعمدة / ما نُقل سابقاً)
 MAX_AUTO_STEPS = 48  # أقل من حد الخطة (50) بهامش
 
 CATEGORIES: Dict[str, Tuple[str, ...]] = {
@@ -255,7 +257,7 @@ def _orig_word(tok: str, *texts: str) -> str:
     return tok
 
 
-_TEMP_EXTS = {"tmp", "temp", "bak", "crdownload", "part", "partial"}
+_TEMP_EXTS = {"tmp", "temp", "crdownload"}   # .bak/.part قد تكون نسخاً احتياطية يدوية أو تنزيلات ناقصة مهمة: لا تُعدّ مؤقتة
 
 
 def _is_temp(base: str) -> bool:
@@ -273,6 +275,8 @@ _KW_GROUPS = (
 )
 _KW_RES = [(name, re.compile(r"(?<![\w])(?:و)?(?:ال)?(?:" + "|".join(re.escape(w) for w in words) + r")(?![\w])"), pred)
            for name, words, pred in _KW_GROUPS]
+
+_FILE_KW_RE = re.compile(r"(?<![\w])(?:ال)?(?:ملف|file)\s+(?:ال)?(?:" + "|".join(re.escape(w) for _, ws, _ in _KW_GROUPS for w in ws) + r")(?![\w])")
 
 _FULL_SCAN_LIMIT = 5000
 
@@ -364,6 +368,28 @@ def _quote_name(ans: str, always: bool = False) -> str:
     return f"«{ans}»" if always or re.search(r"\s", ans) or not re.fullmatch(r"[\w.\-]+", ans) else ans
 
 
+_ANS_SCOPE_RE = re.compile(r"(?<!\w)(?:في|داخل|من|in|inside|from)(?!\w)")
+_SLOT_PREFIX = re.compile(r"^(?:(?:ال)?(?:مجلد|folder|directory|dir)|في|داخل|الى|إلى|الي|to|into|in|inside)\s+", re.I)
+
+
+def _strip_slot_words(ans: str, slot: str) -> str:
+    """ينزع كلمات الربط الطبيعية (مجلد/في/داخل/folder…) من جواب الوجهة أو اسم المجلد ليبقى الاسم الحقيقي؛ «مجلد جديد» يبقى حرفياً."""
+    out = ans
+    for _ in range(3):
+        m = _SLOT_PREFIX.match(norm(out))
+        if not m:
+            break
+        rest = out[m.end():].strip()
+        if not rest or norm(rest) in ("جديد", "جديده", "new"):
+            break
+        out = rest
+    if slot == "folder_name":
+        m = re.match(r"^(?:باسم|اسمه|اسمها|name|named|called)\s+(.+)$", norm(out), re.I)
+        if m:
+            out = out[len(out) - len(m.group(1)):]
+    return out.strip()
+
+
 def merge_clarification(request: str, slot: Optional[str], answer: str) -> Optional[str]:
     """يحوّل جواباً عارياً على سؤال توضيح (اسم مجلد، اسم جديد، معيار ترتيب…) إلى جملة صريحة تُعاد تحليلها بدل لصقه نصاً حراً.
     يعيد None إن لم يكن الجواب عارياً (جملة كاملة بفعل/علامة وجهة) أو الخانة مجهولة، فيبقى السلوك القديم (لصق الجواب بالطلب)."""
@@ -377,6 +403,10 @@ def merge_clarification(request: str, slot: Optional[str], answer: str) -> Optio
     last_marker = None
     for last_marker in _DEST_TO.finditer(_dest_mask(req)):
         pass
+    if slot in ("dest", "folder_name"):   # «مجلد Docs» / «في Docs» / «folder Docs»: الاسم الحقيقي بلا كلمات الربط
+        ans = _strip_slot_words(ans, slot)
+        if not ans:
+            return None
     if slot in ("dest", "new_name"):
         q = _quote_name(ans, slot == "new_name")
         if last_marker is not None:   # الوجهة/الاسم الجديد كان ناقصاً أو غير صالح: يُستبدل ما بعد العلامة بالجواب (لا يُلصق بعده)
@@ -390,14 +420,29 @@ def merge_clarification(request: str, slot: Optional[str], answer: str) -> Optio
             return f"{req} {_quote_name(pref, True)}"
         return f"{req} بإضافة البادئة {_quote_name(pref, True)}"
     if slot == "organize_mode":
+        nreq = re.sub(r"(?<!\w)(?:من\s+فضلك|please)(?!\w)", " ", norm(req))
+        head = re.split(r"(?<!\w)(?:حسب|بحسب|by|according)(?!\w)", W_ORGANIZE.sub(" ", nreq))[0]
+        if (_FILELIKE_I.search(req) or _QUOTE_RE.search(req) or _ANS_SCOPE_RE.search(nreq)
+                or any(tok not in _FILLER and tok not in ("العمل", "عمل", "لي", "ال") for tok in re.findall(r"[^\W_]+", head))):
+            return None   # الطلب الأصلي يحدد اسماً أو نطاقاً: لا نُسقطه ونرتّب الجذر كله؛ يُلصق الجواب ويُعاد التحليل (فيسأل عند الالتباس)
         mode = re.sub(r"^(?:حسب|بحسب|by)\s+", "", n)
         mode = ans[len(ans) - len(mode):] if len(mode) <= len(ans) else ans
         return f"رتب الملفات حسب {mode}"
     if slot == "source":
-        req = re.sub(r"\s+", " ", re.sub(r"(?<!\w)(?:كل\s+|جميع\s+)?(?:ال)?(?:ملفات|ملف|files?)(?!\w)", " ", req)).strip()   # كلمة «الملفات» العامة لا تبقى مع الاسم
+        keep: List[str] = []
+
+        def hold(mm):
+            keep.append(mm.group(0))
+            return f"\ue000{len(keep) - 1}\ue001"
+        held = _FILELIKE_I.sub(hold, _QUOTE_RE.sub(hold, req))   # الأجزاء المقتبسة وأسماء الملفات لا تُمسّ بإزالة كلمة «ملفات»
+        held = re.sub(r"\s+", " ", re.sub(r"(?<!\w)(?:كل\s+|جميع\s+)?(?:ال)?(?:ملفات|ملف|files?)(?!\w)", " ", held)).strip()   # كلمة «الملفات» العامة لا تبقى مع الاسم
+        req = re.sub("\ue000(\\d+)\ue001", lambda mm: keep[int(mm.group(1))], held)
         m = None
         for m in _DEST_TO.finditer(_dest_mask(req)):
             pass
+        if m is None:   # «ضع/اجعل … في X»: لا علامة إلى، فالمصدر يسبق علامة «في/داخل» الأخيرة
+            for m in _DEST_IN.finditer(_dest_mask(req)):
+                pass
         if m is not None:
             return f"{req[:m.start()].rstrip()} {ans} {req[m.start():]}"
         return f"{req} {ans}"
@@ -407,10 +452,12 @@ def merge_clarification(request: str, slot: Optional[str], answer: str) -> Optio
 class Resolved:
     """نتيجة تحديد العناصر المقصودة في الطلب: القائمة + نوع المعيار (name/cat/ext) أو سؤال عند الالتباس."""
 
-    def __init__(self, items=None, kind="", ask=None):
+    def __init__(self, items=None, kind="", ask=None, kw=None, note=None):
         self.items: List[str] = items or []
         self.kind = kind
         self.ask = ask
+        self.kw: List[str] = kw or []     # أسماء الفئات بالمعنى المطابقة (مثل «المؤقتة»)
+        self.note: Optional[str] = note   # ملاحظة تخطٍّ (ملفات القفل ~$) تُضاف لملاحظة الخطة
 
 
 class Ents(dict):
@@ -440,6 +487,7 @@ class RuleProvider(ModelProvider):
     def __init__(self, today: Optional[Callable[[], datetime.date]] = None, workspace: Optional[Path] = None):
         self._today = today or datetime.date.today
         self.workspace: Optional[Path] = Path(workspace).resolve() if workspace else None
+        self.cancel_check: Optional[Callable[[], bool]] = None   # يضبطه المتحكم: عند الإيقاف يتوقف تجزئة المكررات فوراً
 
     def bind_workspace(self, root) -> None:
         """يربطه المنفّذ بمجلد العمل ليقرأ أحجام الملفات وتواريخها (قراءة فقط) عند التخطيط."""
@@ -490,10 +538,10 @@ class RuleProvider(ModelProvider):
             if e.name == ".trash" or e.name.startswith(".undo_journal") or not ok(e, e.name):
                 continue
             is_dir = e.is_dir(follow_symlinks=False)
-            lines.append(e.name + ("/" if is_dir else ""))
             if len(lines) >= _FULL_SCAN_LIMIT:
-                truncated = True
+                truncated = True   # هناك عنصر آخر لا يتسع: الاقتطاع حقيقي (5000 بالضبط بلا زيادة ليس اقتطاعاً)
                 break
+            lines.append(e.name + ("/" if is_dir else ""))
             if is_dir:
                 try:
                     kids = sorted(os.scandir(e.path), key=lambda c: c.name)
@@ -503,10 +551,10 @@ class RuleProvider(ModelProvider):
                     rel = f"{e.name}/{c.name}"
                     if not ok(c, rel):
                         continue
-                    lines.append(rel + ("/" if c.is_dir(follow_symlinks=False) else ""))
                     if len(lines) >= _FULL_SCAN_LIMIT:
                         truncated = True
                         break
+                    lines.append(rel + ("/" if c.is_dir(follow_symlinks=False) else ""))
             if truncated:
                 break
         if truncated:
@@ -596,7 +644,8 @@ class RuleProvider(ModelProvider):
             if not pkgs:
                 return Analysis(question="ما معرّف الحزمة المراد تحديثها؟ مثال: «حدّث برنامج Git.Git»")
             return Analysis([_step(1, "winget_upgrade", pkgs[0], "رمز الخروج 0 والحزمة ظاهرة في winget list")])
-        if "dup" in intents and not intents & {"delete", "move"}:   # بحث/عرض/سؤال عن المكررات: تقرير قراءة فقط بلا حذف ولا نقل
+        question_form = bool(re.match(r"\s*(?:هل|do|does|should|can|could|is|are)(?!\w)", norm(prompt), re.I)) or prompt.rstrip().endswith(("؟", "?"))
+        if "dup" in intents and (not intents & {"delete", "move"} or question_form):   # بحث/عرض/سؤال عن المكررات: تقرير قراءة فقط بلا حذف ولا نقل
             q = self._dup_extra_ask(prompt, text)
             return Analysis(question=q, slot="source") if q else self._duplicates_report(ents)
         if "create" in intents:
@@ -780,8 +829,9 @@ class RuleProvider(ModelProvider):
         cats: List[str] = []
         exts: set = set()
         groups: list = []
+        kw_names: List[str] = []
         if not names_only:
-            sg = _SINGULAR_RE.search(work) or _FILE_CAT_RE.search(work)
+            sg = _SINGULAR_RE.search(work) or _FILE_CAT_RE.search(work) or _FILE_KW_RE.search(work)
             if sg:
                 return Resolved(ask=SINGULAR_QUESTION.format(tok=sg.group(0).strip()))
             pool_exts = {r.rsplit(".", 1)[-1].lower() for r in pool if "." in r.split("/")[-1]}
@@ -796,6 +846,7 @@ class RuleProvider(ModelProvider):
             for gname, rx, pred in _KW_RES:   # مؤقتة / فواتير / إيصالات / إكسل / وورد: فئات بالمعنى
                 if rx.search(work):
                     groups.append(pred)
+                    kw_names.append(gname)
                     work = rx.sub(" § ", work)
 
             def blank_ext(m):
@@ -821,7 +872,11 @@ class RuleProvider(ModelProvider):
             sel = [r for r in pool if (EXT_TO_CAT.get(r.rsplit(".", 1)[-1].lower() if "." in r.split("/")[-1] else "") in cats)
                    or (r.rsplit(".", 1)[-1].lower() in exts and "." in r.split("/")[-1])
                    or any(pred(r.split("/")[-1]) for pred in groups)]
-            return Resolved(sorted(dict.fromkeys(sel)), "cat" if (cats or groups) and not exts else "ext")
+            # ملفات القفل ~$cv.docx يفتحها الأوفيس: لا تُختار ضمن نوع/امتداد (إلا حين تُطلب «المؤقتة» صراحة)
+            locks = [r for r in sel if r.split("/")[-1].startswith("~$") and _is_temp not in groups]
+            sel = [r for r in sel if r not in locks]
+            return Resolved(sorted(dict.fromkeys(sel)), "cat" if (cats or groups) and not exts else "ext", kw=kw_names,
+                            note=_skip_notes([], sorted(locks)))
         return Resolved()
 
     # ---------- الوجهة ----------
@@ -1070,7 +1125,13 @@ class RuleProvider(ModelProvider):
             dest_dir = "نسخة_احتياطية"
             if any(f.casefold() == dest_dir.casefold() for f in top_files):
                 return Analysis(question="يوجد ملف باسم «نسخة_احتياطية» فلا أنشئ مجلداً بالاسم نفسه. اكتب مجلد الوجهة: «انسخ <اسم> إلى <مجلد>».")
-        return self._transfer("copy", res.items, dest_dir, ents, top_dirs, "الوجهة مطابقة للمصدر والمصدر سليم")
+        return self._with_note(self._transfer("copy", res.items, dest_dir, ents, top_dirs, "الوجهة مطابقة للمصدر والمصدر سليم"), res.note)
+
+    @staticmethod
+    def _with_note(a: Analysis, note: Optional[str]) -> Analysis:
+        if note and (a.steps or (a.note and a.note.startswith(INFO_PREFIX))):
+            a.note = _join_notes(a.note, note)
+        return a
 
     def _move(self, prompt: str, ents: Ents, top_dirs: List[str], top_files: List[str]) -> Analysis:
         dest_dir, ask, head = self._parse_dest(prompt, ents, top_dirs, top_files, allow_in=True)
@@ -1087,7 +1148,7 @@ class RuleProvider(ModelProvider):
             return Analysis(question="ما الذي تريد نقله؟ اكتب اسم الملف/المجلد أو نوعه (مثل pdf أو الصور).", slot="source")
         if len(res.items) > MAX_AUTO_STEPS - 1:
             return Analysis(question=f"عدد العناصر كبير ({len(res.items)}). حدّد مجموعة أصغر.")
-        return self._transfer("move", res.items, dest_dir, ents, top_dirs, "المصدر اختفى والوجهة مطابقة")
+        return self._with_note(self._transfer("move", res.items, dest_dir, ents, top_dirs, "المصدر اختفى والوجهة مطابقة"), res.note)
 
     @staticmethod
     def _unique_name(base: str, taken: set) -> str:
@@ -1099,6 +1160,39 @@ class RuleProvider(ModelProvider):
             if cand.casefold() not in taken:
                 return cand
             n += 1
+
+    def _same_content(self, a: str, b: str) -> bool:
+        """ملفان متطابقا المحتوى (الحجم ثم SHA-256)؟ يعيد False عند أي شك (مجلد، غير متاح، كبير جداً)."""
+        sa, sb = self._stat(a), self._stat(b)
+        if not sa or not sb or sa[1].st_size != sb[1].st_size or sa[1].st_size > self.MAX_HASH_BYTES:
+            return False
+        try:
+            check_not_big_cloud_file(sa[0])
+            check_not_big_cloud_file(sb[0])
+            hs = []
+            for fp in (sa[0], sb[0]):
+                h = hashlib.sha256()
+                with open(fp, "rb") as fh:
+                    while chunk := fh.read(1 << 20):
+                        h.update(chunk)
+                hs.append(h.digest())
+            return hs[0] == hs[1]
+        except (OSError, CloudFileNotLocalError):
+            return False
+
+    def _identical_copy(self, src: str, parent: str, base: str, ents: Ents) -> Optional[str]:
+        """نسخة مطابقة المحتوى لـ src موجودة في parent باسم base أو «base (n)»؟ تعيد اسمها أو None (المصدر والوجهة ملفان فقط)."""
+        if ents.get(src, True):
+            return None
+        stem, suffix = (base.rsplit(".", 1)[0], "." + base.rsplit(".", 1)[1]) if "." in base[1:] else (base, "")
+        pat = re.compile(re.escape(stem.casefold()) + r"(?: \(\d+\))?" + re.escape(suffix.casefold()) + r"$")
+        pre = (parent + "/") if parent else ""
+        for r, is_dir in ents.items():
+            if is_dir or not r.casefold().startswith(pre.casefold()) or "/" in r[len(pre):]:
+                continue
+            if pat.fullmatch(r[len(pre):].casefold()) and self._same_content(src, r):
+                return r
+        return None
 
     def _transfer(self, action: str, sources: List[str], dest_dir: str, ents: Ents,
                   top_dirs: List[str], criteria: str) -> Analysis:
@@ -1112,17 +1206,25 @@ class RuleProvider(ModelProvider):
             bases = [s.split("/")[-1].casefold() for s in nested]
             if len(set(bases)) != len(bases):
                 return Analysis(question="في الاختيار عنصران بالاسم نفسه من مجلدين مختلفين فيتعارضان في الجذر. اطلب أحدهما.")
-            taken, notes, steps = set(existing), [], []
-            for i, src in enumerate(sorted(nested), 1):
+            taken, notes, steps, same = set(existing), [], [], []
+            for src in sorted(nested):
                 base = src.split("/")[-1]
                 new = base
                 if base.casefold() in taken:
+                    twin = self._identical_copy(src, "", base, ents) if action == "copy" else None
+                    if twin:
+                        same.append(f"«{src}» (نسخة مطابقة موجودة: «{twin}»)")
+                        continue
                     new = self._unique_name(base, taken)
                     notes.append(f"«{base}» موجود في الجذر أصلاً فسيُحفظ باسم «{new}»")
                 taken.add(new.casefold())
-                steps.append(_step(i, action, src, criteria, dest=new))
+                steps.append(_step(len(steps) + 1, action, src, criteria, dest=new))
             if len(nested) != len(sources):
                 notes.append("العناصر الموجودة في الجذر أصلاً تُركت كما هي")
+            if same:
+                if not steps:
+                    return _info("نسخة مطابقة المحتوى موجودة أصلاً فلم أنسخ: " + "، ".join(same[:8]) + ".")
+                notes.append("تُخطي نسخ ما له نسخة مطابقة موجودة: " + "، ".join(same[:8]))
             return Analysis(steps, note=("؛ ".join(notes) + ".") if notes else None)
         sources = [s for s in sources if s.casefold() != dest_dir.casefold()]
         if action == "move":
@@ -1137,15 +1239,23 @@ class RuleProvider(ModelProvider):
         steps, i = [], 1
         if dest_dir.casefold() not in {d.casefold() for d in top_dirs}:
             steps.append(_step(i, "create_dir", dest_dir, "وجود المجلد")); i += 1
-        taken, notes = set(existing), []
+        taken, notes, same = set(existing), [], []
         for src in sorted(sources):
             base = src.split("/")[-1]
             new = base
             if f"{dest_dir}/{base}".casefold() in taken:   # الوجهة فيها الاسم أصلاً: اسم فريد «(1)» صريح بدل سؤال لا يُجاب عنه
+                twin = self._identical_copy(src, dest_dir, base, ents) if action == "copy" else None
+                if twin:   # نسخة مطابقة المحتوى موجودة: لا نكدّس «x (1)…x (9)» متطابقة
+                    same.append(f"«{src}» (نسخة مطابقة موجودة: «{twin}»)")
+                    continue
                 new = self._unique_name(base, {t[len(dest_dir) + 1:] for t in taken if t.startswith(dest_dir.casefold() + "/")})
                 notes.append(f"«{base}» موجود في {dest_dir} أصلاً فسيُحفظ باسم «{new}» (لا شيء يُستبدل)")
             taken.add(f"{dest_dir}/{new}".casefold())
             steps.append(_step(i, action, src, criteria, dest=f"{dest_dir}/{new}")); i += 1
+        if same:
+            if not any(st["action_type"] == action for st in steps):
+                return _info("نسخة مطابقة المحتوى موجودة أصلاً في " + dest_dir + " فلم أنسخ: " + "، ".join(same[:8]) + ".")
+            notes.append("تُخطي نسخ ما له نسخة مطابقة موجودة: " + "، ".join(same[:8]))
         return Analysis(steps, note=("؛ ".join(notes[:6]) + (" …" if len(notes) > 6 else "") + ".") if notes else None)
 
     def _backup(self, prompt: str, ents: Ents) -> Analysis:
@@ -1164,7 +1274,7 @@ class RuleProvider(ModelProvider):
         if any(not d and "/" not in r and r.casefold() == dest_dir.casefold() for r, d in ents.items()):
             return Analysis(question="يوجد ملف باسم «نسخة_احتياطية» فلا أنشئ مجلداً بالاسم نفسه. اكتب مجلد الوجهة: «انسخ <اسم> إلى <مجلد>».")
         top_dirs = [r for r, d in ents.items() if d and "/" not in r]
-        return self._transfer("copy", res.items, dest_dir, ents, top_dirs, "الوجهة مطابقة للمصدر والمصدر سليم")
+        return self._with_note(self._transfer("copy", res.items, dest_dir, ents, top_dirs, "الوجهة مطابقة للمصدر والمصدر سليم"), res.note)
 
     def _dup_extra_ask(self, prompt: str, text: str) -> Optional[str]:
         """سؤال إن جاء مع «المكررات» نوع/اسم/نطاق/وجهة (لا نتجاهله بصمت)، وإلا None."""
@@ -1196,13 +1306,14 @@ class RuleProvider(ModelProvider):
         files = [f for f in all_files if f not in locks]
         existing = {r.casefold() for r in ents}
         moves, folders, clash = [], [], []
+        names_cf = {x.casefold() for x in files}
         for f in sorted(files, key=str.lower):
             st = self._stat(f)
             if not st:
                 continue
             d = datetime.date.fromtimestamp(st[1].st_mtime)
             key = f"{d.year}" if by_year else f"{d.year}-{d.month:02d}"
-            if key.casefold() in {x.casefold() for x in files}:
+            if key.casefold() in names_cf:
                 clash.append(f)
                 continue
             if f"{key}/{f}".casefold() in existing:
@@ -1237,7 +1348,8 @@ class RuleProvider(ModelProvider):
         if hit and hit[0] == ckey and _t.monotonic() - hit[1] < 3.0:
             return hit[2]   # نفس الطلب يمرّ على التحليل أكثر من مرة (فهم/توضيح/تخطيط): مسح واحد يكفي
         files = [r for r, d in ents.items() if not d and not any(part.startswith(".") for part in r.split("/"))
-                 and r.split("/")[-1].lower() not in SYSTEM_FILES and r.split("/")[0] != "مكررات"]
+                 and r.split("/")[-1].lower() not in SYSTEM_FILES and not r.split("/")[-1].startswith("~$")
+                 and not ("/" in r and r.split("/")[0].casefold() in _DUP_SKIP_DIRS)]   # النسخ الاحتياطية وما نُقل لـ«مكررات» ليس «مكرراً» يُحذف
         by_size: Dict[int, List[Tuple[str, Path]]] = {}
         for f in files:
             st = self._stat(f)
@@ -1249,6 +1361,8 @@ class RuleProvider(ModelProvider):
                 continue
             by_hash: Dict[str, List[str]] = {}
             for rel, fp in group:
+                if self.cancel_check is not None and self.cancel_check():
+                    raise EmergencyStopTriggered("أُوقف البحث عن المكررات.")
                 h = hashlib.sha256()
                 try:
                     check_not_big_cloud_file(fp)  # لا نُنزّل ملفات OneDrive الكبيرة لمجرد البحث عن مكررات
@@ -1258,6 +1372,8 @@ class RuleProvider(ModelProvider):
                     with open(fp, "rb") as fh:
                         while chunk := fh.read(1 << 20):
                             h.update(chunk)
+                            if self.cancel_check is not None and self.cancel_check():
+                                raise EmergencyStopTriggered("أُوقف البحث عن المكررات.")
                 except OSError:
                     continue
                 by_hash.setdefault(h.hexdigest(), []).append(rel)
@@ -1306,6 +1422,8 @@ class RuleProvider(ModelProvider):
         more = f" … و{len(groups) - 12} مجموعة أخرى" if len(groups) > 12 else ""
         n_dup = sum(len(g) - 1 for g in groups)
         note = f"وجدت {len(groups)} مجموعة مكررة ({n_dup} نسخة زائدة)؛ لم يُحذف أو يُنقل شيء: " + "؛ ".join(shown) + more
+        if ents.partial:
+            note += ". المسح جزئي لأن مجلد العمل كبير، فقد توجد مكررات أخرى لم أفحصها"
         members = [m for g in groups for m in g][:MAX_AUTO_STEPS]
         return Analysis([_step(i, "inspect", m, "العنصر موجود فعلاً") for i, m in enumerate(members, 1)],
                         note=_join_notes(note, _trunc_note(len(members), max(0, sum(len(g) for g in groups) - len(members)))))
@@ -1327,7 +1445,12 @@ class RuleProvider(ModelProvider):
             return Analysis(question=f"عدد العناصر كبير ({len(res.items)}). حدّد مجموعة أصغر للحذف.")
         steps = [_step(i, "delete", t, "العنصر اختفى من مكانه وصار في السلة بنفس المحتوى")
                  for i, t in enumerate(sorted(res.items), 1)]
-        return Analysis(steps)
+        note = res.note
+        if "المؤقتة" in res.kw:   # «المؤقتة» تقدير بالمعنى: تُعرض أسماء ما سيُحذف قبل الموافقة
+            names = sorted(res.items)
+            note = _join_notes("ستُحذف هذه الملفات المؤقتة (كل حذف يطلب موافقتك ويمكن التراجع عنه): " + "، ".join(names[:30])
+                               + (f" … و{len(names) - 30} أخرى" if len(names) > 30 else "") + ".", note)
+        return Analysis(steps, note=note)
 
     def _create(self, prompt: str, ents: Ents) -> Analysis:
         name = None

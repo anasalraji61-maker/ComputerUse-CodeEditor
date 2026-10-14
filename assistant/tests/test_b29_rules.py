@@ -225,14 +225,14 @@ try:
         # ================================================================== 9. المؤقتة / الفواتير / الإكسل / رسالة «لم أفهم»
         L9 = ["a.txt", "x.tmp", "old.bak", "dl.crdownload", "~$w.docx", "فاتورة_1.pdf", "invoice-2.pdf", "ايصال.pdf", "receipt3.pdf",
               "data.xlsx", "r.docx", "keep.txt", "Docs/", "Docs/in.tmp"]
-        assert [s[1] for s in steps_of("نظف الملفات المؤقتة", L9)] == ["dl.crdownload", "old.bak", "x.tmp", "~$w.docx"] or \
-            sorted(s[1] for s in steps_of("نظف الملفات المؤقتة", L9)) == sorted(["dl.crdownload", "old.bak", "x.tmp", "~$w.docx"])
+        # (B30) «المؤقتة» = tmp/temp/crdownload/~$ فقط؛ .bak نسخ احتياطية يدوية فلا تُحذف بهذه العبارة
+        assert sorted(s[1] for s in steps_of("نظف الملفات المؤقتة", L9)) == sorted(["dl.crdownload", "x.tmp", "~$w.docx"])
         assert all(s[0] == "delete" for s in steps_of("احذف الملفات المؤقتة", L9))
         assert sorted(s[1] for s in steps_of("احذف الفواتير", L9)) == sorted(["فاتورة_1.pdf", "invoice-2.pdf"])
         assert sorted(s[1] for s in steps_of("انقل الايصالات إلى Backup", L9) if s[0] == "move") == sorted(["ايصال.pdf", "receipt3.pdf"])
         assert [s[1] for s in steps_of("احذف ملفات الاكسل", L9)] == ["data.xlsx"]
         assert [s[1] for s in steps_of("احذف ملفات Excel", L9)] == ["data.xlsx"]
-        assert [s[1] for s in steps_of("احذف ملفات word", L9)] == ["r.docx", "~$w.docx"] or sorted(s[1] for s in steps_of("احذف ملفات word", L9)) == sorted(["r.docx", "~$w.docx"])
+        assert [s[1] for s in steps_of("احذف ملفات word", L9)] == ["r.docx"]   # (B30) ملف القفل ~$ لا يدخل نوعاً
         asks("احذف الفاتورة", L9)                                 # مفرد ← سؤال
         q = asks("احذف Zorro", L9)
         assert "Zorro" in q and "zorro" not in q                 # الكلمة كما كتبها المستخدم
