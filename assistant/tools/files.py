@@ -61,6 +61,10 @@ def _is_link(p: Path) -> bool:
         return False
 
 
+_JOURNAL_PATH_KEYS = ("src", "dest", "path", "original_path", "trash_path")
+_REL = "rel:"
+
+
 class PathOutOfBoundsError(Exception):
     """استثناء عند محاولة الوصول إلى مسار خارج المجلد الجذر المسموح به أو عبر روابط غير آمنة."""
     pass
@@ -100,12 +104,32 @@ class FileManager:
         self.journal: List[Dict[str, Any]] = self._load_journal()
         self.current_task: Optional[str] = None  # معرّف المهمة الجارية؛ يُوسَم به كل إدخال لتبقى المهمة قابلة للتراجع بعد إعادة التشغيل
 
+    def _entry_to_disk(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        """مسارات داخل مجلد العمل تُحفظ نسبية (rel:…) فلا يتعطل التراجع إن نُقل المجلد أو أُعيدت تسميته."""
+        out = dict(entry)
+        for k in _JOURNAL_PATH_KEYS:
+            v = out.get(k)
+            if isinstance(v, str) and not v.startswith(_REL):
+                try:
+                    out[k] = _REL + Path(v).relative_to(self.allowed_root).as_posix()
+                except ValueError:
+                    pass  # خارج الجذر أو نسبي أصلاً: يبقى كما هو
+        return out
+
+    def _entry_from_disk(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        out = dict(entry)
+        for k in _JOURNAL_PATH_KEYS:
+            v = out.get(k)
+            if isinstance(v, str) and v.startswith(_REL):
+                out[k] = str(self.allowed_root / Path(v[len(_REL):]))
+        return out
+
     def _load_journal(self) -> List[Dict[str, Any]]:
         if self.journal_path.exists():
             try:
                 data = json.loads(self.journal_path.read_text(encoding="utf-8"))
                 if isinstance(data, list):
-                    return [e for e in data if isinstance(e, dict)]
+                    return [self._entry_from_disk(e) for e in data if isinstance(e, dict)]
             except Exception:
                 pass
             # سجل تالف: لا نفقده بصمت، نحفظ نسخة للفحص ثم نبدأ سجلاً جديداً
@@ -119,7 +143,7 @@ class FileManager:
 
     def _save_journal(self):
         """حفظ سجل التراجع في JSON مع رفع استثناء عند الفشل لضمان عدم ضياع التوثيق (R11)."""
-        data = json.dumps(self.journal, ensure_ascii=False, indent=2)
+        data = json.dumps([self._entry_to_disk(e) for e in self.journal], ensure_ascii=False, indent=2)
         tmp = self.journal_path.with_name(self.journal_path.name + ".tmp")
         tmp.write_text(data, encoding="utf-8")
         os.replace(str(tmp), str(self.journal_path))  # كتابة ذرّية: لا يبقى سجل نصف مكتوب

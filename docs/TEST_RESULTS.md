@@ -1,28 +1,29 @@
 # نتائج الاختبارات الفعلية (آلية)
 
-آخر تشغيل: 2026-10-14 11:26:19 — 32 ملف، فشل: 0
+آخر تشغيل: 2026-10-14 18:01:25 — 33 ملف، فشل: 0
 
 هذه النتائج تُنتَج على لابتوب المالك. لا تدّعِ نجاحاً غير مذكور هنا.
 
 | الملف | النتيجة | الزمن |
 |---|---|---|
-| `assistant/tests/test_b11.py` | PASS | 0.8s |
+| `assistant/tests/test_b11.py` | PASS | 0.7s |
 | `assistant/tests/test_b15.py` | PASS | 0.2s |
-| `assistant/tests/test_b16.py` | PASS | 0.3s |
-| `assistant/tests/test_b17.py` | PASS | 0.3s |
-| `assistant/tests/test_b18.py` | PASS | 0.8s |
+| `assistant/tests/test_b16.py` | PASS | 0.2s |
+| `assistant/tests/test_b17.py` | PASS | 0.2s |
+| `assistant/tests/test_b18.py` | PASS | 0.7s |
 | `assistant/tests/test_b19.py` | PASS | 0.9s |
 | `assistant/tests/test_b20.py` | PASS | 0.1s |
+| `assistant/tests/test_b21.py` | PASS | 0.1s |
 | `assistant/tests/test_b6.py` | PASS | 0.3s |
 | `assistant/tests/test_b8.py` | PASS | 0.4s |
 | `assistant/tests/test_bench.py` | PASS | 0.6s |
-| `assistant/tests/test_benchmarks_20runs.py` | PASS | 1.2s |
+| `assistant/tests/test_benchmarks_20runs.py` | PASS | 1.1s |
 | `assistant/tests/test_budget.py` | PASS | 0.1s |
-| `assistant/tests/test_config.py` | PASS | 0.4s |
+| `assistant/tests/test_config.py` | PASS | 0.3s |
 | `assistant/tests/test_controller.py` | PASS | 0.5s |
-| `assistant/tests/test_deliberate_failures.py` | PASS | 1.6s |
+| `assistant/tests/test_deliberate_failures.py` | PASS | 8.8s |
 | `assistant/tests/test_files.py` | PASS | 0.1s |
-| `assistant/tests/test_fuzz.py` | PASS | 3.6s |
+| `assistant/tests/test_fuzz.py` | PASS | 3.4s |
 | `assistant/tests/test_ledger.py` | PASS | 0.3s |
 | `assistant/tests/test_models.py` | PASS | 0.1s |
 | `assistant/tests/test_no_secrets.py` | PASS | 0.1s |
@@ -37,7 +38,7 @@
 | `assistant/tests/test_shell.py` | PASS | 0.1s |
 | `assistant/tests/test_smoke.py` | PASS | 0.1s |
 | `assistant/tests/test_ui_widget.py` | PASS | 2.3s |
-| `assistant/tests/test_windows.py` | PASS | 0.2s |
+| `assistant/tests/test_windows.py` | PASS | 0.1s |
 
 ### assistant/tests/test_b11.py
 ```
@@ -66,6 +67,10 @@ PASS: test_b19 completed successfully
 ### assistant/tests/test_b20.py
 ```
 PASS: test_b20 completed successfully
+```
+### assistant/tests/test_b21.py
+```
+PASS: test_b21 completed successfully
 ```
 ### assistant/tests/test_b6.py
 ```
