@@ -4,13 +4,26 @@ import tkinter as tk
 from tkinter import ttk, filedialog
 from typing import Any, Dict, List
 
-from assistant.ui.controller import AssistantController
+from assistant.models.rules import strip_format_chars
+from assistant.ui.controller import AssistantController, MAX_REQUEST_CHARS
 
 FONT = ("Segoe UI", 10)
 FONT_B = ("Segoe UI", 10, "bold")
 LEVEL_COLORS = {"READ": "#2e7d32", "REVERSIBLE": "#1565c0", "DANGEROUS": "#ef6c00", "FORBIDDEN": "#c62828"}
 LEVEL_AR = {"READ": "قراءة", "REVERSIBLE": "قابل للتراجع", "DANGEROUS": "خطر", "FORBIDDEN": "محظور"}
 EXAMPLES = ["رتّب الملفات حسب النوع", "افحص المجلد", "أنشئ مشروع my_app", "ابحث عن الملفات المكررة"]
+
+def steps_phrase(n: int) -> str:
+    """عدّ عربي سليم: خطوة واحدة / خطوتان / 3–10 خطوات / 11+ خطوة."""
+    if n == 1:
+        return "خطوة واحدة"
+    if n == 2:
+        return "خطوتان"
+    return f"{n} خطوات" if 3 <= n <= 10 else f"{n} خطوة"
+
+
+CANCEL_WORDS = {"الغاء", "إلغاء", "ألغ", "الغ", "لا", "cancel", "stop", "ايقاف", "إيقاف"}
+
 
 def step_detail(params) -> str:
     """ملخص بارامترات الخطوة (الوجهة/الاسم الجديد/الأمر) لتظهر للمستخدم قبل التنفيذ والموافقة."""
@@ -47,12 +60,14 @@ class AssistantWidget:
         self.awaiting_answers = False
         self._approval_win = None
         self._plan_rows: Dict[int, tk.Label] = {}
+        self._affordable = True
 
         root.title("مساعد المهام")
         root.attributes("-topmost", True)
         root.configure(bg="#f5f5f5")
         root.minsize(430, 620)
         w, h = 460, 720
+        h = max(560, min(h, root.winfo_screenheight() - 120))  # شاشة 768 بكسل: لا يُحجب حقل الإدخال خلف شريط المهام
         x = max(0, root.winfo_screenwidth() - w - 24)
         y = max(0, root.winfo_screenheight() - h - 70)
         root.geometry(f"{w}x{h}+{x}+{y}")
@@ -115,10 +130,10 @@ class AssistantWidget:
                                    relief="flat", state="disabled", command=self.controller.start)
         self.start_btn.pack(side="right", padx=2)
         self.cancel_btn = tk.Button(actions, text="إلغاء الخطة", font=FONT, relief="flat", state="disabled",
-                                    command=self.controller.cancel_plan)
+                                    command=self._on_cancel_plan)
         self.cancel_btn.pack(side="right", padx=2)
         self.undo_btn = tk.Button(actions, text="↩ تراجع", font=FONT, relief="flat",
-                                  command=self.controller.undo_last)
+                                  command=self._on_undo)
         self.undo_btn.pack(side="left", padx=2)
         self.history_btn = tk.Button(actions, text="السجل", font=FONT, relief="flat", command=self.controller.history)
         self.history_btn.pack(side="left", padx=2)
@@ -140,11 +155,18 @@ class AssistantWidget:
         self._plan_win = self.plan_canvas.create_window((0, 0), window=self.plan_inner, anchor="nw")
         self.plan_inner.bind("<Configure>", lambda e: self.plan_canvas.configure(scrollregion=self.plan_canvas.bbox("all")))
         self.plan_canvas.bind("<Configure>", lambda e: self.plan_canvas.itemconfigure(self._plan_win, width=e.width))
-        self.plan_canvas.bind("<MouseWheel>", lambda e: self.plan_canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+        def _wheel(e):
+            self.plan_canvas.yview_scroll(-1 * (e.delta // 120 if e.delta else (1 if getattr(e, "num", 0) == 5 else -1)), "units")
+        # العجلة فوق الصفوف أيضاً: ربط عام ما دام المؤشر فوق إطار الخطة
+        self.plan_frame.bind("<Enter>", lambda e: self.root.bind_all("<MouseWheel>", _wheel))
+        self.plan_frame.bind("<Leave>", lambda e: self.root.unbind_all("<MouseWheel>"))
 
         self.chat = tk.Text(r, wrap="word", height=6, state="disabled", font=FONT, bg="white", relief="flat",
                             padx=8, pady=6)
-        self.chat.pack(side="top", fill="both", expand=True, padx=8, pady=(8, 4))
+        self.chat_scroll = ttk.Scrollbar(r, orient="vertical", command=self.chat.yview)
+        self.chat.configure(yscrollcommand=self.chat_scroll.set)
+        self.chat_scroll.pack(side="left", fill="y", pady=(8, 4))
+        self.chat.pack(side="top", fill="both", expand=True, padx=(0, 8), pady=(8, 4))
         self.chat.tag_configure("user", justify="right", foreground="#0d47a1", rmargin=4)
         self.chat.tag_configure("assistant", justify="right", foreground="#212121", rmargin=4)
         self.chat.tag_configure("error", justify="right", foreground="#b71c1c", rmargin=4)
@@ -188,9 +210,10 @@ class AssistantWidget:
         except Exception:
             pass
 
-    def _set_buttons(self, plan_ready: bool):
-        self.start_btn.configure(state="normal" if plan_ready else "disabled")
-        self.cancel_btn.configure(state="normal" if plan_ready else "disabled")
+    def _set_buttons(self, plan_ready: bool, clarifying: bool = False):
+        can_start = plan_ready and self._affordable
+        self.start_btn.configure(state="normal" if can_start else "disabled")
+        self.cancel_btn.configure(state="normal" if (plan_ready or clarifying) else "disabled")
 
     # ---------- مجلد العمل وأمثلة ----------
     def _refresh_workspace_label(self):
@@ -203,6 +226,9 @@ class AssistantWidget:
             pass
 
     def _choose_workspace(self):
+        if self.controller.state != "IDLE":
+            self.add_message("لا يمكن تغيير المجلد الآن. ألغِ الخطة الحالية (أو انتظر انتهاء المهمة) أولاً.", "assistant")
+            return
         path = filedialog.askdirectory(title="اختر مجلد العمل (مثل Downloads)", initialdir=str(self.controller.workspace))
         if path:
             self.apply_workspace(path)
@@ -263,9 +289,26 @@ class AssistantWidget:
 
     # ---------- إرسال ----------
     def _on_send(self):
-        text = self.entry.get().strip()
+        text = strip_format_chars(self.entry.get()).strip()
         if not text:
+            self.entry.delete(0, "end")
             return
+        state = self.controller.state
+        if self.awaiting_answers and text.casefold() in CANCEL_WORDS:  # «إلغاء/لا» مخرج لا اسم مجلد
+            self.entry.delete(0, "end")
+            self._on_cancel_plan()
+            return
+        if not self.awaiting_answers:
+            # الرفض يحتفظ بنص المستخدم ولا يغيّر الحالة النصية
+            if state == "PLAN_READY":
+                self.add_message("لديك خطة جاهزة: اضغط «ابدأ التنفيذ» أو «إلغاء الخطة» قبل طلب جديد.", "assistant")
+                return
+            if state != "IDLE":
+                self.add_message("المساعد مشغول الآن. انتظر أو اضغط «إيقاف».", "assistant")
+                return
+            if len(text) > MAX_REQUEST_CHARS:
+                self.add_message(f"الطلب طويل جداً ({len(text)} حرفاً). اختصره إلى أقل من {MAX_REQUEST_CHARS} حرف.", "error")
+                return
         self.entry.delete(0, "end")
         self.add_message(text, "user")
         if self.awaiting_answers:
@@ -273,6 +316,21 @@ class AssistantWidget:
             self.controller.answer_questions([text])
         else:
             self.controller.submit_request(text)
+
+    def _on_cancel_plan(self):
+        self.controller.cancel_plan()
+        self.awaiting_answers = False
+        self._close_approval()
+        self._clear_plan()
+        self._set_buttons(False)
+
+    def _on_undo(self):
+        if self.controller.state != "IDLE":
+            self.add_message("ألغِ الخطة الحالية أو انتظر انتهاء المهمة قبل التراجع.", "assistant")
+            return
+        self.undo_btn.configure(state="disabled")  # نقرتان متتاليتان لا تلغيان مهمتين
+        self.root.after(1500, lambda: self.undo_btn.configure(state="normal"))
+        self.controller.undo_last()
 
     # ---------- أحداث ----------
     def _poll(self):
@@ -299,21 +357,26 @@ class AssistantWidget:
         elif t == "error":
             self.add_message(ev["text"], "error")
             self.set_status("حدث خطأ")
-            self._set_buttons(self.controller.state == "PLAN_READY")  # خطأ عابر لا يعطّل خطة ما زالت جاهزة
+            self._set_buttons(self.controller.state == "PLAN_READY", self.controller.state == "CLARIFYING")  # خطأ عابر لا يعطّل خطة ما زالت جاهزة
+            self.undo_btn.configure(state="normal")
         elif t == "questions":
             self.awaiting_answers = self.controller.state == "CLARIFYING"  # حدث قديم بعد الإيقاف لا يبتلع الطلب التالي
             self.add_message("أحتاج توضيحاً قبل الخطة (أجب في سطر واحد):\n" +
                              "\n".join(f"{i}. {q}" for i, q in enumerate(ev["questions"], 1)), "assistant")
             self.set_status("بانتظار إجابتك")
+            self._set_buttons(False, clarifying=self.controller.state == "CLARIFYING")
         elif t == "plan":
+            if self.controller.state != "PLAN_READY":  # خطة متأخرة بعد إيقاف/إلغاء: لا تُعرض ولا تُفعّل «ابدأ»
+                return
             self._show_plan(ev["steps"])
             n_danger = sum(1 for s in ev["steps"] if s["level"] == "DANGEROUS")
-            msg = f"هذه الخطة ({len(ev['steps'])} خطوات). راجعها ثم اضغط «ابدأ التنفيذ»."
+            msg = f"هذه الخطة ({steps_phrase(len(ev['steps']))}). راجعها ثم اضغط «ابدأ التنفيذ»."
             if n_danger:
                 msg += f"\nتنبيه: {n_danger} خطوة خطرة ستطلب موافقتك واحدة واحدة."
             if ev.get("note"):
                 msg += f"\nملاحظة: {ev['note']}"
             est = ev.get("estimate") or {}
+            self._affordable = bool(est.get("affordable", True))
             if est.get("points") is not None:
                 msg += f"\nالكلفة المتوقعة: {est['points']} نقطة · رصيدك: {est['balance']} نقطة"
                 if not est.get("affordable", True):
@@ -360,6 +423,7 @@ class AssistantWidget:
             self.add_message("مجلد العمل الآن: " + ev["path"], "ok")
         elif t == "undo":
             self.add_message(f"تم التراجع عن {ev['count']} عملية.", "ok")
+            self.undo_btn.configure(state="normal")
 
     # ---------- نافذة الموافقة ----------
     def _ask_approval(self, step: Dict[str, Any]):
@@ -384,10 +448,18 @@ class AssistantWidget:
             self.controller.respond_approval(ok, step.get("approval_id"))
             self._close_approval()
 
-        tk.Button(btns, text="نعم، نفّذ", bg="#2e7d32", fg="white", font=FONT_B, relief="flat", padx=12,
-                  command=lambda: decide(True)).pack(side="right", padx=6)
+        yes_btn = tk.Button(btns, text="نعم، نفّذ", bg="#2e7d32", fg="white", font=FONT_B, relief="flat", padx=12,
+                            state="disabled", command=lambda: decide(True))
+        yes_btn.pack(side="right", padx=6)
         tk.Button(btns, text="لا، ارفض", bg="#c62828", fg="white", font=FONT_B, relief="flat", padx=12,
                   command=lambda: decide(False)).pack(side="right", padx=6)
+
+        def _enable():  # نقرة مزدوجة على «نعم» لا توافق على حذف تالٍ قبل قراءته
+            try:
+                yes_btn.configure(state="normal")
+            except Exception:
+                pass
+        win.after(700, _enable)
         win.protocol("WM_DELETE_WINDOW", lambda: decide(False))  # إغلاق النافذة = رفض
 
     def _close_approval(self):

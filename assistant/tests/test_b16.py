@@ -108,7 +108,7 @@ try:
     assert targets("احذف Docs") == ["Docs"]
 
     # 15. نحو وتحديث/فحص
-    assert targets("ممكن تحذف a.txt") == ["a.txt"]
+    assert targets("ممكن تحذف b.txt") == ["b.txt"]   # (B32) a.txt موجود في أكثر من عمق فصار الحذف يسأل
     for t, pkg in (("update Git.Git.", "Git.Git"), ("update 7zip.7zip", "7zip.7zip"), ("update Notepad++.Notepad++", "Notepad++.Notepad++")):
         assert plan(t)[0] == [("winget_upgrade", pkg, None)], t
     assert plan("ماذا يوجد في Docs")[0] == [("inspect", "Docs", None)]

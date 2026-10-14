@@ -49,8 +49,10 @@ try:
     assert s == [("delete", "Docs/in1.txt", None)], s
     s, _ = plan("احذف in1.txt من Docs")
     assert s == [("delete", "Docs/in1.txt", None)], s
-    s, _ = plan("احذف a.txt")  # الأضحل مساراً
-    assert s == [("delete", "a.txt", None)], s
+    s, a = plan("احذف a.txt")  # (B32) موجود في الجذر وفي Docs: الحذف يسأل بدل أن يختار الأضحل (التشغيل الثاني كان يصيب الآخر)
+    assert not s and a.question, s
+    s, _ = plan("انقل a.txt إلى Backup")  # النقل ما زال يختار الأضحل مع ملاحظة صريحة
+    assert s and s[-1][1] == "a.txt", s
     s, _ = plan("احذف a.txt من Docs")
     assert s == [("delete", "Docs/a.txt", None)], s
     asks("احذف in1.txt من NoSuchFolder")

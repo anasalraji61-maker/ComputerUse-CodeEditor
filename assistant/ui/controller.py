@@ -241,7 +241,8 @@ class AssistantController:
             raw_slots = data.get("slots", []) if isinstance(data, dict) else []
             slots = [raw_slots[i] if i < len(raw_slots) and isinstance(raw_slots[i], str) else None for i in range(len(qs))]
             pairs = [(c, sl) for c, sl in ((sanitize_display(q, 400), sl) for q, sl in zip(qs, slots) if isinstance(q, str)) if c]
-            return [c for c, _ in pairs][:MAX_QUESTIONS], [sl for _, sl in pairs][:MAX_QUESTIONS]   # الخانة من القواعد فقط
+            has_slots = isinstance(data, dict) and "slots" in data   # مفتاح slots يدل على أن السؤال من القواعد المحلية
+            return [c for c, _ in pairs][:MAX_QUESTIONS], ([sl for _, sl in pairs][:MAX_QUESTIONS] if has_slots else [])   # الخانة من القواعد فقط
         except Exception:
             return [], []  # أي عطب في مرحلة التوضيح لا يمنع التخطيط
 
@@ -249,6 +250,14 @@ class AssistantController:
         with self._lock:
             if self.state != CLARIFYING:
                 return self.emit("error", text="لا توجد أسئلة بانتظار الإجابة.")
+            held = list(getattr(self, "_slots", None) or [])
+            if held and all(sl is None for sl in held):
+                # سؤال القواعد بلا خانة (مثل «حدّد مجموعة أصغر»): جواب عارٍ لا يعالجه؛ نطلب طلباً معدّلاً كاملاً بدل لصقه فيفشل
+                self._plan = None
+                self._slots = []
+                self._go(IDLE)
+                self.emit("status", text="أعد صياغة الطلب.")
+                return self.emit("info", text="هذا السؤال لا يُجاب بكلمة؛ عدّل طلبك (سمِّ الملفات أو قلّل العدد) وأرسله من جديد كاملاً.")
             if self._cap_exceeded(self._request + " " + " ".join(a for a in answers if isinstance(a, str))):
                 self._plan = None
                 self._go(IDLE)
@@ -420,6 +429,8 @@ class AssistantController:
     def undo_last(self):
         if self.state == RUNNING:
             return self.emit("error", text="لا يمكن التراجع أثناء التنفيذ. أوقف المهمة أولاً.")
+        if self.state != IDLE:
+            return self.emit("error", text="ألغِ الخطة الحالية أو انتظر انتهاءها قبل التراجع.")
         task_id = self.last_task_id or self.runner.last_journaled_task()  # بعد إعادة التشغيل نقرأ الوسم من السجل المحفوظ
         fm = self.runner.file_manager
         untagged = (not task_id) and bool(fm.journal) and fm.journal[-1].get("task") is None
