@@ -9,6 +9,15 @@ from typing import Union, List, Dict, Any, Optional
 from assistant.safety import KillSwitch, EmergencyStopTriggered
 
 
+_WIN_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)}
+
+
+def _bad_component(name: str) -> bool:
+    """أسماء أجهزة ويندوز المحجوزة (CON, NUL, COM1…) وأسماء تنتهي بنقطة أو مسافة."""
+    stem = name.split(".")[0].strip().upper()
+    return stem in _WIN_RESERVED or name != name.rstrip(" .")
+
+
 class PathOutOfBoundsError(Exception):
     """استثناء عند محاولة الوصول إلى مسار خارج المجلد الجذر المسموح به أو عبر روابط غير آمنة."""
     pass
@@ -63,6 +72,10 @@ class FileManager:
             unresolved = self.allowed_root / p
         else:
             unresolved = p
+
+        for part in Path(path).parts:
+            if part not in ("/", "\\") and not part.endswith(":") and part not in (".", "..") and _bad_component(part):
+                raise PathOutOfBoundsError(f"اسم غير مسموح في المسار (اسم جهاز محجوز أو ينتهي بنقطة/مسافة): '{part}'.")
 
         resolved = unresolved.resolve()
 

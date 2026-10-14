@@ -163,6 +163,19 @@ try:
     assert len(fb.call_history) == 1 and rf.fallback_calls == 1
     assert parse_context("x") == [] and parse_context(CONTEXT_MARKER + "\n(فارغ)") == []
 
+    # 10. أسماء ويندوز المحجوزة والأسماء المنتهية بنقطة/مسافة مرفوضة في أي أداة ملفات
+    from assistant.tools.files import FileManager, PathOutOfBoundsError
+    with tempfile.TemporaryDirectory() as tmp:
+        fm = FileManager(pathlib.Path(tmp).resolve())
+        for bad in ("CON", "nul", "COM1.txt", "a/LPT3", "name.", "name "):
+            try:
+                fm.create_dir(bad)
+                raise AssertionError(f"كان يجب رفض {bad!r}")
+            except PathOutOfBoundsError:
+                pass
+        fm.create_dir("console")  # اسم عادي يحوي CON لا يُرفض
+        assert (pathlib.Path(tmp) / "console").is_dir()
+
     print("PASS: test_rules completed successfully")
     sys.exit(0)
 except SystemExit:
