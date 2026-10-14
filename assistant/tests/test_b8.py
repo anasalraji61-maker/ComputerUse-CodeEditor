@@ -187,6 +187,17 @@ try:
         c.respond_approval(True, step_id=2)
         assert c._approval_result is True and c._approval_event.is_set()
 
+    # 14. مرادفات عربية شائعة للنقل والحذف
+    ctx = ["a.pdf", "b.PDF", "c.jpg", "notes.tmp", "x.tmp", "docs/"]
+    def kinds(q):
+        a = rp.analyze(q, ctx)
+        return [(s["action_type"], s["target"]) for s in a.steps or []]
+    assert kinds("ضع ملفات pdf في مستندات") == [("create_dir", "مستندات"), ("move", "a.pdf"), ("move", "b.PDF")]
+    assert kinds("حط الصور داخل docs") == [("move", "c.jpg")]
+    assert kinds("شيل x.tmp") == [("delete", "x.tmp")]
+    assert kinds("تخلص من ملفات tmp") == [("delete", "notes.tmp"), ("delete", "x.tmp")]
+    assert kinds("ضع شيء") == []
+
     print("PASS: test_b8 completed successfully")
     sys.exit(0)
 except SystemExit:

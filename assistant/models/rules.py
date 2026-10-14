@@ -29,6 +29,7 @@ OTHER = "أخرى"
 HELP_QUESTION = ("لم أفهم الطلب. اكتبه بإحدى هذه الصيغ: «رتّب الملفات حسب النوع» · «انسخ <اسم> إلى <مجلد>» · "
                  "«أعد تسمية ملفات <مجلد> بإضافة البادئة <نص>» · «انقل <نوع أو اسم> إلى <مجلد>» · «احذف <اسم>» · «رتّب الملفات حسب الشهر» · «انقل المكررات» · «أنشئ مشروع <اسم>» · «افحص <اسم>» · «حدّث البرنامج <المعرّف>».")
 
+_DEST_RE = re.compile(r"(?:\bالى\b|\bإلى\b|\bفي\b|\bداخل\b)\s+(?:مجلد\s+)?[«\"']?([^\s«»\"'،,]+)")
 _DIACRITICS = re.compile(r"[\u064B-\u0652\u0640]")
 
 
@@ -116,9 +117,9 @@ class RuleProvider(ModelProvider):
             return self._rename(prompt, p, context, top_dirs)
         if has("مكرر", "نسخ مكرره", "duplicate"):
             return self._duplicates(p, context)
-        if has("احذف", "امسح", "ازل ", "delete", "remove"):
+        if has("احذف", "امسح", "ازل ", "شيل", "تخلص من", "delete", "remove"):
             return self._delete(prompt, p, context, top_files)
-        if has("انقل", "نقل ", "حرك ", "move"):
+        if has("انقل", "نقل ", "حرك ", "move") or (has("ضع", "حط", "اجمع", "جمع") and _DEST_RE.search(prompt)):
             return self._move(prompt, p, context, top_dirs, top_files)
         if has("انسخ", "نسخ ", "نسخه احتياطيه", "backup"):
             return self._copy(prompt, p, context, top_dirs)
@@ -308,13 +309,13 @@ class RuleProvider(ModelProvider):
         return Analysis(steps)
 
     def _move(self, prompt: str, p: str, context: List[str], top_dirs: List[str], top_files: List[str]) -> Analysis:
-        m = re.search(r"(?:الى|إلى)\s+(?:مجلد\s+)?[«\"']?([^\s«»\"'،,]+)", prompt)
+        m = _DEST_RE.search(prompt)
         if not m:
             return Analysis(question="إلى أي مجلد تريد النقل؟ مثال: «انقل ملفات pdf إلى مستندات»")
         dest_dir = _safe_name(m.group(1))
         if not dest_dir:
             return Analysis(question="ما اسم المجلد الذي تريد النقل إليه؟")
-        head = p.split(norm("الى"))[0]
+        head = norm(prompt[: m.start()])
         sel, kind = self._select(head, top_files)
         sources = sel
         if not kind:
