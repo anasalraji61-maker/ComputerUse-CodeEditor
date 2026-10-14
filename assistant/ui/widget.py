@@ -34,6 +34,10 @@ ACTION_AR = {
 }
 
 
+PLAN_HEIGHT = 150  # بكسل: ارتفاع منطقة الخطة القابلة للتمرير
+PLAN_WRAP = 340    # التفاف الأسطر الطويلة بدل قصّها خارج النافذة
+
+
 class AssistantWidget:
     POLL_MS = 100
 
@@ -47,8 +51,8 @@ class AssistantWidget:
         root.title("مساعد المهام")
         root.attributes("-topmost", True)
         root.configure(bg="#f5f5f5")
-        root.minsize(380, 600)
-        w, h = 420, 700
+        root.minsize(430, 620)
+        w, h = 460, 720
         x = max(0, root.winfo_screenwidth() - w - 24)
         y = max(0, root.winfo_screenheight() - h - 70)
         root.geometry(f"{w}x{h}+{x}+{y}")
@@ -82,25 +86,30 @@ class AssistantWidget:
         self.ws_lbl.pack(side="right", fill="x", expand=True, padx=8)
         self._refresh_workspace_label()
 
-        self.chat = tk.Text(r, wrap="word", height=12, state="disabled", font=FONT, bg="white", relief="flat",
-                            padx=8, pady=6)
-        self.chat.pack(fill="both", expand=True, padx=8, pady=(8, 4))
-        self.chat.tag_configure("user", justify="right", foreground="#0d47a1", rmargin=4)
-        self.chat.tag_configure("assistant", justify="right", foreground="#212121", rmargin=4)
-        self.chat.tag_configure("error", justify="right", foreground="#b71c1c", rmargin=4)
-        self.chat.tag_configure("ok", justify="right", foreground="#1b5e20", rmargin=4)
-        self.chat.tag_configure("report", justify="right", foreground="#37474f", rmargin=4, font=("Consolas", 9))
+        # الأسفل أولاً (side=bottom) كي لا تُدفع أزرار البدء وحقل الإدخال خارج النافذة مهما طالت الخطة
+        inp = tk.Frame(r, bg="#f5f5f5")
+        inp.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
+        self.send_btn = tk.Button(inp, text="إرسال", font=FONT_B, bg="#1565c0", fg="white", relief="flat",
+                                  command=self._on_send)
+        self.send_btn.pack(side="left", padx=(0, 4))
+        self.entry = tk.Entry(inp, font=FONT, justify="right", relief="solid", bd=1)
+        self.entry.pack(side="right", fill="x", expand=True, ipady=4)
+        self.entry.bind("<Return>", lambda e: self._on_send())
+        self.entry.focus_set()
 
-        self.plan_frame = tk.LabelFrame(r, text=" الخطة ", bg="#f5f5f5", font=FONT, labelanchor="ne")
-        self.plan_frame.pack(fill="x", padx=8, pady=4)
-
-        self.progress = ttk.Progressbar(r, mode="determinate", maximum=100)
-        self.progress.pack(fill="x", padx=8, pady=2)
-        self.status = tk.Label(r, text="جاهز", bg="#f5f5f5", fg="#546e7a", font=FONT, anchor="e")
-        self.status.pack(fill="x", padx=10)
+        chips = tk.Frame(r, bg="#f5f5f5")
+        chips.pack(side="bottom", fill="x", padx=8)
+        self.chips = []
+        chips.columnconfigure(0, weight=1)
+        chips.columnconfigure(1, weight=1)
+        for i, ex in enumerate(EXAMPLES):  # شبكة من عمودين: لا قصّ للنصوص الطويلة
+            b = tk.Button(chips, text=ex, font=("Segoe UI", 9), relief="groove", bg="#e3f2fd", wraplength=200,
+                          command=lambda t=ex: self._use_example(t))
+            b.grid(row=i // 2, column=1 - (i % 2), sticky="ew", padx=2, pady=2)
+            self.chips.append(b)
 
         actions = tk.Frame(r, bg="#f5f5f5")
-        actions.pack(fill="x", padx=8, pady=4)
+        actions.pack(side="bottom", fill="x", padx=8, pady=4)
         self.start_btn = tk.Button(actions, text="ابدأ التنفيذ", font=FONT_B, bg="#2e7d32", fg="white",
                                    relief="flat", state="disabled", command=self.controller.start)
         self.start_btn.pack(side="right", padx=2)
@@ -110,27 +119,36 @@ class AssistantWidget:
         self.undo_btn = tk.Button(actions, text="↩ تراجع", font=FONT, relief="flat",
                                   command=self.controller.undo_last)
         self.undo_btn.pack(side="left", padx=2)
-        self.history_btn = tk.Button(actions, text="سجل المهام", font=FONT, relief="flat", command=self.controller.history)
+        self.history_btn = tk.Button(actions, text="السجل", font=FONT, relief="flat", command=self.controller.history)
         self.history_btn.pack(side="left", padx=2)
 
-        chips = tk.Frame(r, bg="#f5f5f5")
-        chips.pack(fill="x", padx=8)
-        self.chips = []
-        for ex in EXAMPLES:
-            b = tk.Button(chips, text=ex, font=("Segoe UI", 9), relief="groove", bg="#e3f2fd",
-                          command=lambda t=ex: self._use_example(t))
-            b.pack(side="right", padx=2, pady=2)
-            self.chips.append(b)
+        self.status = tk.Label(r, text="جاهز", bg="#f5f5f5", fg="#546e7a", font=FONT, anchor="e")
+        self.status.pack(side="bottom", fill="x", padx=10)
+        self.progress = ttk.Progressbar(r, mode="determinate", maximum=100)
+        self.progress.pack(side="bottom", fill="x", padx=8, pady=2)
 
-        inp = tk.Frame(r, bg="#f5f5f5")
-        inp.pack(fill="x", padx=8, pady=(0, 8))
-        self.send_btn = tk.Button(inp, text="إرسال", font=FONT_B, bg="#1565c0", fg="white", relief="flat",
-                                  command=self._on_send)
-        self.send_btn.pack(side="left", padx=(0, 4))
-        self.entry = tk.Entry(inp, font=FONT, justify="right", relief="solid", bd=1)
-        self.entry.pack(side="right", fill="x", expand=True, ipady=4)
-        self.entry.bind("<Return>", lambda e: self._on_send())
-        self.entry.focus_set()
+        # الخطة: ارتفاع ثابت مع شريط تمرير (خطة من 50 خطوة لا تخفي شيئاً من الواجهة)
+        self.plan_frame = tk.LabelFrame(r, text=" الخطة ", bg="#f5f5f5", font=FONT, labelanchor="ne")
+        self.plan_frame.pack(side="bottom", fill="x", padx=8, pady=4)
+        self.plan_canvas = tk.Canvas(self.plan_frame, height=PLAN_HEIGHT, bg="#f5f5f5", highlightthickness=0)
+        self.plan_scroll = ttk.Scrollbar(self.plan_frame, orient="vertical", command=self.plan_canvas.yview)
+        self.plan_canvas.configure(yscrollcommand=self.plan_scroll.set)
+        self.plan_scroll.pack(side="left", fill="y")
+        self.plan_canvas.pack(side="right", fill="both", expand=True)
+        self.plan_inner = tk.Frame(self.plan_canvas, bg="#f5f5f5")
+        self._plan_win = self.plan_canvas.create_window((0, 0), window=self.plan_inner, anchor="nw")
+        self.plan_inner.bind("<Configure>", lambda e: self.plan_canvas.configure(scrollregion=self.plan_canvas.bbox("all")))
+        self.plan_canvas.bind("<Configure>", lambda e: self.plan_canvas.itemconfigure(self._plan_win, width=e.width))
+        self.plan_canvas.bind("<MouseWheel>", lambda e: self.plan_canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+
+        self.chat = tk.Text(r, wrap="word", height=6, state="disabled", font=FONT, bg="white", relief="flat",
+                            padx=8, pady=6)
+        self.chat.pack(side="top", fill="both", expand=True, padx=8, pady=(8, 4))
+        self.chat.tag_configure("user", justify="right", foreground="#0d47a1", rmargin=4)
+        self.chat.tag_configure("assistant", justify="right", foreground="#212121", rmargin=4)
+        self.chat.tag_configure("error", justify="right", foreground="#b71c1c", rmargin=4)
+        self.chat.tag_configure("ok", justify="right", foreground="#1b5e20", rmargin=4)
+        self.chat.tag_configure("report", justify="right", foreground="#37474f", rmargin=4, font=("Consolas", 9))
 
     # ---------- عرض ----------
     def add_message(self, text: str, tag: str = "assistant"):
@@ -143,8 +161,9 @@ class AssistantWidget:
         self.status.configure(text=text)
 
     def _clear_plan(self):
-        for w in self.plan_frame.winfo_children():
+        for w in self.plan_inner.winfo_children():
             w.destroy()
+        self.plan_canvas.yview_moveto(0)
         self._plan_rows.clear()
         self.progress.configure(value=0)
 
@@ -153,11 +172,20 @@ class AssistantWidget:
         for s in steps:
             lvl = s["level"]
             action = ACTION_AR.get(s["action"], s["action"])
-            row = tk.Label(self.plan_frame, bg="#f5f5f5", font=FONT, anchor="e", justify="right",
+            row = tk.Label(self.plan_inner, bg="#f5f5f5", font=FONT, anchor="e", justify="right", wraplength=PLAN_WRAP,
                            text=f"{s['step_id']}. {action}: {s['target']} {step_detail(s.get('params'))}  [{LEVEL_AR.get(lvl, lvl)}]",
                            fg=LEVEL_COLORS.get(lvl, "#000"))
             row.pack(fill="x", padx=6)
             self._plan_rows[s["step_id"]] = row
+
+    def _reveal(self, row):
+        """يمرّر قائمة الخطة لتظهر الخطوة الجارية."""
+        try:
+            self.plan_canvas.update_idletasks()
+            total = max(1, self.plan_inner.winfo_height())
+            self.plan_canvas.yview_moveto(max(0.0, (row.winfo_y() - 20) / total))
+        except Exception:
+            pass
 
     def _set_buttons(self, plan_ready: bool):
         self.start_btn.configure(state="normal" if plan_ready else "disabled")
@@ -271,6 +299,7 @@ class AssistantWidget:
             row = self._plan_rows.get(ev["step_id"])
             if row:
                 row.configure(bg="#fff59d")
+                self._reveal(row)
         elif t == "step_done":
             row = self._plan_rows.get(ev["step_id"])
             if row:
@@ -318,7 +347,7 @@ class AssistantWidget:
         action = ACTION_AR.get(step["action"], step["action"])
         tk.Label(win, text="⚠ خطوة خطرة تحتاج موافقتك", bg="#fff3e0", fg="#e65100", font=("Segoe UI", 12, "bold")
                  ).pack(padx=16, pady=(14, 6))
-        tk.Label(win, text=f"{action}: {step['target']}\n{step_detail(step.get('params'))}".rstrip(), bg="#fff3e0", font=FONT, justify="right").pack(padx=16)
+        tk.Label(win, text=f"{action}: {step['target']}\n{step_detail(step.get('params'))}".rstrip(), bg="#fff3e0", font=FONT, justify="right", wraplength=420).pack(padx=16)
         tk.Label(win, text="هل تسمح بتنفيذ هذه الخطوة فقط؟", bg="#fff3e0", font=FONT).pack(padx=16, pady=6)
         btns = tk.Frame(win, bg="#fff3e0")
         btns.pack(pady=12)

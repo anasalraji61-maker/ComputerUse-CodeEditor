@@ -109,6 +109,16 @@ try:
         assert pump(root, lambda: "آخر المهام" in chat_text(w) or "لا توجد مهام" in chat_text(w))
         assert w.pretty_report("# عنوان\n## قسم\n- بند").splitlines() == ["━━ عنوان ━━", "▸ قسم", "  • بند"]
 
+        # خطة ضخمة (50 خطوة بأسماء طويلة) لا تدفع أزرار البدء وحقل الإدخال خارج النافذة
+        big = [{"step_id": i, "action": "move", "target": "تقرير_المبيعات_السنوي_" + str(i) + ".pdf", "level": "REVERSIBLE",
+                "params": {"dest": "مستندات/تقرير_المبيعات_السنوي_" + str(i) + ".pdf"}} for i in range(1, 51)]
+        w._show_plan(big)
+        root.update_idletasks(); root.update()
+        for widget_ in (w.start_btn, w.entry, w.send_btn):
+            assert widget_.winfo_ismapped()
+            assert widget_.winfo_rooty() + widget_.winfo_height() <= root.winfo_rooty() + root.winfo_height() + 2
+        w._clear_plan()
+
         from assistant.ui.widget import step_detail
         assert step_detail({"cmd": 5, "dest": "x"}) == "← x" and step_detail(None) == ""
         assert "الأمر الفعلي: whoami" in step_detail({"cmd": ["whoami"]})
