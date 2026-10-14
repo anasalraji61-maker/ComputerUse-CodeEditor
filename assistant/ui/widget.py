@@ -94,6 +94,8 @@ class AssistantWidget:
         self.undo_btn = tk.Button(actions, text="↩ تراجع", font=FONT, relief="flat",
                                   command=self.controller.undo_last)
         self.undo_btn.pack(side="left", padx=2)
+        self.history_btn = tk.Button(actions, text="سجل المهام", font=FONT, relief="flat", command=self.controller.history)
+        self.history_btn.pack(side="left", padx=2)
 
         chips = tk.Frame(r, bg="#f5f5f5")
         chips.pack(fill="x", padx=8)
@@ -261,6 +263,16 @@ class AssistantWidget:
             self.set_status("انتهت المهمة")
             self._set_buttons(False)
             self._refresh_workspace_label()
+        elif t == "history":
+            STATUS_AR = {"SUCCESS": "نجحت", "FAILED": "فشلت", "STARTED": "لم تكتمل"}
+            if not ev["rows"]:
+                self.add_message("لا توجد مهام مسجلة بعد.", "assistant")
+            else:
+                lines = ["آخر المهام:"] + [
+                    f"• {STATUS_AR.get(r['status'], r['status'])} — {str(r['task_type'])[:50]} — {r['charged_points']} نقطة"
+                    for r in ev["rows"]
+                ]
+                self.add_message("\n".join(lines), "assistant")
         elif t == "workspace":
             self._refresh_workspace_label()
             self.add_message("مجلد العمل الآن: " + ev["path"], "ok")

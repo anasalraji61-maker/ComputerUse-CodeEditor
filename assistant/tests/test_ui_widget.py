@@ -91,6 +91,9 @@ try:
         assert w.apply_workspace(str(base / "ghost")) is False
         assert pump(root, lambda: "مجلد غير مقبول" in chat_text(w))
         assert "الرصيد" in w.balance_lbl.cget("text")
+        # سجل المهام
+        w.history_btn.invoke()
+        assert pump(root, lambda: "آخر المهام" in chat_text(w) or "لا توجد مهام" in chat_text(w))
         assert w.pretty_report("# عنوان\n## قسم\n- بند").splitlines() == ["━━ عنوان ━━", "▸ قسم", "  • بند"]
 
         root.destroy()

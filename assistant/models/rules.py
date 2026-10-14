@@ -25,7 +25,7 @@ CATEGORIES: Dict[str, Tuple[str, ...]] = {
 EXT_TO_CAT = {ext: cat for cat, exts in CATEGORIES.items() for ext in exts}
 OTHER = "أخرى"
 HELP_QUESTION = ("لم أفهم الطلب. اكتبه بإحدى هذه الصيغ: «رتّب الملفات حسب النوع» · «انسخ <اسم> إلى <مجلد>» · "
-                 "«أعد تسمية ملفات <مجلد> بإضافة البادئة <نص>» · «أنشئ مشروع <اسم>» · «افحص <اسم>» · «حدّث البرنامج <المعرّف>».")
+                 "«أعد تسمية ملفات <مجلد> بإضافة البادئة <نص>» · «انقل <نوع أو اسم> إلى <مجلد>» · «احذف <اسم>» · «أنشئ مشروع <اسم>» · «افحص <اسم>» · «حدّث البرنامج <المعرّف>».")
 
 _DIACRITICS = re.compile(r"[\u064B-\u0652\u0640]")
 
@@ -99,6 +99,10 @@ class RuleProvider(ModelProvider):
             return Analysis([_step(1, "winget_upgrade", pkg.group(0), "رمز الخروج 0 والحزمة ظاهرة في winget list")])
         if has("اعد تسميه", "غير اسم", "تسميه") and has("بادئه", "prefix", "بدايه", "بإضافه", "باضافه", "اضافه"):
             return self._rename(prompt, p, context, top_dirs)
+        if has("احذف", "امسح", "ازل ", "delete", "remove"):
+            return self._delete(prompt, p, context, top_files)
+        if has("انقل", "نقل ", "حرك ", "move"):
+            return self._move(prompt, p, context, top_dirs, top_files)
         if has("انسخ", "نسخ ", "نسخه احتياطيه", "backup"):
             return self._copy(prompt, p, context, top_dirs)
         if has("رتب", "ترتيب", "نظم", "تنظيم", "صنف", "فرز", "organize"):
@@ -177,6 +181,56 @@ class RuleProvider(ModelProvider):
         if dest_dir not in top_dirs:
             steps.append(_step(i, "create_dir", dest_dir, "وجود المجلد")); i += 1
         steps.append(_step(i, "copy", src, "الوجهة مطابقة للمصدر والمصدر سليم", dest=f"{dest_dir}/{base}"))
+        return Analysis(steps)
+
+    def _select(self, p: str, top_files: List[str]) -> Tuple[List[str], str]:
+        """يختار الملفات المقصودة: اسم صريح أو فئة (الصور) أو امتداد (pdf أو .tmp). يعيد (القائمة، نوع المعيار)."""
+        files = [f for f in top_files if not f.startswith(".")]
+        named = [f for f in files if norm(f) in p]
+        if named:
+            return [max(named, key=len)], "name"
+        for cat in CATEGORIES:
+            stem = norm(cat)
+            if re.search(r"(?<![\w])(?:ال)?" + re.escape(stem), p) or (cat == "صور" and "صوره" in p):
+                return [f for f in files if EXT_TO_CAT.get(f.rsplit(".", 1)[-1].lower() if "." in f else "") == cat], cat
+        exts = {m.lower() for m in re.findall(r"\.?\b([a-z0-9]{2,5})\b", p)}
+        exts = {e for e in exts if any(f.lower().endswith("." + e) for f in files)}
+        if exts:
+            return [f for f in files if "." in f and f.rsplit(".", 1)[-1].lower() in exts], "ext"
+        return [], ""
+
+    def _delete(self, prompt: str, p: str, context: List[str], top_files: List[str]) -> Analysis:
+        """الحذف = نقل إلى .trash (قابل للتراجع) ويحتاج موافقة لكل خطوة."""
+        sel, kind = self._select(p, top_files)
+        entry = self._find_entry(p, context)
+        targets = sel if kind else ([entry] if entry else [])
+        if not targets:
+            return Analysis(question="ما الملف أو المجلد الذي تريد حذفه؟ اكتب اسمه كما يظهر في مجلد العمل.")
+        steps = [_step(i, "delete", t, "العنصر اختفى من مكانه وصار في السلة بنفس المحتوى")
+                 for i, t in enumerate(sorted(targets)[:MAX_AUTO_STEPS], 1)]
+        return Analysis(steps)
+
+    def _move(self, prompt: str, p: str, context: List[str], top_dirs: List[str], top_files: List[str]) -> Analysis:
+        m = re.search(r"(?:الى|إلى)\s+(?:مجلد\s+)?[«\"']?([^\s«»\"'،,]+)", prompt)
+        if not m:
+            return Analysis(question="إلى أي مجلد تريد النقل؟ مثال: «انقل ملفات pdf إلى مستندات»")
+        dest_dir = _safe_name(m.group(1))
+        if not dest_dir:
+            return Analysis(question="ما اسم المجلد الذي تريد النقل إليه؟")
+        head = p.split(norm("الى"))[0]
+        sel, kind = self._select(head, top_files)
+        sources = sel
+        if not kind:
+            e = self._find_entry(head, context)
+            sources = [e] if e else []
+        sources = [s for s in sources if s.rstrip("/") != dest_dir]
+        if not sources:
+            return Analysis(question="ما الذي تريد نقله؟ اكتب اسم الملف/المجلد أو نوعه (مثل pdf أو الصور).")
+        steps, i = [], 1
+        if dest_dir not in top_dirs:
+            steps.append(_step(i, "create_dir", dest_dir, "وجود المجلد")); i += 1
+        for src in sorted(sources)[: MAX_AUTO_STEPS - len(steps)]:
+            steps.append(_step(i, "move", src, "المصدر اختفى والوجهة مطابقة", dest=f"{dest_dir}/{src.split('/')[-1]}")); i += 1
         return Analysis(steps)
 
     def _create(self, prompt: str) -> Analysis:

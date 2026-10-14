@@ -37,8 +37,9 @@ ACTION_LEVELS: Dict[str, SafetyLevel] = {
     "move": SafetyLevel.REVERSIBLE,
     "copy": SafetyLevel.REVERSIBLE,
     "rename": SafetyLevel.REVERSIBLE,
-    "delete": SafetyLevel.REVERSIBLE,   # يعني النقل إلى .trash وليس حذفاً نهائياً
-    "trash": SafetyLevel.REVERSIBLE,
+    # الحذف = نقل إلى .trash (قابل للتراجع)، لكن المواصفات تعدّه خطراً فيحتاج موافقة لكل خطوة
+    "delete": SafetyLevel.DANGEROUS,
+    "trash": SafetyLevel.DANGEROUS,
     # خطر: يحتاج موافقة لكل خطوة
     "winget_upgrade": SafetyLevel.DANGEROUS,
     "run_command": SafetyLevel.DANGEROUS,

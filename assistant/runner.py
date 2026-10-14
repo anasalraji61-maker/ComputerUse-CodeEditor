@@ -48,7 +48,7 @@ class TaskRunner:
         # فحص winget المستقل الافتراضي: winget list -q <id>؛ مع نفس المشغّل القابل للاستبدال
         self.version_probe = version_probe or (lambda pkg: self.winget.list_packages(pkg))
         self.planner = Planner(provider=provider)
-        self.verifier = Verifier(allowed_root=self.allowed_root, version_probe=self.version_probe)
+        self.verifier = Verifier(allowed_root=self.allowed_root, version_probe=self.version_probe, kill_switch=self.kill_switch)
         self._journal_starts: Dict[str, int] = {}
 
     def workspace_listing(self, max_entries: int = 60) -> str:
@@ -57,9 +57,10 @@ class TaskRunner:
         try:
             for p in sorted(self.allowed_root.rglob("*")):
                 rel = p.relative_to(self.allowed_root)
-                if rel.parts[0] in (".trash", ".undo_journal.json") or len(rel.parts) > 2:
+                if rel.parts[0] == ".trash" or rel.parts[0].startswith(".undo_journal") or len(rel.parts) > 2:
                     continue
-                out.append(rel.as_posix() + ("/" if p.is_dir() else ""))
+                name = "".join(ch for ch in rel.as_posix() if ch.isprintable())[:120]
+                out.append(name + ("/" if p.is_dir() else ""))
                 if len(out) >= max_entries:
                     out.append("… (القائمة مقتطعة)")
                     break

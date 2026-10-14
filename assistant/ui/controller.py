@@ -262,6 +262,13 @@ class AssistantController:
                 self._go(IDLE)
         self.emit("status", text="تم الضغط على الإيقاف.")
 
+    def history(self, limit: int = 10):
+        try:
+            rows = self.ledger.get_history(limit)
+        except Exception as exc:
+            return self.emit("error", text=f"تعذّر قراءة السجل: {exc}")
+        self.emit("history", rows=rows)
+
     def undo_last(self):
         if self.state == RUNNING:
             return self.emit("error", text="لا يمكن التراجع أثناء التنفيذ. أوقف المهمة أولاً.")

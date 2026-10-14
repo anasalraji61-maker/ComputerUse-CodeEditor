@@ -20,9 +20,10 @@ class PathEscapeError(Exception):
 class Verifier:
     """المدقّق المستقل: يحسب بنفسه ما يتوقعه من الخطة، ويقارن بالحالة الفعلية على القرص."""
 
-    def __init__(self, allowed_root: Path, version_probe: Optional[VersionProbe] = None):
+    def __init__(self, allowed_root: Path, version_probe: Optional[VersionProbe] = None, kill_switch=None):
         self.allowed_root = Path(allowed_root).resolve()
         self.trash_dir = self.allowed_root / ".trash"
+        self.kill_switch = kill_switch  # يُفحص داخل حلقات البصمة الطويلة
         # version_probe(package_id) -> (code, stdout, stderr)؛ بدونه لا يُقبل أي تدقيق لـ winget (فشل مغلق).
         self.version_probe = version_probe
 
@@ -31,6 +32,8 @@ class Verifier:
         h = hashlib.sha256()
         with open(file_path, "rb") as f:
             while chunk := f.read(65536):
+                if self.kill_switch is not None:
+                    self.kill_switch.check()
                 h.update(chunk)
         return h.hexdigest()
 

@@ -86,6 +86,15 @@ class SQLiteLedger:
             row = cur.fetchone()
             return int(row["total_spent"]) if row else 0
 
+    def get_history(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """آخر المهام المسجلة (الأحدث أولاً) لعرضها في الواجهة."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT task_id, task_type, status, charged_points, reason, created_at FROM transactions "
+                "WHERE status != 'REFUNDED' ORDER BY id DESC LIMIT ?", (int(limit),)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     @staticmethod
     def estimate_cost(task_type: str, steps_count: int = 1) -> int:
         """تقدير كلفة المهمة قبل التنفيذ: نقطة واحدة لكل ~8 خطوات نصية."""

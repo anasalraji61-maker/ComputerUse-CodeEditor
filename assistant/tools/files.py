@@ -49,15 +49,26 @@ class FileManager:
     def _load_journal(self) -> List[Dict[str, Any]]:
         if self.journal_path.exists():
             try:
-                return json.loads(self.journal_path.read_text(encoding="utf-8"))
+                data = json.loads(self.journal_path.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    return data
             except Exception:
-                return []
+                pass
+            # سجل تالف: لا نفقده بصمت، نحفظ نسخة للفحص ثم نبدأ سجلاً جديداً
+            try:
+                backup = self._get_unique_path(self.allowed_root / ".undo_journal.corrupt.json")
+                self.journal_path.replace(backup)
+            except Exception:
+                pass
+            return []
         return []
 
     def _save_journal(self):
         """حفظ سجل التراجع في JSON مع رفع استثناء عند الفشل لضمان عدم ضياع التوثيق (R11)."""
         data = json.dumps(self.journal, ensure_ascii=False, indent=2)
-        self.journal_path.write_text(data, encoding="utf-8")
+        tmp = self.journal_path.with_name(self.journal_path.name + ".tmp")
+        tmp.write_text(data, encoding="utf-8")
+        os.replace(str(tmp), str(self.journal_path))  # كتابة ذرّية: لا يبقى سجل نصف مكتوب
 
     def validate_path(self, path: Union[str, Path], allow_trash_internal: bool = False) -> Path:
         """التحقق الأمني الصارم من المسار (R7 و R8):
