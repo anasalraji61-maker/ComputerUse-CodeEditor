@@ -10,6 +10,7 @@
 import argparse
 import hashlib
 import sys
+import math
 import tempfile
 import time
 import pathlib
@@ -128,6 +129,15 @@ TASKS: List[BenchTask] = [
 ]
 
 
+def _scrub(text: str, tmp: str) -> str:
+    """يحذف المسارات المحلية (المؤقتة ومجلد المستخدم) من نص يُكتب في تقرير يُرفع إلى مستودع عام."""
+    for real, shown in ((str(pathlib.Path(tmp).resolve()), "<tmp>"), (str(pathlib.Path(tmp)), "<tmp>"),
+                        (str(pathlib.Path.home()), "~")):
+        if real:
+            text = text.replace(real, shown)
+    return text
+
+
 def _totals(provider: ModelProvider) -> Dict[str, Any]:
     fn = getattr(provider, "totals", None)
     return fn() if fn else {"calls": 0, "input_tokens": 0, "output_tokens": 0, "usd": 0.0, "points": 0.0}
@@ -136,6 +146,8 @@ def _totals(provider: ModelProvider) -> Dict[str, Any]:
 def run_bench(provider: ModelProvider, runs: int = 5, tasks: Optional[List[BenchTask]] = None,
               max_usd: float = 1.0, progress: Callable[[str], None] = lambda s: None) -> Dict[str, Any]:
     tasks = tasks or TASKS
+    if not (isinstance(max_usd, (int, float)) and math.isfinite(max_usd) and max_usd > 0):
+        raise ValueError("--max-usd يجب أن يكون عدداً موجباً محدوداً.")
     results: Dict[str, Dict[str, Any]] = {
         t.key: {"title": t.title, "runs": 0, "ok": 0, "steps": 0, "secs": 0.0,
                 "tin": 0, "tout": 0, "usd": 0.0, "failures": []} for t in tasks
@@ -175,7 +187,7 @@ def run_bench(provider: ModelProvider, runs: int = 5, tasks: Optional[List[Bench
                 r["tout"] += after["output_tokens"] - before["output_tokens"]
                 r["usd"] += after["usd"] - before["usd"]
                 if not success:
-                    r["failures"].append(f"دورة {n}: " + "; ".join(report.failures + check_failures))
+                    r["failures"].append(_scrub(f"دورة {n}: " + "; ".join(report.failures + check_failures), tmp))
                 progress(f"{t.key} دورة {n}: {'نجاح' if success else 'فشل'}")
         if stopped_for_budget:
             break

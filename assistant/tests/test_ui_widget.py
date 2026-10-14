@@ -79,7 +79,10 @@ try:
         assert pump(root, lambda: w._approval_win is None and chat_text(w).count("فشلت المهمة") == 2)
 
         # 4. تراجع عن آخر مهمة
-        w.undo_btn.invoke()  # آخر مهمة فاشلة بلا عمليات: لا شيء يُتراجع عنه
+        w.undo_btn.invoke()  # المهمتان الأخيرتان لم تغيّرا شيئاً؛ التراجع يعود لآخر مهمة غيّرت (إنشاء «تجربة»)
+        assert pump(root, lambda: "تم التراجع عن 1" in chat_text(w))
+        assert not (base / "ws" / "تجربة").exists()
+        w.undo_btn.invoke()  # لا شيء بعدها يُتراجع عنه
         assert pump(root, lambda: "لا يوجد ما يمكن التراجع" in chat_text(w))
         # 4ب. تراجع حقيقي عن مهمة ناجحة
         w.entry.insert(0, "أنشئ مجلد للتراجع")
@@ -89,7 +92,7 @@ try:
         assert pump(root, lambda: chat_text(w).count("تم بنجاح ✔") == 2)
         assert (base / "ws" / "للتراجع").is_dir()
         w.undo_btn.invoke()
-        assert pump(root, lambda: "تم التراجع عن 1" in chat_text(w))
+        assert pump(root, lambda: chat_text(w).count("تم التراجع عن 1") == 2)
         assert not (base / "ws" / "للتراجع").exists()
         # 3ب. الأمثلة السريعة تملأ الحقل، وتغيير المجلد يعمل ويرفض غير الصالح
         w.chips[0].invoke()
@@ -105,6 +108,14 @@ try:
         w.history_btn.invoke()
         assert pump(root, lambda: "آخر المهام" in chat_text(w) or "لا توجد مهام" in chat_text(w))
         assert w.pretty_report("# عنوان\n## قسم\n- بند").splitlines() == ["━━ عنوان ━━", "▸ قسم", "  • بند"]
+
+        from assistant.ui.widget import step_detail
+        assert step_detail({"cmd": 5, "dest": "x"}) == "← x" and step_detail(None) == ""
+        assert "الأمر الفعلي: whoami" in step_detail({"cmd": ["whoami"]})
+        # حدث تالف لا يُفقد بقية الأحداث
+        w.controller.event_queue.put({"type": "plan", "task_id": "t", "steps": [{"bad": 1}]})
+        w.controller.event_queue.put({"type": "status", "text": "بعد الحدث التالف"})
+        assert pump(root, lambda: "بعد الحدث التالف" in w.status.cget("text"))
 
         root.destroy()
 

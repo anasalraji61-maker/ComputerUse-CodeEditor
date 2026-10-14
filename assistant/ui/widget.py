@@ -16,6 +16,8 @@ def step_detail(params) -> str:
     """ملخص بارامترات الخطوة (الوجهة/الاسم الجديد/الأمر) لتظهر للمستخدم قبل التنفيذ والموافقة."""
     if not isinstance(params, dict):
         return ""
+    cmd = params.get("cmd")
+    params = {**params, "cmd": [str(c) for c in cmd] if isinstance(cmd, (list, tuple)) else None}
     parts = []
     if params.get("dest"):
         parts.append(f"← {params['dest']}")
@@ -231,7 +233,13 @@ class AssistantWidget:
     def _poll(self):
         try:
             for ev in self.controller.drain_events():
-                self.handle_event(ev)
+                try:
+                    self.handle_event(ev)
+                except Exception as exc:  # عطب في عرض حدث لا يجب أن يُفقد بقية الأحداث (تقرير/حالة)
+                    try:
+                        self.add_message(f"تعذّر عرض حدث ({ev.get('type')}): {type(exc).__name__}", "error")
+                    except Exception:
+                        pass
         finally:
             self.root.after(self.POLL_MS, self._poll)
 
@@ -242,7 +250,7 @@ class AssistantWidget:
         elif t == "error":
             self.add_message(ev["text"], "error")
             self.set_status("حدث خطأ")
-            self._set_buttons(False)
+            self._set_buttons(self.controller.state == "PLAN_READY")  # خطأ عابر لا يعطّل خطة ما زالت جاهزة
         elif t == "questions":
             self.awaiting_answers = True
             self.add_message("أحتاج توضيحاً قبل الخطة (أجب في سطر واحد):\n" +
@@ -270,6 +278,9 @@ class AssistantWidget:
             self.progress.configure(value=100.0 * ev["index"] / max(1, ev["total"]))
         elif t == "approval_request":
             self._ask_approval(ev["step"])
+        elif t == "approval_closed":
+            if self._approval_win is not None and getattr(self._approval_win, "approval_id", None) == ev.get("approval_id"):
+                self._close_approval()
         elif t == "report":
             self.add_message(self.pretty_report(ev["text"]), "report")
             self.add_message("تم بنجاح ✔" if ev["success"] else "فشلت المهمة ✖ (راجع التقرير أعلاه)",
@@ -296,8 +307,9 @@ class AssistantWidget:
     # ---------- نافذة الموافقة ----------
     def _ask_approval(self, step: Dict[str, Any]):
         if self._approval_win is not None:
-            return
+            self._close_approval()  # نافذة قديمة معلّقة: تُستبدل بالجديدة ولا تُترك لتوافق على خطوة مختلفة
         win = tk.Toplevel(self.root)
+        win.approval_id = step.get("approval_id")
         self._approval_win = win
         win.title("موافقة مطلوبة")
         win.attributes("-topmost", True)
@@ -312,7 +324,7 @@ class AssistantWidget:
         btns.pack(pady=12)
 
         def decide(ok: bool):
-            self.controller.respond_approval(ok, step.get("step_id"))
+            self.controller.respond_approval(ok, step.get("approval_id"))
             self._close_approval()
 
         tk.Button(btns, text="نعم، نفّذ", bg="#2e7d32", fg="white", font=FONT_B, relief="flat", padx=12,

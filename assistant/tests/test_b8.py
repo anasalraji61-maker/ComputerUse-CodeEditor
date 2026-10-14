@@ -77,7 +77,7 @@ try:
             fm = FileManager(root)
             assert raises(PathOutOfBoundsError, fm.delete, "ln") and (root / "real.txt").exists()
         except (OSError, NotImplementedError):
-            pass
+            print("NOTE: اختبار الروابط الرمزية لم يُنفَّذ هنا (ويندوز بلا صلاحية إنشاء رابط)")
 
     # 4. undo_task لا يلغي مهام أحدث، وبالترتيب الصحيح يعمل
     with tempfile.TemporaryDirectory() as tmp:
@@ -180,11 +180,11 @@ try:
     with tempfile.TemporaryDirectory() as tmp:
         root, led = mk(tmp)
         c = AssistantController(rp, root, led)
-        c._pending_step_id = 2
+        c._pending_approval = 2
         c._approval_result = False
-        c.respond_approval(True, step_id=1)
+        c.respond_approval(True, approval_id=1)
         assert c._approval_result is False and not c._approval_event.is_set()
-        c.respond_approval(True, step_id=2)
+        c.respond_approval(True, approval_id=2)
         assert c._approval_result is True and c._approval_event.is_set()
 
     # 14. مرادفات عربية شائعة للنقل والحذف

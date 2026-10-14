@@ -21,7 +21,7 @@ try:
     def net_for(label, calls):
         def transport(url, headers, body, timeout):
             calls.append((label, json.loads(body.decode())["model"]))
-            return 200, json.dumps({"content": [{"type": "text", "text": f"رد-{label}"}],
+            return 200, json.dumps({"content": [{"type": "text", "text": json.dumps({"r": label})}],
                                     "usage": {"input_tokens": 1_000_000, "output_tokens": 0}}).encode()
         return transport
 
@@ -34,13 +34,13 @@ try:
     assert ModelRouter.choose_tier("x", "CLARIFY — أسئلة") == SMALL
     assert ModelRouter.choose_tier("x", PLANNER_SYSTEM) == LARGE
     assert ModelRouter.choose_tier("x", "") == SMALL
-    assert r.generate("p", system_prompt=PLANNER_SYSTEM) == "رد-l"
-    assert r.generate("p", system_prompt="CLARIFY") == "رد-s"
+    assert r.generate("p", system_prompt=PLANNER_SYSTEM) == '{"r": "l"}'
+    assert r.generate("p", system_prompt="CLARIFY") == '{"r": "s"}'
     assert [c[1] for c in calls] == ["claude-sonnet-5-5", "claude-haiku-5-5"]
 
     # ذاكرة مؤقتة: نفس الطلب لا يستدعي الشبكة ولا يُكلّف
     n = len(calls)
-    assert r.generate("p", system_prompt=PLANNER_SYSTEM) == "رد-l" and len(calls) == n and r.cache_hits == 1
+    assert r.generate("p", system_prompt=PLANNER_SYSTEM) == '{"r": "l"}' and len(calls) == n and r.cache_hits == 1
     t = r.totals()
     assert t["calls"] == 2 and t["cache_hits"] == 1
     # مليون توكن إدخال لكل استدعاء: sonnet 2$ + haiku 0.10$
@@ -51,6 +51,22 @@ try:
     r.generate("p", system_prompt=PLANNER_SYSTEM)
     assert len(calls) == n + 1
 
+    # ردود تالفة لا تُخزَّن (إعادة الطلب تصل للنموذج)، وطلبان طويلان مختلفان لا يتصادمان بعد القصّ
+    bad_calls = []
+    def bad_net(url, headers, body, timeout):
+        bad_calls.append(1)
+        return 200, json.dumps({"content": [{"type": "text", "text": "ليس json"}], "usage": {"input_tokens": 1, "output_tokens": 1}}).encode()
+    rb = ModelRouter(AnthropicProvider("claude-haiku-5-5", api_key="k", transport=bad_net), max_prompt_chars=100)
+    rb.generate("x"); rb.generate("x")
+    assert len(bad_calls) == 2
+    ok_calls = []
+    def ok_net(url, headers, body, timeout):
+        ok_calls.append(1)
+        return 200, json.dumps({"content": [{"type": "text", "text": "{}"}], "usage": {"input_tokens": 1, "output_tokens": 1}}).encode()
+    rc = ModelRouter(AnthropicProvider("claude-haiku-5-5", api_key="k", transport=ok_net), max_prompt_chars=100)
+    rc.generate("أ" * 60 + "1" + "ب" * 500 + "ج" * 60); rc.generate("أ" * 60 + "2" + "ب" * 500 + "ج" * 60)
+    assert len(ok_calls) == 2
+
     # القصّ
     long = "ا" * 20000
     cut = truncate_text(long, 1000)
@@ -58,7 +74,7 @@ try:
 
     # التسعير
     assert abs(cost_usd("claude-sonnet-5-5", 1_000_000, 1_000_000) - 12.0) < 1e-9
-    assert cost_usd("unknown-model", 10, 10) == 0.0 and usd_to_points(0.06) == 2.0
+    assert cost_usd("unknown-model", 1_000_000, 1_000_000) == 14.0 and usd_to_points(0.06) == 2.0  # غير مسعَّر = أعلى سعر معروف لا مجاناً
 
     # المصنع
     prov, note = build_provider({})

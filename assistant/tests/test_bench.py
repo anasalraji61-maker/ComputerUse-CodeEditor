@@ -59,7 +59,7 @@ try:
     res = run_bench(router, runs=5, max_usd=0.25)
     assert res["stopped_for_budget"] is True
     ran = sum(r["runs"] for r in res["results"].values())
-    assert 2 <= ran <= 4, ran
+    assert ran == 3, ran  # 0.10$ لكل مهمة وسقف 0.25$: يتوقف بعد الثالثة بالضبط
     assert "توقف القياس مبكراً" in render_markdown(res)
 
     print("PASS: test_bench completed successfully")

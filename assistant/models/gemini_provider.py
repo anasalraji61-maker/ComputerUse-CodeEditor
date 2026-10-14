@@ -25,6 +25,11 @@ class GeminiProvider(HttpProvider):
             payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
         return url, headers, payload
 
+    def _usage(self, data: dict) -> Tuple[int, int]:
+        u = data.get("usageMetadata") or {}
+        # توكنات «التفكير» تُفوتر كإخراج ولا تظهر في candidatesTokenCount
+        return int(u.get("promptTokenCount", 0)), int(u.get("candidatesTokenCount", 0)) + int(u.get("thoughtsTokenCount", 0))
+
     def _parse(self, data: dict) -> Tuple[str, int, int]:
         cands = data.get("candidates")
         if not cands:

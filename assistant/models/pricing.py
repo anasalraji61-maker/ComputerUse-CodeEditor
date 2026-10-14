@@ -23,11 +23,17 @@ PRICES_PER_MTOK: Dict[str, Tuple[float, float]] = {
 COST_USD_PER_POINT = 0.03
 
 
+# نموذج غير مسعَّر لا يُحتسب مجاناً أبداً: نستعمل أعلى سعر معروف (تقدير متحفظ) ويُنبَّه في التقرير
+FALLBACK_PRICE: Tuple[float, float] = (2.00, 12.00)
+
+
+def is_priced(model: str) -> bool:
+    return model in PRICES_PER_MTOK
+
+
 def cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
-    """كلفة استدعاء بالدولار؛ نموذج مجهول = 0 مع بقاء التوكنات مسجلة (يُنبَّه في التقرير)."""
-    price = PRICES_PER_MTOK.get(model)
-    if price is None:
-        return 0.0
+    """كلفة استدعاء بالدولار؛ النموذج المجهول يُحسب بأعلى سعر معروف (تقدير متحفظ)."""
+    price = PRICES_PER_MTOK.get(model, FALLBACK_PRICE)
     return (input_tokens * price[0] + output_tokens * price[1]) / 1_000_000.0
 
 

@@ -46,3 +46,15 @@
 [IMPLEMENTED-awaiting-real-PASS] R36 (shell): NoDefaultCurrentDirectoryInExePath=1 حتى لا يُشغَّل exe مزروع في المجلد الحالي.
 [IMPLEMENTED-awaiting-real-PASS] R37: مجلدات الأب الضمنية (نقل/نسخ/create_dir متداخل) تُسجَّل وتُزال بالتراجع. [OPEN-low] سجل التراجع يخزن مسارات مطلقة (إعادة تسمية مجلد العمل تعطله).
 [IMPLEMENTED-awaiting-real-PASS] R38: ردّ الموافقة مرتبط برقم الخطوة؛ الردّ المتأخر/المكرر لخطوة أخرى يُتجاهل.
+
+## مراجعة مستقلة ثانية (2026-10-14): مزوّدات/دفتر/واجهة/جودة الاختبارات
+[IMPLEMENTED-awaiting-real-PASS] R39 (عالٍ، واجهة): نافذة موافقة قديمة قد توافق على خطوة مختلفة. الآن لكل طلب معرّف فريد، ويُغلق حدث approval_closed النافذة عند المهلة/الإيقاف، والنافذة القديمة تُستبدل، والردّ المتأخر يُتجاهل.
+[IMPLEMENTED-awaiting-real-PASS] R40 (عالٍ): استدعاءات الفهم والتخطيط بلا سقف ولا سجل. الآن UsageMeter يومي (assistant/usage.py، افتراضي 1$) يسجّل حتى الفاشل ويمنع الطلب عند البلوغ.
+[IMPLEMENTED-awaiting-real-PASS] R41: كلفة Gemini تتضمن توكنات التفكير؛ الاستهلاك يُسجَّل قبل تحليل الرد (رد فارغ مفوتَر)؛ نموذج غير مسعَّر = أعلى سعر لا مجاناً؛ سقف القياس لا يقبل nan/inf؛ المسارات المحلية تُحجب من MEASUREMENT.md.
+[IMPLEMENTED-awaiting-real-PASS] R42 (router): لا يُخزَّن إلا JSON صالح، والمفتاح قبل القصّ (لا تصادم).
+[IMPLEMENTED-awaiting-real-PASS] R43 (ledger): معاملات BEGIN IMMEDIATE، رفض القيم السالبة، معرّف مهمة فريد، استرجاع محدود بالمخصوم وغير متكرر، لا خصم لمهمة غير STARTED، السقف من القاعدة، top_up، "screen" ككلمة كاملة.
+[IMPLEMENTED-awaiting-real-PASS] R44 (واجهة): كل حدث يُعالَج في try/except، خطأ عابر لا يعطّل خطة جاهزة، step_detail يتحمل بارامترات تالفة، last_task_id يتبع آخر مهمة غيّرت شيئاً، فشل الدفتر بعد التنفيذ لا يمنع التراجع.
+[IMPLEMENTED-awaiting-real-PASS] R45 (planner): قائمة بيضاء للبارامترات حسب الإجراء ورفض محارف التحكم/الاتجاه في الأسماء.
+[IMPLEMENTED-awaiting-real-PASS] R46 (http): لا اتباع للتحويلات (المفتاح لا يُنسخ لمضيف آخر)، وإخفاء المفتاح مشفّراً بالرابط.
+[IMPLEMENTED-awaiting-real-PASS] R47 (أدوات): run_tests.py يعزل COS_DATA_DIR ويميّز SKIP؛ run_assistant.bat لا يشغّل التطبيق مرتين؛ تقوية اختبارات كانت لا تفشل أبداً.
+[OPEN-low] R48: Retry-After وكتم الإيقاف أثناء إعادة محاولة HTTP؛ sync_repo.bat يرفع حتى لو فشلت الاختبارات (مقصود لإظهار النتائج، لكن فاحص الأسرار لا يمنع الرفع).

@@ -1,5 +1,6 @@
 """الموجّه (Router): نموذج صغير للروتين وأكبر للتخطيط، مع ذاكرة مؤقتة وقصّ للسياق وحساب الكلفة بالنقاط."""
 import hashlib
+import json
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
@@ -40,11 +41,19 @@ class ModelRouter(ModelProvider):
             return LARGE
         return SMALL
 
+    @staticmethod
+    def _is_cacheable(text: str) -> bool:
+        """لا نخزّن إلا ردوداً صالحة (JSON قاموس)؛ الرد التالف يجب أن يُعاد طلبه لا أن يتكرر."""
+        try:
+            return isinstance(json.loads(text), dict)
+        except (ValueError, TypeError):
+            return False
+
     def generate(self, prompt: str, system_prompt: str = "", tier: Optional[str] = None) -> str:
         tier = tier or self.choose_tier(prompt, system_prompt)
+        key = hashlib.sha256(f"{tier}\x00{system_prompt}\x00{prompt}".encode("utf-8")).hexdigest()  # قبل القصّ: لا تصادم
         prompt = truncate_text(prompt, self.max_prompt_chars)
         system_prompt = truncate_text(system_prompt, self.max_prompt_chars)
-        key = hashlib.sha256(f"{tier}\x00{system_prompt}\x00{prompt}".encode("utf-8")).hexdigest()
         if self.cache_size and key in self._cache:
             self._cache.move_to_end(key)
             self.cache_hits += 1
@@ -56,7 +65,7 @@ class ModelRouter(ModelProvider):
         usd = cost_usd(getattr(provider, "model", ""), tin, tout)
         self.calls.append({"tier": tier, "cached": False, "model": getattr(provider, "model", provider.name()),
                            "input": tin, "output": tout, "usd": usd})
-        if self.cache_size:
+        if self.cache_size and self._is_cacheable(text):
             self._cache[key] = text
             while len(self._cache) > self.cache_size:
                 self._cache.popitem(last=False)

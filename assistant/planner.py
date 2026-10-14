@@ -40,6 +40,14 @@ def _extract_json(text: str) -> Any:
         raise PlanParseError(f"رد النموذج ليس JSON صالحاً: {exc}")
 
 
+def _clean_text(value: str, what: str, step_id) -> None:
+    """يرفض محارف التحكم والاتجاه (U+202E…) التي تخدع المستخدم في عرض الأسماء."""
+    import unicodedata
+    for ch in value:
+        if unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp"):
+            raise PlanParseError(f"الخطوة {step_id}: {what} يحوي محرفاً غير مرئي/تحكمياً (U+{ord(ch):04X}).")
+
+
 def _require_str(params: Dict[str, Any], key: str, action: str, step_id: int) -> None:
     v = params.get(key)
     if not isinstance(v, str) or not v.strip():
@@ -72,12 +80,23 @@ def validate_step(item: Any, index: int) -> PlanStep:
         cmd = params.get("cmd", [target])
         if not isinstance(cmd, list) or not cmd or not all(isinstance(c, str) for c in cmd):
             raise PlanParseError(f"الخطوة {raw_id}: params.cmd يجب أن تكون قائمة نصوص غير فارغة.")
+    _clean_text(target, "target", raw_id)
+    allowed = {"move": ("dest", "expected_hash"), "copy": ("dest", "expected_hash"),
+               "rename": ("new_name",), "run_command": ("cmd",)}.get(action, ())
+    clean_params = {k: params[k] for k in allowed if k in params}  # بارامترات الإجراء فقط؛ لا شيء غريب يمر
+    for k in ("dest", "new_name", "expected_hash"):
+        if k in clean_params:
+            if not isinstance(clean_params[k], str):
+                raise PlanParseError(f"الخطوة {raw_id}: params.{k} يجب أن يكون نصاً.")
+            _clean_text(clean_params[k], f"params.{k}", raw_id)
+    for c in clean_params.get("cmd", []):
+        _clean_text(c, "params.cmd", raw_id)
     crit = item.get("acceptance_criteria", "تحقق الحالة الفعلية")
     return PlanStep(
         step_id=raw_id,
         action_type=action,
         target=target.strip(),
-        params=dict(params),
+        params=clean_params,
         acceptance_criteria=str(crit),
     )
 

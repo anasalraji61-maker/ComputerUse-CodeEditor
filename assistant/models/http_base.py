@@ -3,6 +3,7 @@ import json
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Tuple
@@ -35,10 +36,20 @@ class Usage:
         self.usd += cost_usd(model, tin, tout)
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """لا نتبع التحويلات أبداً: urllib ينسخ ترويسة المفتاح إلى المضيف الجديد."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def default_transport(url: str, headers: Dict[str, str], body: bytes, timeout: float) -> Tuple[int, bytes]:
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _OPENER.open(req, timeout=timeout) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read()
@@ -84,13 +95,21 @@ class HttpProvider(ModelProvider):
         return self._api_key
 
     def _redact(self, text: str) -> str:
-        return text.replace(self._api_key, "***") if self._api_key else text
+        if not self._api_key:
+            return text
+        for variant in {self._api_key, urllib.parse.quote(self._api_key, safe=""), urllib.parse.quote_plus(self._api_key)}:
+            text = text.replace(variant, "***")
+        return text
 
     # يوفّرها الصنف الفرعي
     def _build(self, prompt: str, system_prompt: str) -> Tuple[str, Dict[str, str], dict]:
         raise NotImplementedError
 
     def _parse(self, data: dict) -> Tuple[str, int, int]:
+        raise NotImplementedError
+
+    def _usage(self, data: dict) -> Tuple[int, int]:
+        """(توكنات الإدخال، توكنات الإخراج المفوترة) من رد صالح؛ تُسجَّل حتى لو كان النص فارغاً (الخدمة تفوتر)."""
         raise NotImplementedError
 
     def generate(self, prompt: str, system_prompt: str = "") -> str:
@@ -110,11 +129,16 @@ class HttpProvider(ModelProvider):
             snippet = self._redact(raw.decode("utf-8", "replace"))[:200]
             raise ProviderError(f"خطأ من خدمة {self.PROVIDER_LABEL} (رمز {status}): {snippet}")
         try:
-            text, tin, tout = self._parse(json.loads(raw.decode("utf-8")))
+            data = json.loads(raw.decode("utf-8"))
+            tin, tout = self._usage(data)
+        except Exception:
+            raise ProviderError(f"رد غير مفهوم من خدمة {self.PROVIDER_LABEL}.") from None
+        self.last_usage = (tin, tout)
+        self.usage.add(self.model, tin, tout)  # الفوترة تحدث حتى لو فشل تحليل النص لاحقاً
+        try:
+            text, _, _ = self._parse(data)
         except ProviderError:
             raise
         except Exception:
             raise ProviderError(f"رد غير مفهوم من خدمة {self.PROVIDER_LABEL}.") from None
-        self.last_usage = (tin, tout)
-        self.usage.add(self.model, tin, tout)
         return text

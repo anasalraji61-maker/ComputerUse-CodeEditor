@@ -30,6 +30,10 @@ class AnthropicProvider(HttpProvider):
             payload["system"] = system_prompt
         return API_URL, headers, payload
 
+    def _usage(self, data: dict) -> Tuple[int, int]:
+        u = data.get("usage") or {}
+        return int(u.get("input_tokens", 0)), int(u.get("output_tokens", 0))
+
     def _parse(self, data: dict) -> Tuple[str, int, int]:
         blocks = data.get("content")
         if not isinstance(blocks, list):

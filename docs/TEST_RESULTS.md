@@ -1,15 +1,16 @@
 # نتائج الاختبارات الفعلية (آلية)
 
-آخر تشغيل: 2026-10-14 09:51:10 — 23 ملف، فشل: 0
+آخر تشغيل: 2026-10-14 10:06:11 — 24 ملف، فشل: 0
 
 هذه النتائج تُنتَج على لابتوب المالك. لا تدّعِ نجاحاً غير مذكور هنا.
 
 | الملف | النتيجة | الزمن |
 |---|---|---|
+| `assistant/tests/test_b11.py` | PASS | 0.8s |
 | `assistant/tests/test_b6.py` | PASS | 0.3s |
 | `assistant/tests/test_b8.py` | PASS | 0.4s |
-| `assistant/tests/test_bench.py` | PASS | 0.7s |
-| `assistant/tests/test_benchmarks_20runs.py` | PASS | 1.3s |
+| `assistant/tests/test_bench.py` | PASS | 0.6s |
+| `assistant/tests/test_benchmarks_20runs.py` | PASS | 1.2s |
 | `assistant/tests/test_budget.py` | PASS | 0.1s |
 | `assistant/tests/test_config.py` | PASS | 0.3s |
 | `assistant/tests/test_controller.py` | PASS | 0.5s |
@@ -25,17 +26,22 @@
 | `assistant/tests/test_rules.py` | PASS | 0.5s |
 | `assistant/tests/test_runner.py` | PASS | 0.2s |
 | `assistant/tests/test_safety.py` | PASS | 0.1s |
-| `assistant/tests/test_scripts.py` | PASS | 0.1s |
+| `assistant/tests/test_scripts.py` | PASS | 0.0s |
 | `assistant/tests/test_shell.py` | PASS | 0.1s |
 | `assistant/tests/test_smoke.py` | PASS | 0.1s |
-| `assistant/tests/test_ui_widget.py` | PASS | 2.1s |
+| `assistant/tests/test_ui_widget.py` | PASS | 2.3s |
 
+### assistant/tests/test_b11.py
+```
+PASS: test_b11 completed successfully
+```
 ### assistant/tests/test_b6.py
 ```
 PASS: test_b6 completed successfully
 ```
 ### assistant/tests/test_b8.py
 ```
+NOTE: اختبار الروابط الرمزية لم يُنفَّذ هنا (ويندوز بلا صلاحية إنشاء رابط)
 PASS: test_b8 completed successfully
 ```
 ### assistant/tests/test_bench.py

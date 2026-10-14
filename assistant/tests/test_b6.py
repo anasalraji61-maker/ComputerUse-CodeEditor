@@ -82,12 +82,11 @@ try:
         v = Verifier(root, kill_switch=ks)
         assert v.calculate_hash(big) == hashlib.sha256(big.read_bytes()).hexdigest()
         ks.trigger("test")
+        from assistant.safety import EmergencyStopTriggered
         try:
             v.calculate_hash(big)
             raise AssertionError("كان يجب قطع الحساب")
-        except AssertionError:
-            raise
-        except Exception:
+        except EmergencyStopTriggered:
             pass
 
     # 5. السجل في السجل المالي والمتحكم

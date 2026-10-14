@@ -31,8 +31,11 @@ IDLE, CLARIFYING, PLANNING, PLAN_READY, RUNNING = "IDLE", "CLARIFYING", "PLANNIN
 
 class AssistantController:
     def __init__(self, provider: ModelProvider, allowed_root, ledger: SQLiteLedger, winget_runner=None,
-                 approval_timeout: float = APPROVAL_TIMEOUT_SEC):
+                 approval_timeout: float = APPROVAL_TIMEOUT_SEC, usage_meter=None):
         self.provider = provider
+        self.usage_meter = usage_meter
+        self._approval_seq = 0
+        self._pending_approval = None
         self.kill_switch = KillSwitch()
         self.event_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self.state = IDLE
@@ -126,6 +129,8 @@ class AssistantController:
                 return self.emit("error", text="المساعد مشغول بمهمة حالية. أوقفها أو انتظر انتهاءها.")
             if not text:
                 return self.emit("error", text="اكتب طلبك أولاً.")
+            if self.usage_meter is not None and self.usage_meter.exceeded():
+                return self.emit("error", text=self.usage_meter.message())
             self.kill_switch.reset()
             self._planning_cancelled = False
             self._request = text
@@ -147,8 +152,27 @@ class AssistantController:
             self.emit("status", text="أُلغي الطلب بسبب الإيقاف.")
         return cancelled
 
+    def _usd_total(self) -> float:
+        fn = getattr(self.provider, "totals", None)
+        try:
+            return float(fn().get("usd", 0.0)) if callable(fn) else 0.0
+        except Exception:
+            return 0.0
+
+    def _record_spend(self, before: float):
+        """يسجّل كلفة استدعاءات النموذج (فهم/تخطيط) في عدّاد الاستهلاك اليومي حتى لو فشل الطلب."""
+        spent = max(0.0, self._usd_total() - before)
+        if spent > 0 and self.usage_meter is not None:
+            try:
+                self.usage_meter.add(spent)
+            except Exception:
+                pass
+        return spent
+
     def _clarify_then_plan(self, text: str):
+        before = self._usd_total()
         questions = self._ask_questions(text)
+        self._record_spend(before)
         if self._cancel_if_stopped():
             return
         if questions:
@@ -182,16 +206,22 @@ class AssistantController:
 
     # ---------- 2) الخطة ----------
     def _make_plan(self, text: str):
+        before = self._usd_total()
         try:
             plan = self.runner.make_plan(text)
         except PlanParseError as exc:
+            self._record_spend(before)
             with self._lock:
                 self._go(IDLE)
             return self.emit("error", text=f"تعذّر فهم الخطة: {exc}")
         except Exception as exc:
+            self._record_spend(before)
             with self._lock:
                 self._go(IDLE)
             return self.emit("error", text=f"تعذّر التخطيط: {exc}")
+        spent = self._record_spend(before)
+        if spent > 0:
+            self.emit("status", text=f"كلفة التخطيط: {spent:.4f}$")
         if self._cancel_if_stopped():
             return
         with self._lock:
@@ -229,7 +259,8 @@ class AssistantController:
         event = None
         try:
             report = self.runner.run(task_id, objective, plan=plan, progress=self._on_progress)
-            self.last_task_id = task_id
+            if report.undo_available:  # مهمة لم تغيّر شيئاً لا تحجب التراجع عن سابقتها
+                self.last_task_id = task_id
             event = ("report", dict(success=report.success, text=report.render_arabic_text(),
                                     undo_available=report.undo_available, task_id=task_id))
         except Exception as exc:
@@ -256,21 +287,32 @@ class AssistantController:
 
     # ---------- 4) الموافقة لكل خطوة خطرة ----------
     def _approve(self, step: PlanStep) -> bool:
-        """تُستدعى من خيط التنفيذ: تنتظر قرار المستخدم؛ الإيقاف أو المهلة = رفض."""
+        """تُستدعى من خيط التنفيذ: تنتظر قرار المستخدم؛ الإيقاف أو المهلة = رفض. لكل طلب معرّف فريد."""
+        with self._lock:
+            self._approval_seq += 1
+            aid = self._approval_seq
+            self._pending_approval = aid
         self._approval_event.clear()
         self._approval_result = False
-        self._pending_step_id = step.step_id
+        if self.kill_switch.is_triggered:  # الإيقاف سبق الطلب (لا ننتظر 120 ثانية)
+            self._pending_approval = None
+            return False
         self.emit("approval_request", step={
-            "step_id": step.step_id, "action": step.action_type, "target": step.target, "params": step.params})
+            "step_id": step.step_id, "action": step.action_type, "target": step.target, "params": step.params,
+            "approval_id": aid})
         self._approval_event.wait(timeout=self._approval_timeout)
-        result = self._approval_result and not self.kill_switch.is_triggered
+        result = self._approval_result and not self.kill_switch.is_triggered and self._pending_approval == aid
+        self._pending_approval = None  # أي ردّ متأخر بعد هذه اللحظة يُتجاهل
         self._approval_event.clear()
         self._approval_result = False
+        self.emit("approval_closed", approval_id=aid)  # تُغلق الواجهة النافذة المعلّقة (مهلة/إيقاف/نهاية)
         return result
 
-    def respond_approval(self, approved: bool, step_id=None):
-        """step_id (اختياري): ردّ متأخر أو مكرر على خطوة سابقة يُتجاهل ولا يُحتسب لخطوة أخرى."""
-        if step_id is not None and step_id != getattr(self, "_pending_step_id", step_id):
+    def respond_approval(self, approved: bool, approval_id=None):
+        """approval_id: ردّ متأخر أو مكرر على طلب آخر يُتجاهل (لا يُحتسب لخطوة أخرى)."""
+        if approval_id is not None and approval_id != self._pending_approval:
+            return
+        if self._pending_approval is None:
             return
         self._approval_result = bool(approved)
         self._approval_event.set()

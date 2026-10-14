@@ -95,7 +95,7 @@ try:
     assert len(net.requests) == 3
 
     # ---- مفتاح مرفوض ----
-    p = AnthropicProvider(api_key=FAKE_KEY, transport=Net((401, b"invalid x-api-key")))
+    p = AnthropicProvider(api_key=FAKE_KEY, transport=Net((401, b"invalid x-api-key " + FAKE_KEY.encode())))
     try:
         p.generate("x")
         raise AssertionError

@@ -1,4 +1,5 @@
 """المنسّق (TaskRunner) — دورة العمل الكاملة: دفتر ← تخطيط ← فحص مسبق ← تنفيذ وتدقيق لكل خطوة ← تقرير."""
+import sqlite3
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -138,10 +139,13 @@ class TaskRunner:
                 if success:
                     try:
                         self.ledger.record_task_success(task_id, charged_points=charge)
-                    except (SpendingLimitExceededError, InsufficientBalanceError, ValueError) as exc:
+                    except (SpendingLimitExceededError, InsufficientBalanceError, ValueError, sqlite3.Error) as exc:
                         failures.append(f"تعذّر تسجيل الكلفة في الدفتر: {exc}")
                         success = False
-                        self.ledger.record_task_failure(task_id, reason=str(exc), is_platform_failure=True)
+                        try:
+                            self.ledger.record_task_failure(task_id, reason=str(exc), is_platform_failure=True)
+                        except Exception:
+                            pass  # الملفات تغيّرت فعلاً والتقرير يوضح ذلك؛ التراجع متاح
                 else:
                     self.ledger.record_task_failure(
                         task_id, reason="; ".join(failures) or "فشل", is_platform_failure=platform_failure

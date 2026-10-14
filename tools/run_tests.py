@@ -37,12 +37,15 @@ def is_test(p):
 
 
 def run(path):
-    env = dict(os.environ, COS_TEST_MODE="1", PYTHONIOENCODING="utf-8")
+    import tempfile
     t0 = time.time()
     try:
-        r = subprocess.run([sys.executable, str(path)], cwd=ROOT, env=env,
-                           capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=TIMEOUT)
+        # بيانات التطبيق في مجلد مؤقت: الاختبارات لا تمس إعدادات المالك الحقيقية (~/.cos_assistant)
+        with tempfile.TemporaryDirectory() as data:
+            env = dict(os.environ, COS_TEST_MODE="1", PYTHONIOENCODING="utf-8", COS_DATA_DIR=data)
+            r = subprocess.run([sys.executable, str(path)], cwd=ROOT, env=env,
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=TIMEOUT)
         out = (r.stdout + r.stderr).strip()
         return r.returncode == 0, out, time.time() - t0
     except subprocess.TimeoutExpired:
@@ -58,7 +61,8 @@ def main():
     for p in tests:
         ok, out, secs = run(p)
         rel = p.relative_to(ROOT).as_posix()
-        rows.append(f"| `{rel}` | {'PASS' if ok else '**FAIL**'} | {secs:.1f}s |")
+        skipped = ok and out.splitlines() and out.splitlines()[-1].startswith("SKIP")
+        rows.append(f"| `{rel}` | {'SKIP (لم يُختبر فعلياً)' if skipped else ('PASS' if ok else '**FAIL**')} | {secs:.1f}s |")
         tail = "\n".join(out.splitlines()[-(5 if ok else 40):])
         details.append(f"### {rel}\n```\n{tail}\n```")
         failed += 0 if ok else 1

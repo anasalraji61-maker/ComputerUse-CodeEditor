@@ -28,7 +28,11 @@ def build_controller(provider=None):
     workspace.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
     ledger = SQLiteLedger(db_path=data_dir / "ledger.db", initial_balance=100, spending_limit=100)
-    return AssistantController(provider=provider, allowed_root=workspace, ledger=ledger), notice
+    if ledger.get_balance() < 20:  # مرحلة تجريبية للمالك: شحن تلقائي صغير بدل أن يتوقف التطبيق للأبد
+        ledger.top_up(100, "شحن تجريبي تلقائي")
+    from assistant.usage import UsageMeter
+    meter = UsageMeter(data_dir / "usage.json")
+    return AssistantController(provider=provider, allowed_root=workspace, ledger=ledger, usage_meter=meter), notice
 
 
 def main() -> int:
