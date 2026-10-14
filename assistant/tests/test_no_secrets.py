@@ -11,6 +11,12 @@ try:
         re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}"),
         re.compile(r"AIza[0-9A-Za-z_\-]{30,}"),
         re.compile(r"sk-[A-Za-z0-9]{32,}"),
+        re.compile(r"sk-proj-[A-Za-z0-9_\-]{20,}"),
+        re.compile(r"gh[pousr]_[A-Za-z0-9]{30,}"),
+        re.compile(r"github_pat_[A-Za-z0-9_]{30,}"),
+        re.compile(r"xox[abprs]-[A-Za-z0-9\-]{10,}"),
+        re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+        re.compile(r"AKIA[0-9A-Z]{16}"),
         re.compile(r"(?i)(api[_-]?key|secret|token)\s*[:=]\s*['\"][A-Za-z0-9_\-]{24,}['\"]"),
     ]
     import subprocess
@@ -36,6 +42,10 @@ try:
         n = p.name.lower()
         if (n == ".env" or n.endswith(".env") or (n.startswith(".env.") and n != ".env.example")) and n != "example.env":
             hits.append(f"{p.relative_to(ROOT)}: ملف بيئة داخل المستودع")
+            continue
+        if n in ("key.txt", "keys.txt", "secret.txt", "secrets.json", "id_rsa", "id_ed25519") or n.startswith("credentials.") \
+                or n.endswith((".pem", ".pfx", ".p12")):
+            hits.append(f"{p.relative_to(ROOT)}: اسم ملف يشبه ملف أسرار")
             continue
         if p.resolve() == pathlib.Path(__file__).resolve():
             continue

@@ -39,7 +39,7 @@ import traceback
 from pathlib import Path, PurePosixPath
 
 sys.dont_write_bytecode = True  # never touch the repo tree
-REPO = os.environ.get("FUZZ_REPO", "/tmp/claude-0/-home-claude/6f71fe19-d117-55ab-86fb-d3ded5cb1298/scratchpad/repo2")
+REPO = os.environ.get("FUZZ_REPO") or str(Path(__file__).resolve().parent.parent)
 sys.path.insert(0, REPO)
 
 from assistant.models.rules import RuleProvider          # noqa: E402

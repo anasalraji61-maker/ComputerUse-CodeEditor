@@ -42,3 +42,4 @@ secrets*.json
 config.local.json
 tools/sync.log
 tools/.last_tested
+tools/SYNC_FAILED.txt

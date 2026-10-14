@@ -94,6 +94,8 @@ class ShellTool:
         result = subprocess.run(
             exec_args,
             cwd=working_dir,
+            stdin=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             shell=False,  # محظور تشغيل shell=True إطلاقاً
             capture_output=True,
             text=True,

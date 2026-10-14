@@ -11,6 +11,7 @@ if exist ".env" (
 rem ملفات السجل لا ترفع
 findstr /x /c:"tools/sync.log" .gitignore >nul 2>&1 || echo tools/sync.log>>.gitignore
 findstr /x /c:"tools/.last_tested" .gitignore >nul 2>&1 || echo tools/.last_tested>>.gitignore
+findstr /x /c:"tools/SYNC_FAILED.txt" .gitignore >nul 2>&1 || echo tools/SYNC_FAILED.txt>>.gitignore
 
 for /f %%b in ('git rev-parse --abbrev-ref HEAD') do set BR=%%b
 
@@ -25,8 +26,8 @@ if exist ".git\rebase-merge" exit /b 5
 if exist ".git\rebase-apply" exit /b 5
 
 rem اختبارات فعلية (تعيد التشغيل فقط عند تغير ملفات py). عند الفشل: لا يرفع الكود، يرفع ملف النتائج فقط لتراه
-set PYEXE=py
-where python >nul 2>&1 && set PYEXE=python
+set PYEXE=python
+where py >nul 2>&1 && set PYEXE=py
 %PYEXE% tools\run_tests.py >> tools\sync.log 2>&1
 if errorlevel 1 (
   echo TESTS FAILING - code not pushed >> tools\sync.log
@@ -37,7 +38,19 @@ if errorlevel 1 (
   exit /b 3
 )
 
-git add -A
+rem allowlist: only known project paths are staged (never secrets or stray files)
+for %%P in (assistant bench docs tools launch.py README.md requirements.txt run_assistant.bat run_bench.bat build_exe.bat .gitignore .gitattributes) do if exist "%%P" git add -A -- "%%P" >> tools\sync.log 2>&1
 git diff --cached --quiet || git commit -m "sync: local changes %DATE% %TIME%" >> tools\sync.log 2>&1
+if errorlevel 1 (
+  echo COMMIT FAILED >> tools\sync.log
+  echo COMMIT FAILED > tools\SYNC_FAILED.txt
+  exit /b 7
+)
 git push origin %BR% >> tools\sync.log 2>&1
+if errorlevel 1 (
+  echo PUSH FAILED >> tools\sync.log
+  echo PUSH FAILED > tools\SYNC_FAILED.txt
+  exit /b 8
+)
+if exist tools\SYNC_FAILED.txt del tools\SYNC_FAILED.txt
 exit /b 0

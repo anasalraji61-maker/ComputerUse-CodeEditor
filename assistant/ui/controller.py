@@ -11,7 +11,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from assistant.models.base import ModelProvider, CONTEXT_MARKER
-from assistant.models.rules import parse_context, strip_format_chars
+from assistant.models.rules import parse_context, strip_format_chars, merge_clarification, INFO_PREFIX
 from assistant.executor import ApprovalTimedOut
 from assistant.planner import PlanStep, PlanParseError, sanitize_display
 from assistant.runner import TaskRunner
@@ -45,6 +45,7 @@ class AssistantController:
         self._gen = 0  # جيل الطلب: الإيقاف يرفع الرقم فيُهمَل أي ناتج متأخر من خيط قديم
         self._lock = threading.RLock()
         self._request = ""
+        self._slots: List[Optional[str]] = []
         self._plan: Optional[List[PlanStep]] = None
         self._task_id: Optional[str] = None
         self.last_task_id: Optional[str] = None
@@ -223,13 +224,17 @@ class AssistantController:
         self._make_plan(text, gen)
 
     def _ask_questions(self, text: str) -> List[str]:
+        self._slots = []
         try:
             raw = self.provider.generate(
                 text, system_prompt=CLARIFY_SYSTEM + "\n\n" + CONTEXT_MARKER + "\n" + self.runner.workspace_listing())
             data = json.loads(raw)
             qs = data.get("questions", []) if isinstance(data, dict) else []
-            clean = [c for c in (sanitize_display(q, 400) for q in qs if isinstance(q, str)) if c]
-            return clean[:MAX_QUESTIONS]
+            raw_slots = data.get("slots", []) if isinstance(data, dict) else []
+            slots = [raw_slots[i] if i < len(raw_slots) and isinstance(raw_slots[i], str) else None for i in range(len(qs))]
+            pairs = [(c, sl) for c, sl in ((sanitize_display(q, 400), sl) for q, sl in zip(qs, slots) if isinstance(q, str)) if c]
+            self._slots = [sl for _, sl in pairs][:MAX_QUESTIONS]   # نوع الخانة الناقصة لكل سؤال (من القواعد فقط)
+            return [c for c, _ in pairs][:MAX_QUESTIONS]
         except Exception:
             return []  # أي عطب في مرحلة التوضيح لا يمنع التخطيط
 
@@ -244,8 +249,13 @@ class AssistantController:
             self._gen += 1
             gen = self._gen
             self._go(PLANNING)
-        extra = " | ".join(c for c in (sanitize_display(a, 300) for a in answers if isinstance(a, str)) if c)
-        full = (self._request + (f"\nتوضيحات المستخدم: {extra}" if extra else ""))[:MAX_REQUEST_CHARS + 600]
+        clean = [c for c in (sanitize_display(a, 300) for a in answers if isinstance(a, str)) if c]
+        extra = " | ".join(clean)
+        slots = getattr(self, "_slots", None) or []
+        merged = None
+        if len(clean) == 1 and len(slots) == 1:   # جواب عارٍ على سؤال بخانة معروفة ← جملة صريحة («إلى X» / «باسم X»…) بدل لصقه نصاً حراً
+            merged = merge_clarification(self._request, slots[0], clean[0])
+        full = (merged if merged else self._request + (f"\nتوضيحات المستخدم: {extra}" if extra else ""))[:MAX_REQUEST_CHARS + 600]
         self.emit("status", text="أُعدّ الخطة…")
         self._spawn(self._make_plan, full, gen)
 
@@ -260,8 +270,13 @@ class AssistantController:
                 if gen != self._gen:
                     return
                 self._go(IDLE)
+            msg = sanitize_display(exc, 400)
+            if isinstance(exc, PlanParseError) and msg.startswith(INFO_PREFIX):
+                # لا شيء للتنفيذ (مثل «لم أجد ملفات مكررة» أو «موجودة أصلاً»): نتيجة عادية لا خطأ
+                self.emit("status", text=msg)
+                return self.emit("info", text=msg)
             what = "تعذّر فهم الخطة" if isinstance(exc, PlanParseError) else "تعذّر التخطيط"
-            return self.emit("error", text=f"{what}: {sanitize_display(exc, 400)}")
+            return self.emit("error", text=f"{what}: {msg}")
         spent = self._record_spend(before)
         if spent > 0:
             self.emit("status", text=f"كلفة التخطيط: {spent:.4f}$")

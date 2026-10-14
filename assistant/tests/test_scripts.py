@@ -14,6 +14,9 @@ try:
         raw.decode("ascii")  # يرفع إن وُجد غير ASCII
         low = raw.lower()
         assert b"sk-ant" not in low and b"api_key=" not in low.replace(b"set anthropic_api_key=", b""), p.name
+    for p in bats:  # كل .bat بنهايات CRLF صرفة (LF منفرد يكسر أوامر cmd أحياناً)
+        raw = p.read_bytes()
+        assert b"\r\n" in raw and b"\n" not in raw.replace(b"\r\n", b""), f"{p.name}: يجب CRLF صرف"
     assert (ROOT / "launch.py").is_file()
     ga = (ROOT / ".gitattributes").read_text(encoding="utf-8")
     assert "*.bat text eol=crlf" in ga, "يجب فرض CRLF لملفات bat عبر .gitattributes"

@@ -81,7 +81,8 @@ try:
     s, _ = plan("انقل pic1.jpg الى «ألبوم جديد»")
     assert s[0] == ("create_dir", "ألبوم جديد", None) and s[1][2] == "ألبوم جديد/pic1.jpg", s
     asks("انقل pic1.jpg الى ألبوم جديد")
-    asks("انقل a.txt الى Docs")                  # Docs/a.txt موجود
+    s, a = plan("انقل a.txt الى Docs")           # Docs/a.txt موجود: B29 يحفظه باسم «(1)» بدل سؤال لا يُجاب عنه ولا يستبدل شيئاً
+    assert s == [("move", "a.txt", "Docs/a (1).txt")] and a.note, (s, a.note)
     s, a = plan("انقل Docs/in1.txt الى Docs")
     assert not s and a.note
     s, _ = plan("انسخ a.txt الى backup")         # حالة الأحرف: يستعمل Backup الموجود

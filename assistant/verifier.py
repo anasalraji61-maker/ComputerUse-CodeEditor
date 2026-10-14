@@ -119,6 +119,24 @@ class Verifier:
                 snap["probe_line"] = None
         return snap
 
+    MAX_LISTED = 40
+
+    def _listing(self, p: Path) -> str:
+        """قائمة عناصر المجلد (مقتطعة بحد معقول) ليعرض تقرير الفحص ما بداخله لا «مجلد موجود» فقط. قراءة أسماء فقط."""
+        try:
+            names = []
+            for e in sorted(os.scandir(str(p)), key=lambda x: (not x.is_dir(follow_symlinks=False), x.name.lower())):
+                if p == self.allowed_root and (e.name == ".trash" or e.name.startswith(".undo_journal")):
+                    continue
+                names.append(e.name + ("/" if e.is_dir(follow_symlinks=False) else ""))
+        except OSError:
+            return ""
+        if not names:
+            return " (فارغ)"
+        shown = "، ".join(names[: self.MAX_LISTED])
+        more = f" … و{len(names) - self.MAX_LISTED} عنصراً آخر" if len(names) > self.MAX_LISTED else ""
+        return f" — يحوي {len(names)} عنصراً: {shown}{more}"
+
     @staticmethod
     def _package_line(out: str, pkg: str) -> str:
         """سطر الحزمة بمطابقة معرّفها كاملاً (عمود Id) لا كجزء من معرّف آخر: Git.GitLFS ليس Git.Git."""
@@ -165,7 +183,10 @@ class Verifier:
                 if not p.exists():
                     return fail(f"العنصر '{step.target}' غير موجود فعلياً.")
                 ev["type"] = "فحص فعلي"
-                ev["value"] = ("مجلد" if p.is_dir() else f"ملف بحجم {p.stat().st_size} بايت") + " موجود"
+                if p.is_dir():
+                    ev["value"] = "مجلد موجود" + self._listing(p)
+                else:
+                    ev["value"] = f"ملف بحجم {p.stat().st_size} بايت موجود"
                 return True, ev, None
 
             if action == "create_dir":

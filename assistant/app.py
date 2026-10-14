@@ -35,11 +35,34 @@ def build_controller(provider=None):
     return AssistantController(provider=provider, allowed_root=workspace, ledger=ledger, usage_meter=meter), notice
 
 
+def report_fatal(msg: str) -> None:
+    """خطأ قاتل يصل المستخدم حتى في exe بلا كونسول (stderr قد يكون None): سجل crash.log + مربع رسالة ويندوز + stderr إن وُجد."""
+    try:
+        from assistant.config import data_dir
+        d = data_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        import time
+        with open(d / "crash.log", "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
+    except Exception:
+        pass
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(0, msg, "مساعد المهام", 0x10)
+    except Exception:
+        pass
+    try:
+        if sys.stderr is not None:
+            print(msg, file=sys.stderr)
+    except Exception:
+        pass
+
+
 def main() -> int:
     try:
         import tkinter as tk
     except ImportError:
-        print("tkinter غير متوفر في هذا البايثون. ثبّت بايثون الرسمي من python.org (يتضمن tkinter).", file=sys.stderr)
+        report_fatal("tkinter غير متوفر في هذا البايثون. ثبّت بايثون الرسمي من python.org (يتضمن tkinter).")
         return 1
     from assistant.ui.widget import AssistantWidget
 
@@ -47,7 +70,7 @@ def main() -> int:
         controller, notice = build_controller()
     except Exception as exc:  # مجلد عمل غير آمن أو عطب في التهيئة: نعرض السبب ونتيح اختيار مجلد آخر بدل الخروج
         msg = f"تعذّر تشغيل المساعد: {exc}"
-        print(msg, file=sys.stderr)
+        report_fatal(msg)
         controller = None
         try:
             from tkinter import messagebox, filedialog
@@ -61,7 +84,7 @@ def main() -> int:
                 controller, notice = build_controller()
             r.destroy()
         except Exception as exc2:
-            print(f"تعذّر: {exc2}", file=sys.stderr)
+            report_fatal(f"تعذّر: {exc2}")
             controller = None
         if controller is None:
             return 1

@@ -310,6 +310,15 @@ class FileManager:
                 if name.lower() in _PROTECTED_NAMES or _ALIAS83.match(name):
                     raise ProtectedPathError(f"المجلد يحوي عنصراً محمياً '{name}' فلا يُنسخ/يُنقل/يُحذف عبر المساعد.")
 
+    def _scan_links(self, source: Path) -> None:
+        """نسخ مجلد فيه رابط/تقاطع غير مدعوم: يُكشف قبل أي أثر لا في منتصف النسخ."""
+        if not source.is_dir():
+            return
+        for cur, dirs, files in os.walk(str(source), followlinks=False):
+            for name in list(dirs) + list(files):
+                if _is_link(Path(cur) / name):
+                    raise PathOutOfBoundsError(f"روابط رمزية داخل المجلد غير مدعومة: {Path(cur) / name}")
+
     def _scan_cloud(self, source: Path) -> None:
         """قبل نسخ ملف/مجلد: هل فيه ملف سحابي كبير غير محمّل؟ (يُكتشف قبل أي تنفيذ لا في منتصف الخطة)"""
         if source.is_file():
@@ -328,10 +337,21 @@ class FileManager:
         suffix = target.suffix
         counter = 1
         while True:
-            candidate = parent / f"{stem} ({counter}){suffix}"
+            tail = f" ({counter}){suffix}"
+            st = stem
+            while len((st + tail).encode("utf-8", "surrogatepass")) > 240 and len(st) > 1:  # اسم قريب من حد النظام: نقصّ الجذع لا نفشل
+                st = st[:-1]
+            candidate = parent / f"{st}{tail}"
             if not os.path.lexists(str(candidate)):
                 return candidate
             counter += 1
+
+    def _partial_trash_path(self, name: str) -> Path:
+        """اسم في السلة لنسخة ناقصة؛ البادئة لا تدفع الاسم الطويل فوق حد النظام (وإلا بقيت النسخة يتيمة في المجلد)."""
+        keep = name
+        while len(("partial_" + keep).encode("utf-8", "surrogatepass")) > 200 and len(keep) > 1:
+            keep = keep[:-1]
+        return self._get_unique_path(self.trash_dir / ("partial_" + keep))
 
     def _check_stop(self):
         if self.kill_switch is not None:
@@ -442,6 +462,7 @@ class FileManager:
 
         destination = self.validate_path(dest)
         self._scan_protected(source)
+        self._scan_links(source)
 
         # R12: منع نسخ مجلد إلى داخل نفسه أو إلى مجلد فرعي منه
         if source.is_dir():
@@ -465,7 +486,7 @@ class FileManager:
             except BaseException:
                 if os.path.lexists(str(final_dest)):  # نسخة ناقصة يتيمة: تُنقل للسلة لا تُترك
                     try:
-                        _safe_move(str(final_dest), str(self._get_unique_path(self.trash_dir / ("partial_" + final_dest.name))))
+                        _safe_move(str(final_dest), str(self._partial_trash_path(final_dest.name)))
                     except Exception:
                         pass
                 raise
@@ -482,7 +503,7 @@ class FileManager:
         except Exception:
             self.journal.pop()
             try:  # لا حذف نهائي: النسخة التي لم تُسجَّل تُنقل للسلة
-                _safe_move(str(final_dest), str(self._get_unique_path(self.trash_dir / ("partial_" + final_dest.name))))
+                _safe_move(str(final_dest), str(self._partial_trash_path(final_dest.name)))
             except Exception:
                 pass
             raise

@@ -1,4 +1,5 @@
 """المنسّق (TaskRunner) — دورة العمل الكاملة: دفتر ← تخطيط ← فحص مسبق ← تنفيذ وتدقيق لكل خطوة ← تقرير."""
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -62,6 +63,25 @@ class TaskRunner:
         self.last_plan_note: Optional[str] = None
         self._journal_starts: Dict[str, int] = {}
         self._journal_ends: Dict[str, int] = {}
+
+    def _short_error(self, exc: BaseException) -> str:
+        """رسالة عربية قصيرة لعطب غير متوقع: بلا اسم الاستثناء ولا مسار مطلق (المسارات تُحذف أو تُختصر لاسم العنصر)."""
+        msg = str(exc) or ""
+        root = str(self.allowed_root)
+        msg = msg.replace(root, "").replace("\\", "/")
+        msg = re.sub(r"(?:[A-Za-z]:)?(?:/[^/\s'\"،:]+){2,}/([^/\s'\"،:]+)", r"\1", msg)
+        msg = re.sub(r"\[Errno \d+\]\s*", "", msg).strip()
+        if re.search(r"[\u0600-\u06FF]", msg):
+            return msg[:160]
+        if isinstance(exc, PermissionError):
+            return "لا صلاحية على العنصر (قد يكون مفتوحاً في برنامج آخر أو محمياً)"
+        if isinstance(exc, FileNotFoundError):
+            return "عنصر لم يعد موجوداً"
+        if isinstance(exc, FileExistsError):
+            return "الوجهة موجودة أصلاً"
+        if isinstance(exc, OSError):
+            return "تعذّرت عملية على نظام الملفات"
+        return "خطأ غير متوقع أثناء التنفيذ"
 
     def workspace_listing(self, max_entries: int = 60) -> str:
         """قائمة مختصرة بمحتويات مجلد العمل (مستويان) لتزويد المخطط بالسياق. لا تدخل الروابط/التقاطعات."""
@@ -165,6 +185,7 @@ class TaskRunner:
                 fm._scan_protected(src)   # مجلد يحوي .git/.ssh… يُرفض الآن لا في منتصف الخطة
             if a == "copy" and src.exists():
                 fm._scan_cloud(src)
+                fm._scan_links(src)
             if a in ("move", "copy"):
                 fm.validate_path(step.params["dest"])
             elif a == "rename":
@@ -368,7 +389,9 @@ class TaskRunner:
             failures.append(f"تجاوز الميزانية: {exc}")
             return finish(False)
         except Exception as exc:
-            failures.append(f"فشل التنفيذ: {type(exc).__name__}: {exc}")
+            done = len(executor.executed_log)
+            failures.append(f"فشل التنفيذ: {self._short_error(exc)}. نُفّذت {done} من {len(plan)} خطوة"
+                            f"{'' if done >= len(plan) else f'، ولم تُنفَّذ {len(plan) - done}'}؛ ما نُفّذ يمكن التراجع عنه.")
             return finish(False)
 
         return finish(True)

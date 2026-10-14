@@ -10,7 +10,7 @@ FONT = ("Segoe UI", 10)
 FONT_B = ("Segoe UI", 10, "bold")
 LEVEL_COLORS = {"READ": "#2e7d32", "REVERSIBLE": "#1565c0", "DANGEROUS": "#ef6c00", "FORBIDDEN": "#c62828"}
 LEVEL_AR = {"READ": "قراءة", "REVERSIBLE": "قابل للتراجع", "DANGEROUS": "خطر", "FORBIDDEN": "محظور"}
-EXAMPLES = ["رتّب الملفات حسب النوع", "افحص المجلد", "أنشئ مشروع my_app", "انسخ ملفاً إلى Backup"]
+EXAMPLES = ["رتّب الملفات حسب النوع", "افحص المجلد", "أنشئ مشروع my_app", "ابحث عن الملفات المكررة"]
 
 def step_detail(params) -> str:
     """ملخص بارامترات الخطوة (الوجهة/الاسم الجديد/الأمر) لتظهر للمستخدم قبل التنفيذ والموافقة."""
@@ -292,6 +292,10 @@ class AssistantWidget:
         t = ev["type"]
         if t == "status":
             self.set_status(ev["text"])
+        elif t == "info":  # نتيجة عادية بلا عمل («لا شيء للتنفيذ: …»): رسالة هادئة لا خطأ
+            self.add_message(ev["text"], "assistant")
+            self.set_status("لا شيء للتنفيذ")
+            self._set_buttons(self.controller.state == "PLAN_READY")
         elif t == "error":
             self.add_message(ev["text"], "error")
             self.set_status("حدث خطأ")

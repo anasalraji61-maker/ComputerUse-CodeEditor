@@ -11,15 +11,16 @@ class WingetTool:
     """إدارة برامج ويندوز عبر winget مع حصر العمليات في list وupgrade وفحص الأنماط لمنع تمرير خيارات عشوائية."""
 
     def __init__(self, runner: Optional[Callable[[List[str]], Tuple[int, str, str]]] = None,
-                 stop_check: Optional[Callable[[], bool]] = None, timeout: float = 120.0):
+                 stop_check: Optional[Callable[[], bool]] = None, timeout: float = 900.0):
         self.stop_check = stop_check
         self.timeout = timeout
         self.runner = runner or self._default_runner
 
     def _default_runner(self, cmd: List[str]) -> Tuple[int, str, str]:
         """المشغل الافتراضي الفعلي لـ winget: يفحص زر الإيقاف كل نصف ثانية ويُنهي العملية فوراً عند الضغط."""
-        proc = subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, encoding="utf-8", errors="replace")
+        proc = subprocess.Popen(cmd, shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, encoding="utf-8", errors="replace",
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # exe بلا نافذة: لا وميض كونسول
         waited = 0.0
         while True:
             try:
@@ -28,10 +29,24 @@ class WingetTool:
             except subprocess.TimeoutExpired:
                 waited += 0.5
                 if (self.stop_check is not None and self.stop_check()) or waited >= self.timeout:
-                    proc.kill()
+                    self._kill_tree(proc)
                     out, err = proc.communicate()
                     why = "أُوقفت العملية بزر الإيقاف" if waited < self.timeout else "انتهت مهلة الأمر"
                     return -1, out or "", (err or "") + why
+
+    @staticmethod
+    def _kill_tree(proc) -> None:
+        """يُنهي winget وعمليات المثبّت التابعة له (على ويندوز taskkill /T) لا العملية الأب فقط."""
+        if hasattr(subprocess, "CREATE_NO_WINDOW"):
+            try:
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=10,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+            except Exception:
+                pass
+        try:
+            proc.kill()
+        except Exception:
+            pass
 
     def list_packages(self, query: Optional[str] = None) -> Tuple[int, str, str]:
         """عرض البرامج المثبتة أو البحث عن برنامج محدد بنمط آمن يمنع الخيارات."""
@@ -52,5 +67,6 @@ class WingetTool:
         if not PACKAGE_ID_PATTERN.match(clean_id) or clean_id.startswith("-"):
             raise ValueError(f"معرّف الحزمة غير صالح أو يبدأ بشرطة: '{package_id}'")
 
-        cmd = ["winget", "upgrade", "--id", clean_id, "--exact", "--accept-source-agreements", "--accept-package-agreements"]
+        cmd = ["winget", "upgrade", "--id", clean_id, "--exact", "--accept-source-agreements", "--accept-package-agreements",
+               "--silent", "--disable-interactivity"]
         return self.runner(cmd)

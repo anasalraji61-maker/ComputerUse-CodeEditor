@@ -6,6 +6,7 @@ import pathlib
 import sys
 import tempfile
 import traceback
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 if str(ROOT) not in sys.path:
@@ -145,6 +146,36 @@ try:
     raises(PlanParseError, plan, [st(1, "delete", "D"), st(2, "delete", "D/a.txt")])
     raises(PlanParseError, plan, [st(1, "move", "D", dest="E"), st(2, "delete", "d")])
     assert plan([st(1, "rename", "a.txt", new_name="b.txt"), st(2, "delete", "b.txt")])
+
+    # 9. نسخ مجلد فيه رابط يُرفض قبل أي أثر (لا مجلد وجهة نصف منسوخ)
+    with tempfile.TemporaryDirectory() as tmp:
+        base = pathlib.Path(tmp).resolve()
+        ws = base / "ws"; (ws / "P").mkdir(parents=True)
+        (ws / "P" / "f.txt").write_text("f", encoding="utf-8")
+        try:
+            os.symlink(str(base / "nowhere"), str(ws / "P" / "dangling"))
+            fm = FileManager(ws)
+            raises(PathOutOfBoundsError, fm.copy, "P", "Q")
+            assert not (ws / "Q").exists() and not fm.journal
+        except (OSError, NotImplementedError):
+            pass
+
+    # 10. اسم طويل جداً: اسم بديل (1) ونسخة ناقصة في السلة لا يتجاوزان حد النظام
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = pathlib.Path(tmp).resolve()
+        long_name = "L" * 250 + ".t"
+        (ws / long_name).write_text("x", encoding="utf-8")
+        fm = FileManager(ws)
+        dest = fm.copy(long_name, long_name)
+        assert dest.exists() and dest.name != long_name and len(dest.name.encode("utf-8")) <= 255
+        orig_copy2 = __import__("shutil").copy2
+        def failing(src, dst, *a, **k):
+            orig_copy2(src, dst)
+            raise OSError(5, "boom after effect")
+        with mock.patch("shutil.copy2", failing):
+            raises(OSError, fm.copy, long_name, "sub/" + long_name)
+        assert not (ws / "sub" / long_name).exists()
+        assert any(p.name.startswith("partial_") for p in (ws / ".trash").iterdir())
 
     print("PASS: test_b28 completed successfully")
     sys.exit(0)
