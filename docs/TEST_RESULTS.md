@@ -1,6 +1,6 @@
 # نتائج الاختبارات الفعلية (آلية)
 
-آخر تشغيل: 2026-10-14 10:41:15 — 27 ملف، فشل: 0
+آخر تشغيل: 2026-10-14 10:51:16 — 28 ملف، فشل: 0
 
 هذه النتائج تُنتَج على لابتوب المالك. لا تدّعِ نجاحاً غير مذكور هنا.
 
@@ -8,6 +8,7 @@
 |---|---|---|
 | `assistant/tests/test_b11.py` | PASS | 0.8s |
 | `assistant/tests/test_b15.py` | PASS | 0.2s |
+| `assistant/tests/test_b16.py` | PASS | 0.2s |
 | `assistant/tests/test_b6.py` | PASS | 0.3s |
 | `assistant/tests/test_b8.py` | PASS | 0.4s |
 | `assistant/tests/test_bench.py` | PASS | 0.6s |
@@ -41,6 +42,10 @@ PASS: test_b11 completed successfully
 ### assistant/tests/test_b15.py
 ```
 PASS: test_b15 completed successfully
+```
+### assistant/tests/test_b16.py
+```
+PASS: test_b16 completed successfully
 ```
 ### assistant/tests/test_b6.py
 ```
@@ -82,7 +87,7 @@ PASS: test_files completed successfully
 ```
 ### assistant/tests/test_fuzz.py
 ```
-PASS: test_fuzz completed successfully (120 scenarios, 91 mutating runs, 118 failed runs)
+PASS: test_fuzz completed successfully (120 scenarios, 86 mutating runs, 121 failed runs)
 ```
 ### assistant/tests/test_ledger.py
 ```
