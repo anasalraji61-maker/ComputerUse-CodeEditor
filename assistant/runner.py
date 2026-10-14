@@ -14,7 +14,7 @@ from assistant.safety import (
 )
 from assistant.budget import BudgetTracker, BudgetExceededError
 from assistant.ledger import SQLiteLedger, InsufficientBalanceError, SpendingLimitExceededError
-from assistant.tools.files import FileManager
+from assistant.tools.files import FileManager, _is_link
 from assistant.tools.shell import ShellTool
 from assistant.tools.winget import WingetTool
 
@@ -57,23 +57,43 @@ class TaskRunner:
         self._journal_ends: Dict[str, int] = {}
 
     def workspace_listing(self, max_entries: int = 60) -> str:
-        """قائمة مختصرة بمحتويات مجلد العمل (مستويان) لتزويد المخطط بالسياق."""
+        """قائمة مختصرة بمحتويات مجلد العمل (مستويان) لتزويد المخطط بالسياق. لا تدخل الروابط/التقاطعات."""
         out: List[str] = []
+        truncated = False
+
+        def visible(p: Path, rel: Path) -> Optional[str]:
+            if rel.parts[0] == ".trash" or rel.parts[0].startswith(".undo_journal") or _is_link(p):
+                return None
+            real = rel.as_posix()
+            name = "".join(ch for ch in real if ch.isprintable())
+            if name != real or len(name) > 120:
+                return None  # اسم فيه محارف غير مرئية/طويل جداً: لا يمكن الإشارة إليه بأمان فلا يُعرض للمخطط
+            return name + ("/" if p.is_dir() else "")
+
         try:
-            for p in sorted(self.allowed_root.rglob("*")):
-                rel = p.relative_to(self.allowed_root)
-                if rel.parts[0] == ".trash" or rel.parts[0].startswith(".undo_journal") or len(rel.parts) > 2:
+            for p in sorted(self.allowed_root.iterdir()):
+                name = visible(p, p.relative_to(self.allowed_root))
+                if name is None:
                     continue
-                real = rel.as_posix()
-                name = "".join(ch for ch in real if ch.isprintable())
-                if name != real or len(name) > 120:
-                    continue  # اسم فيه محارف غير مرئية/طويل جداً: لا يمكن الإشارة إليه بأمان فلا يُعرض للمخطط
-                out.append(name + ("/" if p.is_dir() else ""))
+                out.append(name)
                 if len(out) >= max_entries:
-                    out.append("… (القائمة مقتطعة)")
+                    truncated = True
+                    break
+                if p.is_dir():
+                    for c in sorted(p.iterdir()):
+                        cname = visible(c, c.relative_to(self.allowed_root))
+                        if cname is None:
+                            continue
+                        out.append(cname)
+                        if len(out) >= max_entries:
+                            truncated = True
+                            break
+                if truncated:
                     break
         except OSError:
             pass
+        if truncated:
+            out.append("… (القائمة مقتطعة)")
         return "\n".join(out) if out else "(فارغ)"
 
     def make_plan(self, objective: str) -> List[PlanStep]:

@@ -1,6 +1,6 @@
 # نتائج الاختبارات الفعلية (آلية)
 
-آخر تشغيل: 2026-10-14 10:06:11 — 24 ملف، فشل: 0
+آخر تشغيل: 2026-10-14 10:11:11 — 25 ملف، فشل: 0
 
 هذه النتائج تُنتَج على لابتوب المالك. لا تدّعِ نجاحاً غير مذكور هنا.
 
@@ -30,6 +30,7 @@
 | `assistant/tests/test_shell.py` | PASS | 0.1s |
 | `assistant/tests/test_smoke.py` | PASS | 0.1s |
 | `assistant/tests/test_ui_widget.py` | PASS | 2.3s |
+| `assistant/tests/test_windows.py` | PASS | 0.2s |
 
 ### assistant/tests/test_b11.py
 ```
@@ -128,4 +129,8 @@ PASS: assistant package imported successfully (v0.1.0)
 ### assistant/tests/test_ui_widget.py
 ```
 PASS: test_ui_widget completed successfully
+```
+### assistant/tests/test_windows.py
+```
+PASS: test_windows completed successfully
 ```
