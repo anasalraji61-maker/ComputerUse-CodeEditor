@@ -13,6 +13,10 @@ from assistant.tools.winget import WingetTool
 Approver = Callable[[PlanStep], bool]
 
 
+class ApprovalTimedOut(Exception):
+    """يرفعها المُوافِق عند انتهاء مهلة الانتظار دون ردّ من المستخدم (تختلف عن الرفض الصريح)."""
+
+
 class ExecutionInterruptedError(Exception):
     """استثناء عند انقطاع التنفيذ بسبب الإيقاف أو الميزانية."""
     pass
@@ -42,17 +46,24 @@ class Executor:
         self.executed_log: List[str] = []
         self.collected_evidence: List[Dict[str, Any]] = []
         self.approval_log: List[str] = []
+        self.last_denial: Optional[str] = None  # "denied" | "timeout" | "stopped" لآخر رفض (لتفرقة الرسائل)
 
     def _decide_approval(self, step: PlanStep) -> bool:
         """طلب موافقة لهذه الخطوة تحديداً وتسجيل القرار."""
+        outcome = "approved"
         if self.approver is None:
-            decision = False
+            decision, outcome = False, "denied"
         else:
-            decision = bool(self.approver(step))
-        self.approval_log.append(
-            f"الخطوة {step.step_id} ({step.action_type} → {step.target}): "
-            + ("تمت الموافقة" if decision else "رُفضت")
-        )
+            try:
+                decision = bool(self.approver(step))
+            except ApprovalTimedOut:
+                decision, outcome = False, "timeout"
+            if not decision and outcome != "timeout":
+                outcome = "stopped" if self.kill_switch.is_triggered else "denied"
+        self.last_denial = None if decision else outcome
+        label = {"approved": "تمت الموافقة", "denied": "رُفضت",
+                 "timeout": "انتهت المهلة دون ردّ فلم تُنفَّذ", "stopped": "أُوقفت المهمة قبل القرار"}[outcome]
+        self.approval_log.append(f"الخطوة {step.step_id} ({step.action_type} → {step.target}): {label}")
         return decision
 
     def execute_step(self, step: PlanStep) -> Dict[str, Any]:

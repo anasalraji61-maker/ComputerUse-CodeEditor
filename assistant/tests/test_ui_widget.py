@@ -52,6 +52,7 @@ try:
         w._on_send()
         assert pump(root, lambda: len(w._plan_rows) == 1), "لم تظهر الخطة"
         assert str(w.start_btn.cget("state")) == "normal"
+        assert "الكلفة المتوقعة" in chat_text(w) and "رصيدك" in chat_text(w), chat_text(w)  # تقدير قبل «ابدأ»
         w.start_btn.invoke()
         assert pump(root, lambda: "تم بنجاح ✔" in chat_text(w)), chat_text(w)
         assert (base / "ws" / "تجربة").is_dir()

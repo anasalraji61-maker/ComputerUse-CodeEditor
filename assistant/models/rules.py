@@ -31,6 +31,10 @@ CATEGORIES: Dict[str, Tuple[str, ...]] = {
     "برامج": ("exe", "msi", "apk", "dmg"),
 }
 EXT_TO_CAT = {ext: cat for cat, exts in CATEGORIES.items() for ext in exts}
+CAT_ALIASES: Dict[str, Tuple[str, ...]] = {  # مرادفات شائعة (مُطبَّعة) تدل على الفئة نفسها
+    "صور": ("صوره",), "مستندات": ("مستند", "وثائق"), "جداول": ("جدول",), "عروض": ("عرض",), "فيديو": ("فيديوهات", "افلام"),
+    "صوتيات": ("صوت", "موسيقي", "اغاني"), "مضغوطات": ("مضغوط",), "برامج": ("برنامج", "تطبيقات"),
+}
 OTHER = "أخرى"
 SYSTEM_FILES = {"desktop.ini", "thumbs.db"}  # ملفات نظام لا تُرتَّب ولا تُسمّى من جديد
 HELP_QUESTION = ("لم أفهم الطلب. اكتبه بإحدى هذه الصيغ: «رتّب الملفات حسب النوع» · «انسخ <اسم> إلى <مجلد>» · "
@@ -43,6 +47,12 @@ QUALIFIER_QUESTION = ("الطلب فيه شرط (مثل «القديمة» أو 
                       "سمِّ الملفات بأسمائها أو اطلب نوعاً كاملاً (مثل «الصور» أو «ملفات pdf»).")
 QUOTE_QUESTION = "اسم المجلد يبدو من أكثر من كلمة. اكتبه بين علامتي تنصيص، مثال: «انقل الصور إلى «صور العائلة»»."
 
+def _cat_re(cat: str):
+    """نمط كلمة تدل على الفئة (مع مرادفاتها، وبادئتي «و» و«ال»، وحدّ نهاية)."""
+    alts = "|".join(re.escape(x) for x in (norm(cat),) + tuple(CAT_ALIASES.get(cat, ())))
+    return re.compile(r"(?<![\w])(?:و)?(?:ال)?(?:" + alts + r")(?:ات|هات|ها|ه)?(?![\w])")
+
+
 _DIACRITICS = re.compile(r"[ً-ْـ]")
 _QUOTE_RE = re.compile(r"[«\"“](.+?)[»\"”]")
 _QUOTE_CHARS = re.compile(r"[«»\"“”]")
@@ -53,7 +63,7 @@ _FILLER = {"ملف", "ملفات", "الملف", "الملفات", "file", "file
            "فضلك", "الان", "please", "now", "هذا", "هذه", "على", "عن", "ممكن", "هل", "can", "you", "could", "would", "ابغي",
            "اريد", "ابي", "i", "want", "احذف", "حذف", "امسح", "مسح", "ازل", "ازاله", "شيل", "تخلص", "تحذف", "تمسح", "delete",
            "remove", "erase", "انقل", "نقل", "حرك", "تنقل", "تحرك", "move", "ضع", "حط", "اجمع", "جمع", "put", "انسخ", "نسخ",
-           "تنسخ", "copy", "backup", "نسخه", "احتياطيه", "كلها", "كله", "جميعها", "all"}
+           "تنسخ", "copy", "backup", "نسخه", "احتياطيه", "اعمل", "اعملي", "سوي", "عمل", "كلها", "كله", "جميعها", "all"}
 _CREATE_GENERIC = {"جديد", "جديده", "جديدا", "باسم", "بإسم", "بأسم", "تجريبي", "تجريبيا", "new", "named", "called", "name", "a", "an", "the"}
 _CREATE_FILLER = {"انشئ", "انشاء", "اعمل", "جهز", "create", "make", "مجلد", "مجلدا", "مشروع", "مشروعا", "هيكل", "folder", "project",
                   "جديد", "جديده", "جديدا", "new", "باسم", "بإسم", "بأسم", "اسمه", "اسمها", "named", "called", "name", "a", "an",
@@ -62,8 +72,10 @@ _CREATE_FILLER = {"انشئ", "انشاء", "اعمل", "جهز", "create", "mak
 _ORGANIZE_FILLER = {"رتب", "ترتيب", "نظم", "تنظيم", "صنف", "فرز", "organize", "sort", "الملفات", "ملفات", "ملف", "file", "files",
                     "حسب", "بحسب", "according", "لو", "سمحت", "فضلك", "please", "ممكن", "هل", "can", "you", "الان", "now", "كل",
                     "جميع", "all", "my", "لي", "الكل", "تلقائيا", "اوتوماتيك", "تنظم", "ترتب", "the", "في", "المجلد", "مجلد",
-                    "العمل", "الحالي", "هذا", "ال"}
+                    "العمل", "الحالي", "هذا", "ال", "ملفاتي", "ملفاتك", "ملفاتنا", "ملفات", "الاشياء", "رتبهم", "رتبها", "نظمها", "نظمهم"}
 _QUAL_AS_NAME = {"old", "new", "older", "newer", "big", "small", "large", "empty", "قديم", "جديد", "كبير", "صغير"}
+_GENERIC_DEST = {"واحد", "جديد", "جديده", "خاص", "منفصل", "اخر", "اخري", "new", "one", "single", "separate", "other", "another", "a",
+                 "هنا", "هناك", "فوق", "تحت"}
 _ROOT_TOKENS = {"العمل", "الحالي", "الرئيسي", "الرئيسيه", "هذا", "هذه", "الجذر", "المجلد"}
 _KNOWN_EXTS = set(EXT_TO_CAT) | {"log", "tmp", "bak", "ini", "db", "py", "js", "json", "html", "css", "xml", "yml", "yaml",
                                   "bat", "cmd", "ps1", "sh", "ts", "java", "c", "cpp", "h", "cs", "go", "rs"}
@@ -121,11 +133,13 @@ W_MOVE = _words("انقل", "نقل", "حرك", "تنقل", "تحرك", "move")
 W_PUT = _words("ضع", "حط", "اجمع", "جمع", "put")
 W_COPY = _words("انسخ", "نسخ", "تنسخ", "نسخه احتياطيه", "backup", "copy")
 W_RENAME = _words("اعد تسميه", "غير اسم", "تسميه", "rename")
+W_ADD_PREFIX = re.compile(r"(?<!\w)(?:اضف|ضيف|اضافه|زد|add)\s+(?:ال)?(?:بادئه|prefix|تاريخ|date)(?!\w)")
 W_PREFIX = _words("بادئه", "prefix", "بدايه", "اضافه", prefix="(?:ال|ب)?")
-W_ORGANIZE = _words("رتب", "ترتيب", "نظم", "تنظيم", "صنف", "فرز", "organize", "sort")
+W_ORGANIZE = _words("رتب", "رتبها", "رتبهم", "ترتيب", "نظم", "نظمها", "نظمهم", "تنظيم", "صنف", "فرز", "organize", "sort")
 W_CREATE = _words("انشئ", "انشاء", "اعمل", "جهز", "create", "make")
 W_CREATE_OBJ = _words("مجلد", "مشروع", "هيكل", "folder", "project", prefix="(?:ال)?")
-W_INSPECT = _words("افحص", "اعرض", "فحص", "تحقق", "inspect", "ماذا يوجد", "ما محتوي", "ما محتويات", "show", "list")
+W_INSPECT = _words("افحص", "اعرض", "فحص", "تحقق", "inspect", "ماذا يوجد", "ماذا في", "ما محتوي", "ما محتويات", "show", "list",
+                   "what is in", "whats in", "what's in")
 W_UPDATE = _words("حدث", "تحديث", "ترقيه", "winget", "upgrade", "update")
 W_WHOAMI = re.compile(r"(?<!\w)(?:whoami|من انا|اسم المستخدم|(?:ال)?هويه)(?!\w)")
 W_DUP = re.compile(r"(?<!\w)[وف]?(?:ال)?(?:مكرر\w*|duplicates?)(?!\w)")
@@ -206,7 +220,9 @@ class RuleProvider(ModelProvider):
     def generate(self, prompt: str, system_prompt: str = "") -> str:
         a = self.analyze(prompt, parse_context(system_prompt))
         if "CLARIFY" in system_prompt:
-            return json.dumps({"questions": [a.question] if a.question else []}, ensure_ascii=False)
+            # «لم أفهم الطلب» ليست سؤال توضيح: يُعاد الطلب كاملاً من المستخدم (لا يُدمج مع الجديد)
+            qs = [a.question] if a.question and a.question != HELP_QUESTION else []
+            return json.dumps({"questions": qs}, ensure_ascii=False)
         if a.steps:
             return json.dumps({"steps": a.steps}, ensure_ascii=False)
         return json.dumps({"steps": [], "note": a.note or a.question or HELP_QUESTION}, ensure_ascii=False)
@@ -234,6 +250,7 @@ class RuleProvider(ModelProvider):
         return t
 
     def analyze(self, prompt: str, context: List[str]) -> Analysis:
+        prompt = re.sub(r"\s*\n?توضيحات المستخدم:\s*", " ", prompt).replace(" | ", " ")  # إجابات أسئلة التوضيح تُدمج بالطلب
         if len(prompt) > 600:
             return Analysis(question="الطلب طويل جداً. اكتبه بجملة قصيرة واحدة (عملية واحدة).")
         prompt = re.sub(r"(?<![\w.])\./", "", prompt.replace("\\", "/"))  # Docs\a.txt و ./a.txt كما في ويندوز
@@ -249,8 +266,10 @@ class RuleProvider(ModelProvider):
             intents.add("move")
         if W_COPY.search(text):
             intents.add("copy")
-        if W_RENAME.search(text) and W_PREFIX.search(text):
+        if (W_RENAME.search(text) and W_PREFIX.search(text)) or W_ADD_PREFIX.search(text):
             intents.add("rename")
+        elif W_RENAME.search(text):
+            intents.add("rename1")
         if W_ORGANIZE.search(text):
             intents.add("organize")
         if W_CREATE.search(text) and W_CREATE_OBJ.search(self._mask(prompt, ents, files_only=True)):
@@ -305,6 +324,8 @@ class RuleProvider(ModelProvider):
             return self._duplicates("delete" in intents, ents)
         if "rename" in intents:
             return self._rename(prompt, ents)
+        if "rename1" in intents:
+            return self._rename_one(prompt, ents)
         if "delete" in intents:
             return self._delete(prompt, text, ents)
         if "move" in intents:
@@ -448,14 +469,10 @@ class RuleProvider(ModelProvider):
         exts: set = set()
         if not names_only:
             for cat in CATEGORIES:
-                rx = re.compile(r"(?<![\w])(?:و)?(?:ال)?" + re.escape(norm(cat)) + r"(?:ات|هات|ها|ه)?(?![\w])")
+                rx = _cat_re(cat)
                 if rx.search(work):
                     cats.append(cat)
                     work = rx.sub(" § ", work)
-            rx = re.compile(r"(?<![\w])(?:و)?(?:ال)?صوره(?![\w])")
-            if "صور" not in cats and rx.search(work):
-                cats.append("صور")
-                work = rx.sub(" § ", work)
             pool_exts = {r.rsplit(".", 1)[-1].lower() for r in pool if "." in r.split("/")[-1]}
 
             def blank_ext(m):
@@ -505,7 +522,7 @@ class RuleProvider(ModelProvider):
         if known:
             dest, rest = tail[:len(known)], tail[len(known):]
         else:
-            tail = re.sub(r"^(?:مجلد|folder)\s+", "", tail, flags=re.I)
+            tail = re.sub(r"^(?:(?:ال)?مجلد|folder)\s+(?:(?:اسمه|باسم|بإسم|بأسم|المسمى|named|called)\s*[:：]?\s*)?", "", tail, flags=re.I)
             q = re.match(r"^[«\"“'](.+?)[»\"”']", tail)
             if q:
                 dest, rest = q.group(1).strip(), tail[q.end():]
@@ -525,6 +542,8 @@ class RuleProvider(ModelProvider):
         name = _safe_name(dest)
         if not name:
             return None, "ما اسم المجلد الذي تريد الوجهة إليه؟ (اسم عادي بلا مسارات ولا رموز ممنوعة)", head
+        if norm(name) in _GENERIC_DEST:
+            return None, f"«{name}» ليس اسم مجلد. ما اسم المجلد الذي تريده؟ (إن كان من عدة كلمات فاكتبه بين تنصيص)", head
         for d in top_dirs:  # ويندوز لا يميّز حالة الأحرف
             if d.casefold() == name.casefold():
                 return d, None, head
@@ -604,7 +623,7 @@ class RuleProvider(ModelProvider):
             if not is_dir and _mention_re(norm(rel.split("/")[-1])).search(rest):
                 return Analysis(question="إعادة التسمية بالبادئة تُطبَّق على كل ملفات المجلد فقط، لا على ملفات بعينها. اذكر مجلداً بدل اسم ملف.")
         for cat in CATEGORIES:
-            if re.search(r"(?<![\w])(?:و)?(?:ال)?" + re.escape(norm(cat)) + r"(?:ات|هات|ها|ه)?(?![\w])", rest):
+            if _cat_re(cat).search(rest):
                 return Analysis(question="إعادة التسمية بالبادئة تُطبَّق على كل ملفات المجلد فقط، لا على نوع معيّن. اذكر مجلداً.")
         sibling_exts = {r.rsplit(".", 1)[-1].lower() for r in ents if "." in r.split("/")[-1]}
         if any(t in sibling_exts for t in re.findall(r"(?<![\w.])\.?([a-z0-9]{2,5})(?![\w.])", rest)):
@@ -626,6 +645,40 @@ class RuleProvider(ModelProvider):
         steps = [_step(i, "rename", f, "الاسم الجديد موجود والمحتوى مطابق", new_name=prefix + f.split("/")[-1])
                  for i, f in enumerate(sorted(files), 1)]
         return Analysis(steps)
+
+    def _rename_one(self, prompt: str, ents: Ents) -> Analysis:
+        """«غير اسم a.txt إلى b.txt»: إعادة تسمية عنصر واحد باسم صريح (يبقى في مجلده)."""
+        ms = list(_DEST_TO.finditer(prompt)) or list(re.finditer(r"(?<!\w)ب(?=\s*[A-Za-z0-9«\"“])", prompt))
+        if not ms:
+            return Analysis(question="ما الاسم الجديد؟ مثال: «غير اسم a.txt إلى b.txt»")
+        m = ms[-1]
+        head, tail = prompt[:m.start()], prompt[m.end():].strip()
+        q = re.match(r"^[«\"“'](.+?)[»\"”']", tail)
+        if q:
+            new, rest = q.group(1).strip(), tail[q.end():]
+        else:
+            t = re.match(r"^([^\s«»\"'،,؛;]+)", tail)
+            new, rest = (t.group(1), tail[t.end():]) if t else ("", "")
+        if [w for w in re.split(r"[\s،,؛;.!؟?]+", rest) if w and w not in _POLITE]:
+            return Analysis(question="الاسم الجديد يبدو من أكثر من كلمة. اكتبه بين علامتي تنصيص: «غير اسم a.txt إلى «اسم جديد.txt»».")
+        res = self._resolve(head, ents, names_only=True)
+        if res.ask:
+            return Analysis(question=res.ask)
+        if len(res.items) != 1:
+            return Analysis(question="حدّد عنصراً واحداً لإعادة تسميته باسمه كما يظهر في مجلد العمل.")
+        src = res.items[0]
+        name = _safe_name(new)
+        if not name:
+            return Analysis(question="الاسم الجديد غير صالح (بلا مسارات ولا رموز ممنوعة ولا أسماء ويندوز المحجوزة).")
+        base = src.split("/")[-1]
+        if name == base:
+            return Analysis(note="الاسم الجديد مطابق للاسم الحالي؛ لا شيء لتغييره.")
+        if "." in base and not ents.get(src) and "." not in name:
+            return Analysis(question=f"الاسم الجديد «{name}» بلا امتداد. هل تقصد «{name}.{base.rsplit('.', 1)[-1]}»؟ اكتبه كاملاً.")
+        parent = src.rsplit("/", 1)[0] + "/" if "/" in src else ""
+        if (parent + name).casefold() in {r.casefold() for r in ents} and name.casefold() != base.casefold():
+            return Analysis(question=f"يوجد «{name}» أصلاً في المكان نفسه. اختر اسماً آخر.")
+        return Analysis([_step(1, "rename", src, "الاسم الجديد موجود والمحتوى مطابق", new_name=name)])
 
     def _copy(self, prompt: str, ents: Ents, top_dirs: List[str], top_files: List[str]) -> Analysis:
         dest_dir, ask, head = self._parse_dest(prompt, ents, top_dirs, top_files, allow_in=False)
@@ -815,7 +868,7 @@ class RuleProvider(ModelProvider):
         for tok in re.findall(r"[^\W_]+", left):
             if tok in ("§", "و") or tok in _CREATE_FILLER or (tok.startswith("و") and tok[1:] in _CREATE_FILLER):
                 continue
-            return Analysis(question=f"لم أفهم «{tok}» في طلب الإنشاء. اطلب إنشاء مجلد أو مشروع واحد باسم واضح.")
+            return Analysis(question=f"لم أفهم «{tok}» في طلب الإنشاء. إن كان اسم المجلد من عدة كلمات فاكتبه بين علامتي تنصيص: «أنشئ مجلد «صور قديمة»».")
         safe = _safe_name(name)
         if not safe or (safe.rsplit(".", 1)[-1].lower() in _KNOWN_EXTS and "." in safe):
             return Analysis(question="اسم المجلد غير صالح (بلا مسارات ولا رموز ممنوعة ولا اسم يشبه ملفاً). اكتب اسماً عادياً.")

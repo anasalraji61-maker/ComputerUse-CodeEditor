@@ -145,7 +145,9 @@ try:
     with tempfile.TemporaryDirectory() as tmp:
         root, ledger = env(tmp, {"a.txt": "a"})
         q = json.loads(rp.generate("افعل شيئاً سحرياً", "CLARIFY"))
-        assert len(q["questions"]) == 1 and "رتّب" in q["questions"][0]
+        assert q["questions"] == []  # «لم أفهم» ليست سؤال توضيح (وإلا دُمج الطلب التالي بالقديم)
+        full = json.loads(rp.generate("افعل شيئاً سحرياً", ""))
+        assert full["steps"] == [] and "رتّب" in full["note"]  # نص المساعدة كاملاً يظهر في رسالة الخطأ
         try:
             runner(root, ledger).make_plan("افعل شيئاً سحرياً")
             raise AssertionError

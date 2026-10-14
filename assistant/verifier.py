@@ -96,7 +96,19 @@ class Verifier:
             snap["kind"] = "dir" if tp.is_dir() else ("file" if tp.is_file() else None)
             if action in ("move", "copy", "rename", "delete", "trash"):
                 snap["digest"] = self.digest(tp)
+        elif action == "winget_upgrade" and self.version_probe is not None:
+            try:  # سطر الحزمة قبل الترقية ليُقارَن بعدها في التقرير (الإصدار قبل/بعد)
+                snap["probe_line"] = self._package_line(self.version_probe(step.target)[1], step.target)
+            except Exception:
+                snap["probe_line"] = None
         return snap
+
+    @staticmethod
+    def _package_line(out: str, pkg: str) -> str:
+        for ln in (out or "").splitlines():
+            if pkg.lower() in ln.lower():
+                return " ".join(ln.split())[:160]
+        return ""
 
     # ---------- التدقيق بعد التنفيذ ----------
     def verify_step(
@@ -166,7 +178,14 @@ class Verifier:
                 if code != 0 or step.target.lower() not in (out or "").lower():
                     return fail(f"الفحص المستقل لم يجد الحزمة '{step.target}' (رمز {code}).")
                 ev["type"] = "رمز الخروج + فحص مستقل"
-                ev["value"] = f"0 والحزمة ظاهرة في list: {step.target}"
+                after_line = self._package_line(out, step.target)
+                before_line = (before or {}).get("probe_line")
+                if before_line and after_line and before_line == after_line:
+                    ev["value"] = f"0 والحزمة ظاهرة، لكن سطرها لم يتغير (ربما محدّثة أصلاً): {after_line}"
+                elif before_line and after_line:
+                    ev["value"] = f"0 والحزمة ظاهرة. قبل: {before_line} ← بعد: {after_line}"
+                else:
+                    ev["value"] = f"0 والحزمة ظاهرة في list: {step.target}"
                 return True, ev, None
 
             if action == "run_command":

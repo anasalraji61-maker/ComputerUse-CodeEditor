@@ -1,6 +1,6 @@
 """يشغّل ملفات الاختبار test_*.py في المستودع ويكتب النتائج في docs/TEST_RESULTS.md.
 
-يُستدعى من sync_repo.bat. يعيد التشغيل فقط عندما يتغيّر محتوى ملفات .py.
+يُستدعى من sync_repo.bat. يعيد التشغيل فقط عندما يتغيّر محتوى ملفات .py. رمز الخروج 1 عند وجود فشل (فيمنع sync_repo.bat رفع الكود).
 السبب: AI Studio يكتب الكود لكنه لا يستطيع تشغيل بايثون على ويندوز، فالنتائج الحقيقية تأتي من هنا.
 """
 import hashlib
@@ -54,8 +54,12 @@ def run(path):
 
 def main():
     fp = fingerprint()
-    if STATE.exists() and STATE.read_text().strip() == fp:
-        return 0
+    if STATE.exists():
+        saved = STATE.read_text().strip()
+        if saved == fp:
+            return 0
+        if saved == fp + ":FAIL":
+            return 1  # الكود لم يتغير منذ آخر فشل: يبقى الفشل قائماً ولا يُرفع كود فاشل
     tests = [p for p in py_files() if is_test(p)]
     rows, details, failed = [], [], 0
     for p in tests:
@@ -76,8 +80,8 @@ def main():
         body.append("لا توجد ملفات اختبار test_*.py بعد.")
     OUT.parent.mkdir(exist_ok=True)
     OUT.write_text("\n".join(body) + "\n", encoding="utf-8")
-    STATE.write_text(fp)
-    return 0
+    STATE.write_text(fp if failed == 0 else fp + ":FAIL")
+    return 0 if failed == 0 else 1
 
 
 if __name__ == "__main__":

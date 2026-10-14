@@ -76,6 +76,7 @@ class FileManager:
         self.trash_dir.mkdir(parents=True, exist_ok=True)
         self.journal_path = (self.allowed_root / ".undo_journal.json").resolve()
         self.journal: List[Dict[str, Any]] = self._load_journal()
+        self.current_task: Optional[str] = None  # معرّف المهمة الجارية؛ يُوسَم به كل إدخال لتبقى المهمة قابلة للتراجع بعد إعادة التشغيل
 
     def _load_journal(self) -> List[Dict[str, Any]]:
         if self.journal_path.exists():
@@ -213,7 +214,7 @@ class FileManager:
             for m in reversed(missing):
                 m.mkdir(exist_ok=True)
                 made.append(m)
-                self.journal.append({"action": "create_dir", "path": str(m)})
+                self.journal.append({"action": "create_dir", "path": str(m), "task": self.current_task})
             if made:
                 self._save_journal()
         except Exception:
@@ -250,6 +251,7 @@ class FileManager:
 
         _safe_move(str(source), str(final_dest))
         self.journal.append({
+            "task": self.current_task,
             "action": "move",
             "src": str(source),
             "dest": str(final_dest),
@@ -292,6 +294,7 @@ class FileManager:
             shutil.copy2(str(source), str(final_dest))
 
         self.journal.append({
+            "task": self.current_task,
             "action": "copy",
             "src": str(source),
             "dest": str(final_dest),
@@ -326,16 +329,16 @@ class FileManager:
 
         target = source.parent / new_name
         final_target = self.validate_path(target)
-        if final_target.name == source.name:
+        if new_name == source.name:  # نقارن النص الخام: validate_path على ويندوز يعيد حالة الأحرف الموجودة فعلاً
             raise ValueError(f"الاسم الجديد مطابق للاسم الحالي: {source.name}")
         same_entry = False
-        if final_target.name.casefold() == source.name.casefold():
+        if new_name.casefold() == source.name.casefold():
             try:
                 same_entry = os.path.lexists(final_target) and os.path.samefile(final_target, source)
             except OSError:
                 same_entry = False
         if same_entry:  # تغيير حالة الأحرف فقط (a.txt → A.txt) على نظام لا يميّزها: عبر اسم مؤقت
-            final_dest = final_target
+            final_dest = source.parent / new_name  # بحالة الأحرف التي طلبها المستخدم لا التي أعادها resolve
             tmp = self._get_unique_path(source.parent / (".cos_rename_tmp_" + source.name))
             _safe_move(str(source), str(tmp))
             try:
@@ -347,6 +350,7 @@ class FileManager:
             final_dest = self._get_unique_path(final_target)
             _safe_move(str(source), str(final_dest))
         self.journal.append({
+            "task": self.current_task,
             "action": "rename",
             "src": str(source),
             "dest": str(final_dest),
@@ -373,6 +377,7 @@ class FileManager:
         _safe_move(str(p), str(final_dest))
 
         self.journal.append({
+            "task": self.current_task,
             "action": "delete",
             "original_path": str(p),
             "trash_path": str(final_dest),
@@ -401,15 +406,17 @@ class FileManager:
             if not dest.exists():
                 return "missing"
             src.parent.mkdir(parents=True, exist_ok=True)
-            if src.parent == dest.parent and src.name.casefold() == dest.name.casefold() and src.name != dest.name:
+            raw_src, raw_dest = Path(op["src"]), Path(op["dest"])  # الأسماء الخام (validate_path يوحّد الحالة على ويندوز)
+            if raw_src.parent == raw_dest.parent and raw_src.name != raw_dest.name \
+                    and raw_src.name.casefold() == raw_dest.name.casefold():
                 try:
                     case_only = os.path.lexists(src) and os.path.samefile(src, dest)
                 except OSError:
                     case_only = False
                 if case_only:  # تراجع عن تغيير حالة الأحرف فقط: عبر اسم مؤقت
-                    tmp = self._get_unique_path(src.parent / (".cos_rename_tmp_" + dest.name))
+                    tmp = self._get_unique_path(dest.parent / (".cos_rename_tmp_" + raw_dest.name))
                     _safe_move(str(dest), str(tmp))
-                    _safe_move(str(tmp), str(src))
+                    _safe_move(str(tmp), str(dest.parent / raw_src.name))
                     return "ok"
             _safe_move(str(dest), str(self._get_unique_path(src)))  # لا كتابة فوق موجود
             return "ok"

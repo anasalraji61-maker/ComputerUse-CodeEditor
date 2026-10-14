@@ -290,6 +290,11 @@ class AssistantWidget:
             msg = f"هذه الخطة ({len(ev['steps'])} خطوات). راجعها ثم اضغط «ابدأ التنفيذ»."
             if n_danger:
                 msg += f"\nتنبيه: {n_danger} خطوة خطرة ستطلب موافقتك واحدة واحدة."
+            est = ev.get("estimate") or {}
+            if est.get("points") is not None:
+                msg += f"\nالكلفة المتوقعة: {est['points']} نقطة · رصيدك: {est['balance']} نقطة"
+                if not est.get("affordable", True):
+                    msg += "\n⚠ الرصيد أو سقف الإنفاق لا يكفي لهذه المهمة، لذلك لن تبدأ."
             self.add_message(msg, "assistant")
             self.set_status("الخطة جاهزة")
             self._set_buttons(True)

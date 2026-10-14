@@ -144,7 +144,12 @@ try:
         c = AssistantController(RuleProvider(), root, led, approval_timeout=0.3)
         from assistant.planner import PlanStep
         step = PlanStep(1, "run_command", "whoami", {"cmd": ["whoami"]})
-        assert c._approve(step) is False  # انتهت المهلة
+        from assistant.executor import ApprovalTimedOut
+        try:
+            c._approve(step)
+            raise AssertionError("كان يجب أن ترفع انتهاء المهلة")
+        except ApprovalTimedOut:
+            pass  # انتهت المهلة (تختلف عن الرفض الصريح)
         evs = c.drain_events()
         req = [e for e in evs if e["type"] == "approval_request"][0]["step"]
         assert any(e["type"] == "approval_closed" and e["approval_id"] == req["approval_id"] for e in evs)

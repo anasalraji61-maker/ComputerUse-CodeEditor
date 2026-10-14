@@ -17,6 +17,7 @@ class ExecutionReport:
         undo_available: bool = True,
         undo_journal_path: Optional[str] = None,
         approvals: Optional[List[str]] = None,
+        skipped: Optional[List[str]] = None,
     ):
         self.task_id = task_id
         self.objective = objective
@@ -28,6 +29,7 @@ class ExecutionReport:
         self.undo_available = undo_available
         self.undo_journal_path = undo_journal_path
         self.approvals = approvals or []
+        self.skipped = skipped or []
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -40,6 +42,7 @@ class ExecutionReport:
             "points_charged": self.points_charged,
             "undo_available": self.undo_available,
             "approvals": self.approvals,
+            "skipped": self.skipped,
         }
 
     def render_arabic_text(self) -> str:
@@ -77,6 +80,12 @@ class ExecutionReport:
         else:
             lines.append("- لا يوجد أي فشل.")
 
+        if self.skipped:
+            lines.append("")
+            lines.append("## ما تُخطّي بقرارك:")
+            for item in self.skipped:
+                lines.append(f"- {item}")
+
         if self.approvals:
             lines.append("")
             lines.append("## قرارات الموافقة:")
@@ -89,9 +98,7 @@ class ExecutionReport:
         lines.append("")
         lines.append("## طريقة التراجع:")
         if self.undo_available:
-            lines.append(
-                "- التراجع متاح عبر استدعاء FileManager.undo_last() أو undo_all()."
-            )
+            lines.append("- اضغط زر «تراجع» في النافذة للتراجع عن هذه المهمة (يتراجع عن آخر مهمة فقط).")
             if self.undo_journal_path:
                 lines.append(f"- سجل التراجع موثق في الملف: {self.undo_journal_path}")
         else:

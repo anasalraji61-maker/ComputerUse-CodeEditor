@@ -16,8 +16,17 @@ for /f %%b in ('git rev-parse --abbrev-ref HEAD') do set BR=%%b
 
 git pull --rebase --autostash origin %BR% >> tools\sync.log 2>&1
 
-rem اختبارات فعلية (تعيد التشغيل فقط عند تغير ملفات py)
-where python >nul 2>&1 && (python tools\run_tests.py >> tools\sync.log 2>&1) || (py tools\run_tests.py >> tools\sync.log 2>&1)
+rem اختبارات فعلية (تعيد التشغيل فقط عند تغير ملفات py). عند الفشل: لا يرفع الكود، يرفع ملف النتائج فقط لتراه
+set PYEXE=py
+where python >nul 2>&1 && set PYEXE=python
+%PYEXE% tools\run_tests.py >> tools\sync.log 2>&1
+if errorlevel 1 (
+  echo TESTS FAILING - code not pushed >> tools\sync.log
+  git add docs/TEST_RESULTS.md
+  git diff --cached --quiet || git commit -m "sync: test results only (tests failing, code not pushed)" >> tools\sync.log 2>&1
+  git push origin %BR% >> tools\sync.log 2>&1
+  exit /b 3
+)
 
 git add -A
 git diff --cached --quiet || git commit -m "sync: local changes %DATE% %TIME%" >> tools\sync.log 2>&1

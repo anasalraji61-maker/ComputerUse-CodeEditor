@@ -11,6 +11,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from assistant.models.base import ModelProvider, CONTEXT_MARKER
+from assistant.executor import ApprovalTimedOut
 from assistant.planner import PlanStep, PlanParseError
 from assistant.runner import TaskRunner
 from assistant.safety import KillSwitch, SafetyGuard
@@ -188,7 +189,7 @@ class AssistantController:
                 text, system_prompt=CLARIFY_SYSTEM + "\n\n" + CONTEXT_MARKER + "\n" + self.runner.workspace_listing())
             data = json.loads(raw)
             qs = data.get("questions", []) if isinstance(data, dict) else []
-            clean = [q.strip()[:140] for q in qs if isinstance(q, str) and q.strip()]
+            clean = [q.strip()[:400] for q in qs if isinstance(q, str) and q.strip()]
             return clean[:MAX_QUESTIONS]
         except Exception:
             return []  # أي عطب في مرحلة التوضيح لا يمنع التخطيط
@@ -235,7 +236,16 @@ class AssistantController:
              "criteria": s.acceptance_criteria, "params": s.params}
             for s in plan
         ]
-        self.emit("plan", task_id=self._task_id, steps=steps)
+        estimate = self._estimate(text, len(plan))
+        self.emit("plan", task_id=self._task_id, steps=steps, estimate=estimate)
+
+    def _estimate(self, objective: str, n_steps: int) -> Dict[str, Any]:
+        """كلفة المهمة المتوقعة بالنقاط والرصيد الحالي وهل يكفيان، لتُعرض قبل الضغط على «ابدأ»."""
+        try:
+            points = self.ledger.estimate_cost(objective, steps_count=n_steps)
+            return {"points": points, "balance": self.ledger.get_balance(), "affordable": bool(self.ledger.can_afford(points))}
+        except Exception:
+            return {"points": None, "balance": None, "affordable": True}
 
     def cancel_plan(self):
         with self._lock:
@@ -300,12 +310,14 @@ class AssistantController:
         self.emit("approval_request", step={
             "step_id": step.step_id, "action": step.action_type, "target": step.target, "params": step.params,
             "approval_id": aid})
-        self._approval_event.wait(timeout=self._approval_timeout)
+        signalled = self._approval_event.wait(timeout=self._approval_timeout)
         result = self._approval_result and not self.kill_switch.is_triggered and self._pending_approval == aid
         self._pending_approval = None  # أي ردّ متأخر بعد هذه اللحظة يُتجاهل
         self._approval_event.clear()
         self._approval_result = False
         self.emit("approval_closed", approval_id=aid)  # تُغلق الواجهة النافذة المعلّقة (مهلة/إيقاف/نهاية)
+        if not signalled and not self.kill_switch.is_triggered:
+            raise ApprovalTimedOut()  # انتهت المهلة دون ردّ: تُعرض في التقرير كمهلة لا كرفض
         return result
 
     def respond_approval(self, approved: bool, approval_id=None):
@@ -340,9 +352,10 @@ class AssistantController:
     def undo_last(self):
         if self.state == RUNNING:
             return self.emit("error", text="لا يمكن التراجع أثناء التنفيذ. أوقف المهمة أولاً.")
-        if not self.last_task_id:
+        task_id = self.last_task_id or self.runner.last_journaled_task()  # بعد إعادة التشغيل نقرأ الوسم من السجل المحفوظ
+        if not task_id:
             return self.emit("error", text="لا توجد مهمة للتراجع عنها.")
-        n = self.runner.undo_task(self.last_task_id)
+        n = self.runner.undo_task(task_id)
         if n == 0:
             return self.emit("error", text="لا يوجد ما يمكن التراجع عنه لهذه المهمة (تم سابقاً، أو اختفى ناتجها، أو توجد مهام أحدث).")
-        self.emit("undo", count=n, task_id=self.last_task_id)
+        self.emit("undo", count=n, task_id=task_id)

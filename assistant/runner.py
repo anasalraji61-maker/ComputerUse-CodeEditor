@@ -45,7 +45,8 @@ class TaskRunner:
         self.safety = SafetyGuard(kill_switch=self.kill_switch)
         self.file_manager = FileManager(allowed_root=self.allowed_root, kill_switch=self.kill_switch)
         self.shell = shell_tool or ShellTool()
-        self.winget = WingetTool(runner=winget_runner) if winget_runner else WingetTool()
+        stop_check = lambda: self.kill_switch.is_triggered  # noqa: E731
+        self.winget = WingetTool(runner=winget_runner, stop_check=stop_check) if winget_runner else WingetTool(stop_check=stop_check)
         # فحص winget المستقل الافتراضي: winget list -q <id>؛ مع نفس المشغّل القابل للاستبدال
         self.version_probe = version_probe or (lambda pkg: self.winget.list_packages(pkg))
         bind = getattr(provider, "bind_workspace", None)
@@ -102,11 +103,17 @@ class TaskRunner:
     # ---------- التراجع الخاص بالمهمة (R22) ----------
     def undo_task(self, task_id: str) -> int:
         """يتراجع فقط عن عمليات هذه المهمة (من نهاية السجل حتى بدايتها)."""
+        journal = self.file_manager.journal
         start = self._journal_starts.get(task_id)
-        if start is None:
-            return 0
-        end = self._journal_ends.get(task_id, len(self.file_manager.journal))
-        if len(self.file_manager.journal) > end:
+        if start is None:  # بعد إعادة التشغيل/تبديل المجلد: نستعيد حدود المهمة من وسوم السجل المحفوظ على القرص
+            i = len(journal)
+            while i > 0 and journal[i - 1].get("task") == task_id:
+                i -= 1
+            if i == len(journal):
+                return 0
+            start = i
+        end = self._journal_ends.get(task_id, len(journal))
+        if len(journal) > end:
             return 0  # توجد مهام أحدث بعدها: يجب التراجع عنها أولاً حتى لا تُلغى عملياتها بالخطأ
         count = 0
         while len(self.file_manager.journal) > start:
@@ -116,6 +123,11 @@ class TaskRunner:
             elif r != "missing":
                 break
         return count
+
+    def last_journaled_task(self) -> Optional[str]:
+        """معرّف آخر مهمة غيّرت الملفات (من وسم آخر إدخال في السجل المحفوظ)، أو None."""
+        journal = self.file_manager.journal
+        return journal[-1].get("task") if journal and isinstance(journal[-1].get("task"), str) else None
 
     def _preflight_paths(self, step: PlanStep) -> None:
         """يرفع استثناءً إن كان أي مسار في الخطوة مرفوضاً (خارج الجذر/محجوز/محمي/رابط) دون أي تنفيذ."""
@@ -147,6 +159,7 @@ class TaskRunner:
         fm = self.file_manager
         journal_start = len(fm.journal)
         self._journal_starts[task_id] = journal_start
+        fm.current_task = task_id
         executor = Executor(
             file_manager=fm,
             safety_guard=self.safety,
@@ -164,7 +177,11 @@ class TaskRunner:
         started = False
         platform_failure = False
 
+        skipped: List[str] = []
+        skipped_ids: set = set()
+
         def finish(success: bool) -> ExecutionReport:
+            fm.current_task = None
             self._journal_ends[task_id] = len(fm.journal)
             if started:
                 if success:
@@ -192,6 +209,7 @@ class TaskRunner:
                 undo_available=len(fm.journal) > journal_start,
                 undo_journal_path=str(fm.journal_path),
                 approvals=list(executor.approval_log),
+                skipped=list(skipped),
             )
 
         # 1. فحص زر الإيقاف والقدرة المالية قبل أي شيء
@@ -252,14 +270,31 @@ class TaskRunner:
                      action=step.action_type, target=step.target)
                 before = self.verifier.snapshot(step)
                 befores[step.step_id] = before
-                info = executor.execute_step(step)
+                try:
+                    info = executor.execute_step(step)
+                except ApprovalRequiredError as exc:
+                    if step.action_type.strip().lower() in ("delete", "trash") and executor.last_denial == "denied":
+                        # رفض صريح لحذف واحد: نتخطاه ونعرض الباقي بدل إلغاء المهمة كلها
+                        skipped.append(f"{step.target} (رفضتَ حذفه فلم يُنفَّذ)")
+                        skipped_ids.add(step.step_id)
+                        evidence.append({"item": step.target, "type": "تخطّي بقرارك", "value": "لم يُحذف"})
+                        emit(event="step_done", index=idx, total=total, step_id=step.step_id, ok=True, detail="تخطّي بقرارك")
+                        continue
+                    raise
                 ok, ev, err = self.verifier.verify_step(step, info, before)
                 evidence.append(ev)
                 emit(event="step_done", index=idx, total=total, step_id=step.step_id, ok=ok, detail=ev.get("value", ""))
                 if not ok:
                     failures.append(err or f"فشل تدقيق الخطوة {step.step_id}")
                     return finish(False)
-            j_ok, j_ev, j_err = self.verifier.verify_journal(plan, befores, journal_start)
+            self.kill_switch.check()  # الإيقاف أثناء الخطوة الأخيرة لا يُعلَن نجاحاً صامتاً
+            if skipped_ids and len(skipped_ids) == len(plan):
+                failures.append("لم تُنفَّذ أي خطوة لأنك رفضت كل الخطوات الخطرة.")
+                return finish(False)
+            if skipped_ids:  # الكلفة على ما نُفّذ فعلاً فقط
+                charge = self.ledger.estimate_cost(objective, steps_count=len(plan) - len(skipped_ids))
+            j_ok, j_ev, j_err = self.verifier.verify_journal(
+                [s for s in plan if s.step_id not in skipped_ids], befores, journal_start)
             evidence.append(j_ev)
             if not j_ok:
                 failures.append(j_err or "فشل تدقيق سجل التراجع")
@@ -268,7 +303,9 @@ class TaskRunner:
             failures.append(f"تم الإيقاف أثناء التنفيذ: {exc}")
             return finish(False)
         except ApprovalRequiredError as exc:
-            failures.append(f"رُفضت الموافقة: {exc}")
+            why = {"timeout": "انتهت مهلة الموافقة دون ردّ منك فتوقفت المهمة (لم تُنفَّذ الخطوة).",
+                   "stopped": "تم الإيقاف أثناء انتظار الموافقة."}.get(executor.last_denial or "", f"رُفضت الموافقة: {exc}")
+            failures.append(why)
             return finish(False)
         except ActionForbiddenError as exc:
             failures.append(f"إجراء محظور: {exc}")

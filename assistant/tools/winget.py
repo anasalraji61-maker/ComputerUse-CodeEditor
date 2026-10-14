@@ -10,22 +10,28 @@ QUERY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+\- ]*$")
 class WingetTool:
     """إدارة برامج ويندوز عبر winget مع حصر العمليات في list وupgrade وفحص الأنماط لمنع تمرير خيارات عشوائية."""
 
-    def __init__(self, runner: Optional[Callable[[List[str]], Tuple[int, str, str]]] = None):
+    def __init__(self, runner: Optional[Callable[[List[str]], Tuple[int, str, str]]] = None,
+                 stop_check: Optional[Callable[[], bool]] = None, timeout: float = 120.0):
+        self.stop_check = stop_check
+        self.timeout = timeout
         self.runner = runner or self._default_runner
 
-    @staticmethod
-    def _default_runner(cmd: List[str]) -> Tuple[int, str, str]:
-        """المشغل الافتراضي الفعلي لـ winget."""
-        result = subprocess.run(
-            cmd,
-            shell=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=120,
-        )
-        return result.returncode, result.stdout, result.stderr
+    def _default_runner(self, cmd: List[str]) -> Tuple[int, str, str]:
+        """المشغل الافتراضي الفعلي لـ winget: يفحص زر الإيقاف كل نصف ثانية ويُنهي العملية فوراً عند الضغط."""
+        proc = subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, encoding="utf-8", errors="replace")
+        waited = 0.0
+        while True:
+            try:
+                out, err = proc.communicate(timeout=0.5)
+                return proc.returncode, out, err
+            except subprocess.TimeoutExpired:
+                waited += 0.5
+                if (self.stop_check is not None and self.stop_check()) or waited >= self.timeout:
+                    proc.kill()
+                    out, err = proc.communicate()
+                    why = "أُوقفت العملية بزر الإيقاف" if waited < self.timeout else "انتهت مهلة الأمر"
+                    return -1, out or "", (err or "") + why
 
     def list_packages(self, query: Optional[str] = None) -> Tuple[int, str, str]:
         """عرض البرامج المثبتة أو البحث عن برنامج محدد بنمط آمن يمنع الخيارات."""
