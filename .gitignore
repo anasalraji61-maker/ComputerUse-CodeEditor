@@ -24,5 +24,11 @@ tools/.last_tested
 dist/
 build/
 *.spec
+
+# بيانات تشغيل محلية للمساعد
+.trash/
+.undo_journal*.json
+*.db
+.cos_assistant/
 tools/sync.log
 tools/.last_tested

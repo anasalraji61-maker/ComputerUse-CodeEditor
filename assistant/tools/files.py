@@ -14,6 +14,7 @@ _WIN_RESERVED = ({"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
                  | {f"COM{c}" for c in "¹²³"} | {f"LPT{c}" for c in "¹²³"})
 _PROTECTED_NAMES = {".git", ".ssh", ".gnupg", ".aws"}  # لا تُمَس عبر خطط المساعد حتى لو وُجدت داخل مجلد العمل
 _REPARSE_FLAG = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT (روابط/تقاطعات ويندوز)
+_LINK_REPARSE_TAGS = {0xA000000C, 0xA0000003}  # IO_REPARSE_TAG_SYMLINK / MOUNT_POINT (junction)
 
 
 def _bad_component(name: str) -> bool:
@@ -22,16 +23,28 @@ def _bad_component(name: str) -> bool:
     return stem in _WIN_RESERVED or name != name.rstrip(" .") or ":" in name
 
 
+def _safe_move(src: str, dst: str) -> None:
+    """نقل بنفس القرص عبر os.rename: لا يكتب فوق موجود (حتى على لينكس) ولا ينسخ ثم يحذف المصدر (لا حذف نهائي خفي)."""
+    if os.path.lexists(dst):
+        raise FileExistsError(f"الوجهة موجودة أصلاً: {dst}")
+    os.rename(src, dst)
+
+
 def _is_link(p: Path) -> bool:
-    """رابط رمزي أو تقاطع (junction) أو أي نقطة إعادة توجيه في ويندوز."""
+    """رابط رمزي أو تقاطع (junction) أو نقطة تركيب في ويندوز. ملفات OneDrive/السحابة (reparse لكنها ليست روابط) لا تُعدّ روابط."""
     try:
         if p.is_symlink():
             return True
         isj = getattr(os.path, "isjunction", None)
         if isj is not None and isj(str(p)):
             return True
-        attrs = getattr(os.lstat(str(p)), "st_file_attributes", 0)
-        return bool(attrs & _REPARSE_FLAG)
+        st = os.lstat(str(p))
+        if getattr(st, "st_file_attributes", 0) & _REPARSE_FLAG:
+            tag = getattr(st, "st_reparse_tag", None)
+            if tag is None:
+                return True  # لا نعرف النوع: نعامله كرابط احتياطاً
+            return tag in _LINK_REPARSE_TAGS
+        return False
     except OSError:
         return False
 
@@ -183,7 +196,7 @@ class FileManager:
         except BaseException:
             if created_any and dest.exists():
                 try:
-                    shutil.move(str(dest), str(self._get_unique_path(self.trash_dir / ("partial_" + dest.name))))
+                    _safe_move(str(dest), str(self._get_unique_path(self.trash_dir / ("partial_" + dest.name))))
                 except Exception:
                     pass
             raise
@@ -230,10 +243,12 @@ class FileManager:
         destination = self.validate_path(dest)
         if destination.is_dir() and destination != source:
             destination = self.validate_path(destination / source.name)  # الوجهة مجلد موجود: ضع العنصر بداخله
+        if destination == source or os.path.normcase(str(destination)) == os.path.normcase(str(source)):
+            raise ValueError(f"المصدر والوجهة هما نفس المكان: {source}")
         self._ensure_dirs(destination.parent)
         final_dest = self._get_unique_path(destination)
 
-        shutil.move(str(source), str(final_dest))
+        _safe_move(str(source), str(final_dest))
         self.journal.append({
             "action": "move",
             "src": str(source),
@@ -244,7 +259,7 @@ class FileManager:
         except Exception:
             self.journal.pop()
             try:
-                shutil.move(str(final_dest), str(source))
+                os.rename(str(final_dest), str(source))
             except Exception:
                 pass
             raise
@@ -311,9 +326,26 @@ class FileManager:
 
         target = source.parent / new_name
         final_target = self.validate_path(target)
-        final_dest = self._get_unique_path(final_target)
-
-        source.rename(final_dest)
+        if final_target.name == source.name:
+            raise ValueError(f"الاسم الجديد مطابق للاسم الحالي: {source.name}")
+        same_entry = False
+        if final_target.name.casefold() == source.name.casefold():
+            try:
+                same_entry = os.path.lexists(final_target) and os.path.samefile(final_target, source)
+            except OSError:
+                same_entry = False
+        if same_entry:  # تغيير حالة الأحرف فقط (a.txt → A.txt) على نظام لا يميّزها: عبر اسم مؤقت
+            final_dest = final_target
+            tmp = self._get_unique_path(source.parent / (".cos_rename_tmp_" + source.name))
+            _safe_move(str(source), str(tmp))
+            try:
+                _safe_move(str(tmp), str(final_dest))
+            except BaseException:
+                _safe_move(str(tmp), str(source))
+                raise
+        else:
+            final_dest = self._get_unique_path(final_target)
+            _safe_move(str(source), str(final_dest))
         self.journal.append({
             "action": "rename",
             "src": str(source),
@@ -324,7 +356,7 @@ class FileManager:
         except Exception:
             self.journal.pop()
             try:
-                final_dest.rename(source)
+                os.rename(str(final_dest), str(source))
             except Exception:
                 pass
             raise
@@ -338,7 +370,7 @@ class FileManager:
 
         dest = self.trash_dir / p.name
         final_dest = self._get_unique_path(dest)
-        shutil.move(str(p), str(final_dest))
+        _safe_move(str(p), str(final_dest))
 
         self.journal.append({
             "action": "delete",
@@ -350,7 +382,7 @@ class FileManager:
         except Exception:
             self.journal.pop()
             try:
-                shutil.move(str(final_dest), str(p))
+                os.rename(str(final_dest), str(p))
             except Exception:
                 pass
             raise
@@ -369,20 +401,30 @@ class FileManager:
             if not dest.exists():
                 return "missing"
             src.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(dest), str(self._get_unique_path(src)))  # لا كتابة فوق موجود
+            if src.parent == dest.parent and src.name.casefold() == dest.name.casefold() and src.name != dest.name:
+                try:
+                    case_only = os.path.lexists(src) and os.path.samefile(src, dest)
+                except OSError:
+                    case_only = False
+                if case_only:  # تراجع عن تغيير حالة الأحرف فقط: عبر اسم مؤقت
+                    tmp = self._get_unique_path(src.parent / (".cos_rename_tmp_" + dest.name))
+                    _safe_move(str(dest), str(tmp))
+                    _safe_move(str(tmp), str(src))
+                    return "ok"
+            _safe_move(str(dest), str(self._get_unique_path(src)))  # لا كتابة فوق موجود
             return "ok"
         if action == "copy":
             dest = self.validate_path(op["dest"])  # تراجع النسخ ينقل الناتج إلى السلة ولا يحذفه نهائياً (R9)
             if not dest.exists():
                 return "missing"
-            shutil.move(str(dest), str(self._get_unique_path(self.trash_dir / dest.name)))
+            _safe_move(str(dest), str(self._get_unique_path(self.trash_dir / dest.name)))
             return "ok"
         if action == "create_dir":
             p = self.validate_path(op["path"])
             if not (p.exists() and p.is_dir()):
                 return "missing"
             if any(p.iterdir()):  # فيه ملفات: يُنقل للسلة لحمايتها
-                shutil.move(str(p), str(self._get_unique_path(self.trash_dir / p.name)))
+                _safe_move(str(p), str(self._get_unique_path(self.trash_dir / p.name)))
             else:
                 p.rmdir()
             return "ok"
@@ -394,7 +436,7 @@ class FileManager:
             if not trash.exists():
                 return "missing"
             orig.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(trash), str(self._get_unique_path(orig)))
+            _safe_move(str(trash), str(self._get_unique_path(orig)))
             return "ok"
         raise ValueError(f"عملية غير معروفة في السجل: {action!r}")
 

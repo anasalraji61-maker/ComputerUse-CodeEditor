@@ -1,12 +1,13 @@
 # نتائج الاختبارات الفعلية (آلية)
 
-آخر تشغيل: 2026-10-14 10:21:15 — 26 ملف، فشل: 0
+آخر تشغيل: 2026-10-14 10:41:15 — 27 ملف، فشل: 0
 
 هذه النتائج تُنتَج على لابتوب المالك. لا تدّعِ نجاحاً غير مذكور هنا.
 
 | الملف | النتيجة | الزمن |
 |---|---|---|
 | `assistant/tests/test_b11.py` | PASS | 0.8s |
+| `assistant/tests/test_b15.py` | PASS | 0.2s |
 | `assistant/tests/test_b6.py` | PASS | 0.3s |
 | `assistant/tests/test_b8.py` | PASS | 0.4s |
 | `assistant/tests/test_bench.py` | PASS | 0.6s |
@@ -16,7 +17,7 @@
 | `assistant/tests/test_controller.py` | PASS | 0.5s |
 | `assistant/tests/test_deliberate_failures.py` | PASS | 0.1s |
 | `assistant/tests/test_files.py` | PASS | 0.1s |
-| `assistant/tests/test_fuzz.py` | PASS | 4.0s |
+| `assistant/tests/test_fuzz.py` | PASS | 3.9s |
 | `assistant/tests/test_ledger.py` | PASS | 0.3s |
 | `assistant/tests/test_models.py` | PASS | 0.1s |
 | `assistant/tests/test_no_secrets.py` | PASS | 0.1s |
@@ -31,11 +32,15 @@
 | `assistant/tests/test_shell.py` | PASS | 0.1s |
 | `assistant/tests/test_smoke.py` | PASS | 0.1s |
 | `assistant/tests/test_ui_widget.py` | PASS | 2.3s |
-| `assistant/tests/test_windows.py` | PASS | 0.2s |
+| `assistant/tests/test_windows.py` | PASS | 0.1s |
 
 ### assistant/tests/test_b11.py
 ```
 PASS: test_b11 completed successfully
+```
+### assistant/tests/test_b15.py
+```
+PASS: test_b15 completed successfully
 ```
 ### assistant/tests/test_b6.py
 ```
@@ -77,7 +82,7 @@ PASS: test_files completed successfully
 ```
 ### assistant/tests/test_fuzz.py
 ```
-PASS: test_fuzz completed successfully (120 scenarios, 102 mutating runs, 103 failed runs)
+PASS: test_fuzz completed successfully (120 scenarios, 91 mutating runs, 118 failed runs)
 ```
 ### assistant/tests/test_ledger.py
 ```

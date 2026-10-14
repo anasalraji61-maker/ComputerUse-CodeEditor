@@ -78,8 +78,8 @@ class Verifier:
             return True
         return (
             actual.parent == expected.parent
-            and actual.suffix == expected.suffix
-            and re.fullmatch(re.escape(expected.stem) + r" \(\d+\)", actual.stem) is not None
+            and actual.suffix.casefold() == expected.suffix.casefold()
+            and re.fullmatch(re.escape(expected.stem.casefold()) + r" \(\d+\)", actual.stem.casefold()) is not None
         )
 
     # ---------- اللقطة قبل التنفيذ (R18) ----------
@@ -215,9 +215,12 @@ class Verifier:
 
         expected_hash = step.params.get("expected_hash")
         if expected_hash:
-            if not actual.is_file() or self.calculate_hash(actual) != expected_hash:
+            want = str(expected_hash).strip().lower()
+            if want.startswith("sha256:"):
+                want = want[len("sha256:"):].strip()
+            if not actual.is_file() or self.calculate_hash(actual).lower() != want:
                 got = self.calculate_hash(actual) if actual.is_file() else "DIR"
-                return fail(f"عدم تطابق البصمة للملف '{actual.name}': متوقع {expected_hash}، الفعلي {got}.")
+                return fail(f"عدم تطابق البصمة للملف '{actual.name}': متوقع {want}، الفعلي {got}.")
 
         ev["type"] = "ملف موجود ومطابق"
         ev["value"] = f"{after_digest[:18]}… (مطابق للأصل قبل التنفيذ)"
