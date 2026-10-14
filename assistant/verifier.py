@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from assistant.planner import PlanStep
 from assistant.safety import MUTATING_ACTIONS
+from assistant.tools.files import is_unc_like
 
 VersionProbe = Callable[[str], Tuple[int, str, str]]
 
@@ -41,6 +42,8 @@ class Verifier:
         """حلّ المسار والتأكد من وجوده داخل الجذر (R17)."""
         if not isinstance(path, (str, Path)) or str(path).strip() == "":
             raise PathEscapeError("مسار فارغ أو غير صالح.")
+        if is_unc_like(path):
+            raise PathEscapeError(f"المسارات الشبكية/الأجهزة غير مسموحة: '{path}'.")
         p = Path(path)
         if not p.is_absolute():
             p = self.allowed_root / p

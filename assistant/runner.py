@@ -195,9 +195,12 @@ class TaskRunner:
                         except Exception:
                             pass  # الملفات تغيّرت فعلاً والتقرير يوضح ذلك؛ التراجع متاح
                 else:
-                    self.ledger.record_task_failure(
-                        task_id, reason="; ".join(failures) or "فشل", is_platform_failure=platform_failure
-                    )
+                    try:
+                        self.ledger.record_task_failure(
+                            task_id, reason="; ".join(failures) or "فشل", is_platform_failure=platform_failure
+                        )
+                    except Exception as exc:  # عطب الدفتر لا يُسقط التقرير ولا يخفي ما جرى فعلاً على الملفات
+                        failures.append(f"تعذّر تسجيل الفشل في الدفتر: {exc}")
             return ExecutionReport(
                 task_id=task_id,
                 objective=objective,

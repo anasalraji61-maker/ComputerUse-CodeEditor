@@ -43,7 +43,18 @@ def main() -> int:
         return 1
     from assistant.ui.widget import AssistantWidget
 
-    controller, notice = build_controller()
+    try:
+        controller, notice = build_controller()
+    except Exception as exc:  # مجلد عمل غير آمن أو عطب في التهيئة: رسالة واضحة بدل انهيار صامت
+        msg = f"تعذّر تشغيل المساعد: {exc}"
+        print(msg, file=sys.stderr)
+        try:
+            from tkinter import messagebox
+            r = tk.Tk(); r.withdraw()
+            messagebox.showerror("مساعد المهام", msg)
+        except Exception:
+            pass
+        return 1
     root = tk.Tk()
     widget = AssistantWidget(root, controller)
     if notice:

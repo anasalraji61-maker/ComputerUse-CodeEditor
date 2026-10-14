@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from assistant.models.base import ModelProvider, CONTEXT_MARKER
 from assistant.executor import ApprovalTimedOut
-from assistant.planner import PlanStep, PlanParseError
+from assistant.planner import PlanStep, PlanParseError, sanitize_display
 from assistant.runner import TaskRunner
 from assistant.safety import KillSwitch, SafetyGuard
 from assistant.ledger import SQLiteLedger
@@ -75,7 +75,12 @@ class AssistantController:
             except WorkspaceError as exc:
                 self.emit("error", text=f"مجلد غير مقبول: {exc}")
                 return False
-            self.runner = self._make_runner(p)
+            try:
+                new_runner = self._make_runner(p)
+            except Exception as exc:  # مثل رابط باسم .trash: نرفض بدل أن ينهار التطبيق
+                self.emit("error", text=f"مجلد غير مقبول: {sanitize_display(exc, 300)}")
+                return False
+            self.runner = new_runner
             self.last_task_id = None
         cfg = load_config()
         cfg["workspace"] = str(p)
@@ -189,7 +194,7 @@ class AssistantController:
                 text, system_prompt=CLARIFY_SYSTEM + "\n\n" + CONTEXT_MARKER + "\n" + self.runner.workspace_listing())
             data = json.loads(raw)
             qs = data.get("questions", []) if isinstance(data, dict) else []
-            clean = [q.strip()[:400] for q in qs if isinstance(q, str) and q.strip()]
+            clean = [c for c in (sanitize_display(q, 400) for q in qs if isinstance(q, str)) if c]
             return clean[:MAX_QUESTIONS]
         except Exception:
             return []  # أي عطب في مرحلة التوضيح لا يمنع التخطيط
@@ -200,7 +205,7 @@ class AssistantController:
                 return self.emit("error", text="لا توجد أسئلة بانتظار الإجابة.")
             self._planning_cancelled = False
             self._go(PLANNING)
-        extra = " | ".join(a.strip() for a in answers if a and a.strip())
+        extra = " | ".join(c for c in (sanitize_display(a, 300) for a in answers if isinstance(a, str)) if c)
         full = self._request + (f"\nتوضيحات المستخدم: {extra}" if extra else "")
         self.emit("status", text="أُعدّ الخطة…")
         self._spawn(self._make_plan, full)
@@ -214,12 +219,12 @@ class AssistantController:
             self._record_spend(before)
             with self._lock:
                 self._go(IDLE)
-            return self.emit("error", text=f"تعذّر فهم الخطة: {exc}")
+            return self.emit("error", text=f"تعذّر فهم الخطة: {sanitize_display(exc, 400)}")
         except Exception as exc:
             self._record_spend(before)
             with self._lock:
                 self._go(IDLE)
-            return self.emit("error", text=f"تعذّر التخطيط: {exc}")
+            return self.emit("error", text=f"تعذّر التخطيط: {sanitize_display(exc, 400)}")
         spent = self._record_spend(before)
         if spent > 0:
             self.emit("status", text=f"كلفة التخطيط: {spent:.4f}$")
@@ -274,7 +279,7 @@ class AssistantController:
             event = ("report", dict(success=report.success, text=report.render_arabic_text(),
                                     undo_available=report.undo_available, task_id=task_id))
         except Exception as exc:
-            event = ("error", dict(text=f"خطأ غير متوقع: {type(exc).__name__}: {exc}"))
+            event = ("error", dict(text=f"خطأ غير متوقع: {type(exc).__name__}: {sanitize_display(exc, 400)}"))
         finally:
             with self._lock:  # الحالة تعود لـ IDLE قبل إعلان النتيجة حتى لا يصطدم الطلب التالي
                 self._plan = None
@@ -322,19 +327,17 @@ class AssistantController:
 
     def respond_approval(self, approved: bool, approval_id=None):
         """approval_id: ردّ متأخر أو مكرر على طلب آخر يُتجاهل (لا يُحتسب لخطوة أخرى)."""
-        if approval_id is not None and approval_id != self._pending_approval:
-            return
-        if self._pending_approval is None:
-            return
+        if approval_id is None or approval_id != self._pending_approval:
+            return  # بلا معرّف مطابق للطلب المعلّق لا يُقبل ردّ (يمنع ربط موافقة قديمة بخطوة أخرى)
         self._approval_result = bool(approved)
         self._approval_event.set()
 
     # ---------- 5) الإيقاف والتراجع ----------
     def stop(self, reason: str = "ضغط المستخدم على زر الإيقاف"):
-        self.kill_switch.trigger(reason)
-        self._approval_result = False
-        self._approval_event.set()  # يحرر أي نافذة موافقة معلّقة بالرفض
-        with self._lock:
+        with self._lock:  # داخل القفل: لا يستطيع start()/submit_request() تصفير إيقاف أحدث منه
+            self.kill_switch.trigger(reason)
+            self._approval_result = False
+            self._approval_event.set()  # يحرر أي نافذة موافقة معلّقة بالرفض
             if self.state == PLANNING:
                 self._planning_cancelled = True
             if self.state in (PLAN_READY, CLARIFYING):

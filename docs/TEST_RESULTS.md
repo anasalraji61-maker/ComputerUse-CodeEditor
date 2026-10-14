@@ -1,6 +1,6 @@
 # نتائج الاختبارات الفعلية (آلية)
 
-آخر تشغيل: 2026-10-14 11:06:27 — 30 ملف، فشل: 0
+آخر تشغيل: 2026-10-14 11:21:18 — 31 ملف، فشل: 0
 
 هذه النتائج تُنتَج على لابتوب المالك. لا تدّعِ نجاحاً غير مذكور هنا.
 
@@ -8,9 +8,10 @@
 |---|---|---|
 | `assistant/tests/test_b11.py` | PASS | 0.8s |
 | `assistant/tests/test_b15.py` | PASS | 0.2s |
-| `assistant/tests/test_b16.py` | PASS | 0.3s |
+| `assistant/tests/test_b16.py` | PASS | 0.2s |
 | `assistant/tests/test_b17.py` | PASS | 0.2s |
 | `assistant/tests/test_b18.py` | PASS | 0.8s |
+| `assistant/tests/test_b19.py` | PASS | 0.9s |
 | `assistant/tests/test_b6.py` | PASS | 0.3s |
 | `assistant/tests/test_b8.py` | PASS | 0.4s |
 | `assistant/tests/test_bench.py` | PASS | 0.6s |
@@ -18,10 +19,10 @@
 | `assistant/tests/test_budget.py` | PASS | 0.1s |
 | `assistant/tests/test_config.py` | PASS | 0.4s |
 | `assistant/tests/test_controller.py` | PASS | 0.5s |
-| `assistant/tests/test_deliberate_failures.py` | PASS | 10.5s |
+| `assistant/tests/test_deliberate_failures.py` | PASS | 0.9s |
 | `assistant/tests/test_files.py` | PASS | 0.1s |
-| `assistant/tests/test_fuzz.py` | PASS | 3.7s |
-| `assistant/tests/test_ledger.py` | PASS | 0.3s |
+| `assistant/tests/test_fuzz.py` | PASS | 3.6s |
+| `assistant/tests/test_ledger.py` | PASS | 0.2s |
 | `assistant/tests/test_models.py` | PASS | 0.1s |
 | `assistant/tests/test_no_secrets.py` | PASS | 0.1s |
 | `assistant/tests/test_planner.py` | PASS | 0.1s |
@@ -56,6 +57,10 @@ PASS: test_b17 completed successfully
 ### assistant/tests/test_b18.py
 ```
 PASS: test_b18 completed successfully
+```
+### assistant/tests/test_b19.py
+```
+PASS: test_b19 completed successfully
 ```
 ### assistant/tests/test_b6.py
 ```

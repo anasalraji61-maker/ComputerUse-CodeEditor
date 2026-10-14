@@ -35,6 +35,9 @@ def validate_workspace(path) -> Path:
     if path is None or str(path).strip() == "":
         raise WorkspaceError("لم يُحدَّد مجلد.")
     try:
+        from assistant.tools.files import is_unc_like
+        if is_unc_like(path):
+            raise WorkspaceError("المسارات الشبكية غير مسموحة.")
         p = Path(str(path).strip()).expanduser().resolve()
     except (OSError, RuntimeError):
         raise WorkspaceError("مسار غير صالح.")
@@ -68,6 +71,14 @@ def validate_workspace(path) -> Path:
         raise WorkspaceError("مجلد بيانات البرامج (AppData) غير مسموح.")
     if any(part.lower() in _SENSITIVE_PARTS for part in p.parts):
         raise WorkspaceError("المجلد حساس (مفاتيح/بيانات برامج/مستودع git) ولا يُسمح باختياره.")
+    from assistant.tools.files import _is_link
+    for name, want_dir in ((".trash", True), (".undo_journal.json", False), (".undo_journal.json.tmp", False)):
+        q = p / name
+        if os.path.lexists(str(q)):
+            if _is_link(q):
+                raise WorkspaceError(f"في المجلد رابط باسم {name} — احذفه يدوياً أولاً (غير آمن).")
+            if q.is_dir() != want_dir:
+                raise WorkspaceError(f"في المجلد عنصر باسم {name} من نوع غير متوقع — غيّر اسمه يدوياً أولاً.")
     return p
 
 

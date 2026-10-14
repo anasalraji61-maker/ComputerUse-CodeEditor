@@ -52,5 +52,5 @@ class WingetTool:
         if not PACKAGE_ID_PATTERN.match(clean_id) or clean_id.startswith("-"):
             raise ValueError(f"معرّف الحزمة غير صالح أو يبدأ بشرطة: '{package_id}'")
 
-        cmd = ["winget", "upgrade", "--id", clean_id, "--accept-source-agreements", "--accept-package-agreements"]
+        cmd = ["winget", "upgrade", "--id", clean_id, "--exact", "--accept-source-agreements", "--accept-package-agreements"]
         return self.runner(cmd)

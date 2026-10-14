@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import hashlib
+import re
 from pathlib import Path
 from typing import Union, List, Dict, Any, Optional
 
@@ -21,6 +22,17 @@ def _bad_component(name: str) -> bool:
     """أسماء أجهزة ويندوز المحجوزة (CON, NUL, COM1…) وأسماء تنتهي بنقطة أو مسافة أو فيها : (تيارات NTFS)."""
     stem = name.split(".")[0].strip().upper()
     return stem in _WIN_RESERVED or name != name.rstrip(" .") or ":" in name
+
+
+_ALIAS83 = re.compile(r"^\.?(git|ssh|gnupg|aws)~\d+$", re.IGNORECASE)  # الأسماء القصيرة 8.3 لمجلدات محمية (GIT~1)
+
+
+def is_unc_like(value: Any) -> bool:
+    """مسار شبكي/جهاز (\\\\server\\share أو //x أو \\\\?\\) — مرفوض قبل أي resolve لأنه قد يلمس الشبكة."""
+    if not isinstance(value, (str, Path)):
+        return False
+    t = str(value).strip().replace("/", "\\")
+    return t.startswith("\\\\")
 
 
 def _safe_move(src: str, dst: str) -> None:
@@ -72,9 +84,19 @@ class FileManager:
         self.allowed_root = Path(allowed_root).resolve()
         if not self.allowed_root.exists():
             self.allowed_root.mkdir(parents=True, exist_ok=True)
-        self.trash_dir = (self.allowed_root / ".trash").resolve()
+        # مجلد السلة والسجل لا يُحلّان عبر روابط: رابط باسم .trash قد يرسل «المحذوفات» إلى خارج مجلد العمل
+        self.trash_dir = self.allowed_root / ".trash"
+        self.journal_path = self.allowed_root / ".undo_journal.json"
+        for internal, want_dir in ((self.trash_dir, True), (self.journal_path, False),
+                                   (self.journal_path.with_name(self.journal_path.name + ".tmp"), False)):
+            if os.path.lexists(str(internal)):
+                if _is_link(internal):
+                    raise ProtectedPathError(f"'{internal.name}' رابط/تقاطع — مجلد العمل غير آمن؛ احذف الرابط يدوياً.")
+                if want_dir and not internal.is_dir():
+                    raise ProtectedPathError(f"'{internal.name}' موجود كملف لا كمجلد — غيّر اسمه يدوياً ثم أعد المحاولة.")
+                if not want_dir and internal.is_dir():
+                    raise ProtectedPathError(f"'{internal.name}' موجود كمجلد — غيّر اسمه يدوياً ثم أعد المحاولة.")
         self.trash_dir.mkdir(parents=True, exist_ok=True)
-        self.journal_path = (self.allowed_root / ".undo_journal.json").resolve()
         self.journal: List[Dict[str, Any]] = self._load_journal()
         self.current_task: Optional[str] = None  # معرّف المهمة الجارية؛ يُوسَم به كل إدخال لتبقى المهمة قابلة للتراجع بعد إعادة التشغيل
 
@@ -109,6 +131,8 @@ class FileManager:
         - فحص الروابط الرمزية (symlinks) للتأكد من عدم الإشارة لخارج الجذر.
         - رفض استهداف الجذر نفسه أو ملف السجل أو مجلد السلة مباشرة.
         """
+        if is_unc_like(path):
+            raise PathOutOfBoundsError(f"المسارات الشبكية/الأجهزة غير مسموحة: '{path}'.")
         p = Path(path)
         # تتبع وفحص الروابط الرمزية قبل أو أثناء الحل
         if not p.is_absolute():
@@ -122,7 +146,7 @@ class FileManager:
                 continue
             if _bad_component(part):
                 raise PathOutOfBoundsError(f"اسم غير مسموح في المسار (اسم جهاز محجوز أو يحوي ':' أو ينتهي بنقطة/مسافة): '{part}'.")
-            if part.lower() in _PROTECTED_NAMES:
+            if part.lower() in _PROTECTED_NAMES or _ALIAS83.match(part):
                 raise ProtectedPathError(f"المسار يمر بمجلد محمي لا يُمَس عبر المساعد: '{part}'.")
 
         resolved = unresolved.resolve()
@@ -132,6 +156,9 @@ class FileManager:
             resolved.relative_to(self.allowed_root)
         except ValueError:
             raise PathOutOfBoundsError(f"المسار '{path}' يقع خارج المجلد الجذر المسموح به '{self.allowed_root}'.")
+        for rp in resolved.relative_to(self.allowed_root).parts:  # بعد الحل: الاسم القصير GIT~1 يظهر باسمه الحقيقي .git
+            if rp.lower() in _PROTECTED_NAMES:
+                raise ProtectedPathError(f"المسار يمر بمجلد محمي لا يُمَس عبر المساعد: '{rp}'.")
 
         # فحص إذا كان هناك رابط رمزي في المسار يشير إلى خارج الجذر
         curr = unresolved
@@ -246,6 +273,8 @@ class FileManager:
             destination = self.validate_path(destination / source.name)  # الوجهة مجلد موجود: ضع العنصر بداخله
         if destination == source or os.path.normcase(str(destination)) == os.path.normcase(str(source)):
             raise ValueError(f"المصدر والوجهة هما نفس المكان: {source}")
+        if source.is_dir() and (source in destination.parents or destination == source):
+            raise ValueError(f"لا يمكن نقل المجلد '{source}' إلى داخل نفسه أو مجلد فرعي منه '{destination}'.")
         self._ensure_dirs(destination.parent)
         final_dest = self._get_unique_path(destination)
 
@@ -372,8 +401,12 @@ class FileManager:
         if not p.exists():
             raise FileNotFoundError(f"الملف المراد حذفه غير موجود: {p}")
 
+        if _is_link(self.trash_dir) or not self.trash_dir.is_dir():
+            raise ProtectedPathError("مجلد السلة .trash لم يعد مجلداً عادياً — أوقفت الحذف حمايةً للملفات.")
         dest = self.trash_dir / p.name
         final_dest = self._get_unique_path(dest)
+        if final_dest.parent != self.trash_dir:
+            raise ProtectedPathError("وجهة السلة خارج مجلد السلة.")
         _safe_move(str(p), str(final_dest))
 
         self.journal.append({

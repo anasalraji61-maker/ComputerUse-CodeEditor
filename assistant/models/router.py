@@ -4,7 +4,7 @@ import json
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
-from .base import ModelProvider
+from .base import ModelProvider, CONTEXT_MARKER
 from .pricing import cost_usd, usd_to_points
 
 SMALL, LARGE = "small", "large"
@@ -35,9 +35,10 @@ class ModelRouter(ModelProvider):
     @staticmethod
     def choose_tier(prompt: str, system_prompt: str) -> str:
         """الأسئلة التوضيحية والروتين → صغير؛ التخطيط والمراجعة → كبير."""
-        if "CLARIFY" in system_prompt:
+        header = (system_prompt or "").split(CONTEXT_MARKER, 1)[0]  # قائمة الملفات (بيانات غير موثوقة) لا تؤثر في الاختيار
+        if "CLARIFY" in header:
             return SMALL
-        if "مخطط" in system_prompt or "VERIFY" in system_prompt:
+        if "مخطط" in header or "VERIFY" in header:
             return LARGE
         return SMALL
 

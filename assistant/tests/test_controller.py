@@ -97,14 +97,14 @@ try:
         c.submit_request("هوية"); c.wait_for("plan"); c.start()
         req = c.wait_for("approval_request")
         assert req and req["step"]["action"] == "run_command"
-        c.respond_approval(True)
+        c.respond_approval(True, c._pending_approval)
         rep = c.wait_for("report", 10)
         assert rep["success"], rep["text"]
 
         c, prov, root = mk(tmp, danger)
         c.submit_request("هوية"); c.wait_for("plan"); c.start()
         assert c.wait_for("approval_request")
-        c.respond_approval(False)
+        c.respond_approval(False, c._pending_approval)
         rep = c.wait_for("report", 10)
         assert not rep["success"] and "رُفضت" in rep["text"]
 

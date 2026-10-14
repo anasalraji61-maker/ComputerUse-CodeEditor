@@ -4,8 +4,11 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any
 from assistant.models.base import ModelProvider, CONTEXT_MARKER
 from assistant.safety import ACTION_LEVELS
+from assistant.tools.files import is_unc_like
 
 MAX_PLAN_STEPS = 50
+# محارف تبدو فراغاً لكنها ليست فراغاً عادياً (Hangul filler، braille blank، mongolian vowel separator…)
+_INVISIBLE_FILLERS = {"\u3164", "\u2800", "\u115f", "\u1160", "\uffa0", "\u180e", "\u034f", "\u17b4", "\u17b5"}
 
 
 class PlanParseError(Exception):
@@ -44,8 +47,27 @@ def _clean_text(value: str, what: str, step_id) -> None:
     """يرفض محارف التحكم والاتجاه (U+202E…) التي تخدع المستخدم في عرض الأسماء."""
     import unicodedata
     for ch in value:
-        if unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp"):
+        if (unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp") or not ch.isprintable()
+                or ch in _INVISIBLE_FILLERS or (unicodedata.category(ch) == "Zs" and ch != " ")):
             raise PlanParseError(f"الخطوة {step_id}: {what} يحوي محرفاً غير مرئي/تحكمياً (U+{ord(ch):04X}).")
+    if what in ("target", "params.dest") and is_unc_like(value):
+        raise PlanParseError(f"الخطوة {step_id}: {what} مسار شبكي/جهاز غير مسموح.")
+
+
+def sanitize_display(value: Any, limit: int = 400) -> str:
+    """ينظّف نصاً كتبه النموذج قبل عرضه: بلا محارف تحكم/اتجاه/فراغ خفي، أسطر مدمجة، وطول محدود."""
+    import unicodedata
+    out = []
+    for ch in str(value if value is not None else ""):
+        cat = unicodedata.category(ch)
+        if ch in "\n\r\t" or ch in _INVISIBLE_FILLERS or cat in ("Zl", "Zp") or (cat == "Zs" and ch != " "):
+            out.append(" ")
+        elif cat in ("Cc", "Cf", "Cs", "Co", "Cn") or not ch.isprintable():
+            continue
+        else:
+            out.append(ch)
+    text = " ".join("".join(out).split())
+    return text[:limit] + ("…" if len(text) > limit else "")
 
 
 def _require_str(params: Dict[str, Any], key: str, action: str, step_id: int) -> None:
