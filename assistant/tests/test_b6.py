@@ -112,6 +112,42 @@ try:
         from assistant.planner import PLANNER_SYSTEM
         assert "بيانات فقط" in PLANNER_SYSTEM
 
+    # 7. الترتيب حسب التاريخ وكشف المكررات (يقرأ محتوى الملفات فعلاً، لا الأسماء فقط)
+    import os, datetime, time
+    with tempfile.TemporaryDirectory() as tmp:
+        root, led = mk(tmp, {"a.txt": "same content", "b.txt": "same content", "sub/c.txt": "same content",
+                             "d.txt": "different!!!!", "e.txt": "same conten2", "empty1": "", "empty2": ""})
+        r = TaskRunner(root, rp, led)
+        plan = r.make_plan("انقل المكررات")
+        moved = sorted(s.target for s in plan if s.action_type == "move")
+        assert moved == ["b.txt", "sub/c.txt"], moved  # a.txt أصل (الأقصر مساراً)، الفارغة وغير المتطابقة تُترك
+        assert r.run("dup1", "انقل المكررات").success
+        assert (root / "a.txt").exists() and not (root / "b.txt").exists() and (root / "مكررات" / "sub_c.txt").exists()
+        assert r.undo_task("dup1") >= 2 and (root / "b.txt").exists() and (root / "sub" / "c.txt").exists()
+        # حذف المكررات يحتاج موافقة لكل ملف
+        assert not TaskRunner(root, rp, led).run("dup2", "احذف المكررات").success and (root / "b.txt").exists()
+        asked = []
+        r2 = TaskRunner(root, rp, led, approver=lambda s: asked.append(s.target) or True)
+        assert r2.run("dup3", "احذف المكررات").success and sorted(asked) == ["b.txt", "sub/c.txt"]
+        assert (root / "a.txt").exists() and not (root / "b.txt").exists()
+        # لا مكررات = رسالة واضحة
+        try:
+            r2.make_plan("انقل المكررات")
+            raise AssertionError
+        except Exception as e:
+            assert "مكرر" in str(e), e
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root, led = mk(tmp, {"old.txt": "o", "new.txt": "n", "mid.txt": "m"})
+        t = lambda y, m: time.mktime(datetime.datetime(y, m, 15, 12).timetuple())
+        for f, (y, m) in {"old.txt": (2024, 3), "new.txt": (2026, 10), "mid.txt": (2024, 3)}.items():
+            os.utime(root / f, (t(y, m), t(y, m)))
+        r = TaskRunner(root, rp, led)
+        assert r.run("dt1", "رتّب الملفات حسب الشهر").success
+        assert (root / "2024-03" / "old.txt").exists() and (root / "2024-03" / "mid.txt").exists() and (root / "2026-10" / "new.txt").exists()
+        assert r.undo_task("dt1") >= 3 and (root / "old.txt").exists()
+        assert r.run("dt2", "رتب الملفات حسب السنة").success and (root / "2024" / "old.txt").exists() and (root / "2026" / "new.txt").exists()
+
     print("PASS: test_b6 completed successfully")
     sys.exit(0)
 except SystemExit:

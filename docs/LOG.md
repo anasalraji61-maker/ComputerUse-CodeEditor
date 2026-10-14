@@ -16,3 +16,5 @@
 - 2026-10-14 — Claude (مباشرة) — B5: اختيار مجلد العمل بتحقق صارم (يرفض جذر القرص/النظام/البرامج/AppData/المجلدات الحساسة) وحفظه؛ واجهة أسهل (أمثلة، تغيير/فتح المجلد، الرصيد، تقرير منسّق)؛ launch.py وbuild_exe.bat وrun_bench.bat؛ .gitattributes (أُضيف سطر فقط). بانتظار TEST_RESULTS الحقيقي. بناء exe لم يُختبر على ويندوز.
 - 2026-10-14 — النتيجة الحقيقية لـ B5: 21/21 PASS (09:11). B5 = DONE.
 - 2026-10-14 — Claude (مباشرة) — B6: delete/trash خطر بموافقة؛ نوايا نقل وحذف في RuleProvider؛ journal ذرّي ونسخة للتالف؛ KillSwitch داخل Verifier؛ تعقيم أسماء الملفات في workspace_listing وتحذير حقن في المخطط؛ ledger.get_history وcontroller.history وزر سجل المهام؛ USER_GUIDE.md؛ اختبارات test_b6. كل الاختبارات PASS في السحابة (والواجهة تحت xvfb). بانتظار TEST_RESULTS الحقيقي.
+- 2026-10-14 — النتيجة الحقيقية لـ B6: 22/22 PASS (09:21). B6 = DONE.
+- 2026-10-14 — Claude (مباشرة) — B7: ترتيب حسب الشهر/السنة وكشف المكررات بالمحتوى (نقل أو حذف بموافقة) في RuleProvider مع bind_workspace من TaskRunner؛ اختبارات في test_b6. بانتظار TEST_RESULTS الحقيقي.

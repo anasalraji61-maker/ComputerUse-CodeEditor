@@ -3,9 +3,11 @@
 بلا شبكة ولا مفاتيح ولا كلفة نموذج. يُستعمل وحده افتراضياً، أو أولاً قبل النموذج الحقيقي (RuleFirstProvider)
 فلا يُصرف رصيد API على طلب معروف الشكل. ما لا يفهمه يسأل عنه سؤالاً واحداً (أو يُحال للنموذج في الوضع المختلط).
 """
+import hashlib
 import json
 import re
 import datetime
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .base import ModelProvider, CONTEXT_MARKER
@@ -25,7 +27,7 @@ CATEGORIES: Dict[str, Tuple[str, ...]] = {
 EXT_TO_CAT = {ext: cat for cat, exts in CATEGORIES.items() for ext in exts}
 OTHER = "أخرى"
 HELP_QUESTION = ("لم أفهم الطلب. اكتبه بإحدى هذه الصيغ: «رتّب الملفات حسب النوع» · «انسخ <اسم> إلى <مجلد>» · "
-                 "«أعد تسمية ملفات <مجلد> بإضافة البادئة <نص>» · «انقل <نوع أو اسم> إلى <مجلد>» · «احذف <اسم>» · «أنشئ مشروع <اسم>» · «افحص <اسم>» · «حدّث البرنامج <المعرّف>».")
+                 "«أعد تسمية ملفات <مجلد> بإضافة البادئة <نص>» · «انقل <نوع أو اسم> إلى <مجلد>» · «احذف <اسم>» · «رتّب الملفات حسب الشهر» · «انقل المكررات» · «أنشئ مشروع <اسم>» · «افحص <اسم>» · «حدّث البرنامج <المعرّف>».")
 
 _DIACRITICS = re.compile(r"[\u064B-\u0652\u0640]")
 
@@ -63,8 +65,13 @@ class Analysis:
 class RuleProvider(ModelProvider):
     """يحوّل الطلب العربي إلى خطة JSON. الأنواع: ترتيب حسب النوع، إعادة تسمية بادئة، نسخ، إنشاء، فحص، winget، whoami."""
 
-    def __init__(self, today: Optional[Callable[[], datetime.date]] = None):
+    def __init__(self, today: Optional[Callable[[], datetime.date]] = None, workspace: Optional[Path] = None):
         self._today = today or datetime.date.today
+        self.workspace: Optional[Path] = Path(workspace).resolve() if workspace else None
+
+    def bind_workspace(self, root) -> None:
+        """يربطه المنفّذ بمجلد العمل ليقرأ أحجام الملفات وتواريخها (قراءة فقط) عند التخطيط."""
+        self.workspace = Path(root).resolve()
 
     def name(self) -> str:
         return "RuleProvider(Local)"
@@ -99,6 +106,8 @@ class RuleProvider(ModelProvider):
             return Analysis([_step(1, "winget_upgrade", pkg.group(0), "رمز الخروج 0 والحزمة ظاهرة في winget list")])
         if has("اعد تسميه", "غير اسم", "تسميه") and has("بادئه", "prefix", "بدايه", "بإضافه", "باضافه", "اضافه"):
             return self._rename(prompt, p, context, top_dirs)
+        if has("مكرر", "نسخ مكرره", "duplicate"):
+            return self._duplicates(p, context)
         if has("احذف", "امسح", "ازل ", "delete", "remove"):
             return self._delete(prompt, p, context, top_files)
         if has("انقل", "نقل ", "حرك ", "move"):
@@ -106,6 +115,8 @@ class RuleProvider(ModelProvider):
         if has("انسخ", "نسخ ", "نسخه احتياطيه", "backup"):
             return self._copy(prompt, p, context, top_dirs)
         if has("رتب", "ترتيب", "نظم", "تنظيم", "صنف", "فرز", "organize"):
+            if has("التاريخ", "الشهر", "شهر", "السنه", "سنه", "date", "month", "year"):
+                return self._organize_by_date(p, top_files)
             return self._organize(top_files)
         if has("انشئ", "انشاء", "اعمل", "جهز") and has("مجلد", "مشروع", "هيكل", "folder", "project"):
             return self._create(prompt)
@@ -181,6 +192,84 @@ class RuleProvider(ModelProvider):
         if dest_dir not in top_dirs:
             steps.append(_step(i, "create_dir", dest_dir, "وجود المجلد")); i += 1
         steps.append(_step(i, "copy", src, "الوجهة مطابقة للمصدر والمصدر سليم", dest=f"{dest_dir}/{base}"))
+        return Analysis(steps)
+
+    MAX_HASH_BYTES = 512 * 1024 * 1024
+
+    def _stat(self, rel: str):
+        if self.workspace is None:
+            return None
+        try:
+            fp = (self.workspace / rel).resolve()
+            if self.workspace not in fp.parents or not fp.is_file():
+                return None
+            return fp, fp.stat()
+        except OSError:
+            return None
+
+    def _organize_by_date(self, p: str, top_files: List[str]) -> Analysis:
+        """ترتيب حسب تاريخ آخر تعديل: مجلد لكل شهر (2026-10) أو لكل سنة عند ذكر «السنة»."""
+        if self.workspace is None:
+            return Analysis(note="الترتيب حسب التاريخ يحتاج ربط المساعد بمجلد العمل.")
+        by_year = "سنه" in p
+        files = [f for f in top_files if not f.startswith(".")]
+        moves, folders = [], []
+        for f in sorted(files, key=str.lower):
+            st = self._stat(f)
+            if not st:
+                continue
+            d = datetime.date.fromtimestamp(st[1].st_mtime)
+            key = f"{d.year}" if by_year else f"{d.year}-{d.month:02d}"
+            if key not in folders:
+                folders.append(key)
+            moves.append((f, key))
+        moves = moves[: max(0, MAX_AUTO_STEPS - len(folders))]
+        folders = [k for k in folders if any(m[1] == k for m in moves)]
+        if not moves:
+            return Analysis(note="لا توجد ملفات لترتيبها حسب التاريخ في مجلد العمل.")
+        steps, i = [], 1
+        for k in folders:
+            steps.append(_step(i, "create_dir", k, "وجود المجلد")); i += 1
+        for f, k in moves:
+            steps.append(_step(i, "move", f, "المصدر اختفى والوجهة مطابقة", dest=f"{k}/{f}")); i += 1
+        return Analysis(steps)
+
+    def _duplicates(self, p: str, context: List[str]) -> Analysis:
+        """يكشف الملفات المكررة بمحتواها (حجم ثم SHA-256) ويُبقي نسخة واحدة؛ يحذف المكررات (بموافقة) أو ينقلها لمجلد «مكررات»."""
+        if self.workspace is None:
+            return Analysis(note="كشف المكررات يحتاج ربط المساعد بمجلد العمل.")
+        files = [e for e in context if not e.endswith("/") and not any(part.startswith(".") for part in e.split("/"))]
+        by_size: Dict[int, List[Tuple[str, Path]]] = {}
+        for f in files:
+            st = self._stat(f)
+            if st and 0 < st[1].st_size <= self.MAX_HASH_BYTES:
+                by_size.setdefault(st[1].st_size, []).append((f, st[0]))
+        dups: List[str] = []
+        for group in by_size.values():
+            if len(group) < 2:
+                continue
+            by_hash: Dict[str, List[str]] = {}
+            for rel, fp in group:
+                h = hashlib.sha256()
+                try:
+                    with open(fp, "rb") as fh:
+                        while chunk := fh.read(1 << 20):
+                            h.update(chunk)
+                except OSError:
+                    continue
+                by_hash.setdefault(h.hexdigest(), []).append(rel)
+            for same in by_hash.values():
+                if len(same) > 1:
+                    same.sort(key=lambda r: (r.count("/"), len(r), r.lower()))
+                    dups.extend(same[1:])  # الأقصر مساراً يبقى أصلاً
+        dups = sorted(dups, key=str.lower)[: MAX_AUTO_STEPS - 1]
+        if not dups:
+            return Analysis(note="لم أجد ملفات مكررة المحتوى في مجلد العمل.")
+        if any(w in p for w in (norm("احذف"), norm("امسح"), "delete")):
+            return Analysis([_step(i, "delete", d, "العنصر اختفى من مكانه وصار في السلة بنفس المحتوى") for i, d in enumerate(dups, 1)])
+        steps = [_step(1, "create_dir", "مكررات", "وجود المجلد")]
+        for i, d in enumerate(dups, 2):
+            steps.append(_step(i, "move", d, "المصدر اختفى والوجهة مطابقة", dest=f"مكررات/{d.replace('/', '_')}"))
         return Analysis(steps)
 
     def _select(self, p: str, top_files: List[str]) -> Tuple[List[str], str]:
@@ -266,6 +355,9 @@ class RuleFirstProvider(ModelProvider):
 
     def name(self) -> str:
         return f"RuleFirst({self.fallback.name()})"
+
+    def bind_workspace(self, root) -> None:
+        self.rules.bind_workspace(root)
 
     def generate(self, prompt: str, system_prompt: str = "") -> str:
         ctx = parse_context(system_prompt)

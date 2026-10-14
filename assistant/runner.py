@@ -47,6 +47,9 @@ class TaskRunner:
         self.winget = WingetTool(runner=winget_runner) if winget_runner else WingetTool()
         # فحص winget المستقل الافتراضي: winget list -q <id>؛ مع نفس المشغّل القابل للاستبدال
         self.version_probe = version_probe or (lambda pkg: self.winget.list_packages(pkg))
+        bind = getattr(provider, "bind_workspace", None)
+        if callable(bind):
+            bind(self.allowed_root)  # يسمح لمخطط القواعد بقراءة أحجام/تواريخ الملفات (قراءة فقط)
         self.planner = Planner(provider=provider)
         self.verifier = Verifier(allowed_root=self.allowed_root, version_probe=self.version_probe, kill_switch=self.kill_switch)
         self._journal_starts: Dict[str, int] = {}
