@@ -1,20 +1,20 @@
 # نتائج الاختبارات الفعلية (آلية)
 
-آخر تشغيل: 2026-10-14 22:26:31 — 45 ملف، فشل: 0
+آخر تشغيل: 2026-10-14 23:31:50 — 45 ملف، فشل: 0
 
 هذه النتائج تُنتَج على لابتوب المالك. لا تدّعِ نجاحاً غير مذكور هنا.
 
 | الملف | النتيجة | الزمن |
 |---|---|---|
-| `assistant/tests/test_b11.py` | PASS | 0.8s |
+| `assistant/tests/test_b11.py` | PASS | 0.9s |
 | `assistant/tests/test_b15.py` | PASS | 0.2s |
-| `assistant/tests/test_b16.py` | PASS | 0.5s |
-| `assistant/tests/test_b17.py` | PASS | 0.2s |
-| `assistant/tests/test_b18.py` | PASS | 0.9s |
+| `assistant/tests/test_b16.py` | PASS | 0.4s |
+| `assistant/tests/test_b17.py` | PASS | 0.3s |
+| `assistant/tests/test_b18.py` | PASS | 1.0s |
 | `assistant/tests/test_b19.py` | PASS | 0.9s |
-| `assistant/tests/test_b20.py` | PASS | 0.1s |
+| `assistant/tests/test_b20.py` | PASS | 0.2s |
 | `assistant/tests/test_b21.py` | PASS | 0.1s |
-| `assistant/tests/test_b22.py` | PASS | 0.8s |
+| `assistant/tests/test_b22.py` | PASS | 0.9s |
 | `assistant/tests/test_b23.py` | PASS | 3.1s |
 | `assistant/tests/test_b24.py` | PASS | 1.0s |
 | `assistant/tests/test_b25.py` | PASS | 0.2s |
@@ -22,34 +22,34 @@
 | `assistant/tests/test_b28.py` | PASS | 0.2s |
 | `assistant/tests/test_b28_rules.py` | PASS | 0.2s |
 | `assistant/tests/test_b29_rules.py` | PASS | 0.6s |
-| `assistant/tests/test_b30_rules.py` | PASS | 1.4s |
+| `assistant/tests/test_b30_rules.py` | PASS | 1.5s |
 | `assistant/tests/test_b31_ui.py` | PASS | 2.0s |
 | `assistant/tests/test_b32_rules.py` | PASS | 0.1s |
 | `assistant/tests/test_b6.py` | PASS | 0.4s |
-| `assistant/tests/test_b8.py` | PASS | 0.4s |
-| `assistant/tests/test_bench.py` | PASS | 0.7s |
-| `assistant/tests/test_benchmarks_20runs.py` | PASS | 1.5s |
+| `assistant/tests/test_b8.py` | PASS | 0.5s |
+| `assistant/tests/test_bench.py` | PASS | 0.8s |
+| `assistant/tests/test_benchmarks_20runs.py` | PASS | 1.6s |
 | `assistant/tests/test_budget.py` | PASS | 0.1s |
 | `assistant/tests/test_config.py` | PASS | 0.4s |
 | `assistant/tests/test_controller.py` | PASS | 0.5s |
-| `assistant/tests/test_deliberate_failures.py` | PASS | 0.9s |
-| `assistant/tests/test_files.py` | PASS | 0.1s |
-| `assistant/tests/test_fuzz.py` | PASS | 4.4s |
-| `assistant/tests/test_fuzz_invariants.py` | SKIP (لم يُختبر فعلياً) | 0.0s |
-| `assistant/tests/test_ledger.py` | PASS | 0.3s |
+| `assistant/tests/test_deliberate_failures.py` | PASS | 12.9s |
+| `assistant/tests/test_files.py` | PASS | 0.2s |
+| `assistant/tests/test_fuzz.py` | PASS | 5.7s |
+| `assistant/tests/test_fuzz_invariants.py` | SKIP (لم يُختبر فعلياً) | 0.1s |
+| `assistant/tests/test_ledger.py` | PASS | 1.6s |
 | `assistant/tests/test_models.py` | PASS | 0.1s |
 | `assistant/tests/test_no_secrets.py` | PASS | 0.1s |
 | `assistant/tests/test_planner.py` | PASS | 0.1s |
 | `assistant/tests/test_planner_executor_verifier.py` | PASS | 0.1s |
 | `assistant/tests/test_providers.py` | PASS | 0.1s |
 | `assistant/tests/test_router.py` | PASS | 0.1s |
-| `assistant/tests/test_rules.py` | PASS | 0.6s |
-| `assistant/tests/test_runner.py` | PASS | 1.0s |
-| `assistant/tests/test_safety.py` | PASS | 0.1s |
-| `assistant/tests/test_scripts.py` | PASS | 0.0s |
+| `assistant/tests/test_rules.py` | PASS | 2.9s |
+| `assistant/tests/test_runner.py` | PASS | 1.6s |
+| `assistant/tests/test_safety.py` | PASS | 0.2s |
+| `assistant/tests/test_scripts.py` | PASS | 0.1s |
 | `assistant/tests/test_shell.py` | PASS | 0.1s |
 | `assistant/tests/test_smoke.py` | PASS | 0.1s |
-| `assistant/tests/test_ui_widget.py` | PASS | 2.3s |
+| `assistant/tests/test_ui_widget.py` | PASS | 2.4s |
 | `assistant/tests/test_windows.py` | PASS | 0.2s |
 
 ### assistant/tests/test_b11.py

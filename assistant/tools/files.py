@@ -220,7 +220,18 @@ class FileManager:
 
     def _save_journal(self):
         """حفظ سجل التراجع في JSON مع رفع استثناء عند الفشل لضمان عدم ضياع التوثيق (R11)."""
-        data = json.dumps([self._entry_to_disk(e) for e in self.journal], ensure_ascii=True, indent=2)  # ASCII: أسماء بمحارف شاذة (surrogate) لا تكسر الترميز
+        # كل إدخال يُسلسَل مرة واحدة ويُخزَّن (إعادة كتابة السجل كاملاً بعد كل عملية كانت تربيعية)؛ ASCII: أسماء بمحارف شاذة لا تكسر الترميز
+        cache = self.__dict__.setdefault("_ser_cache", {})
+        parts = []
+        live = {}
+        for e in self.journal:
+            hit = cache.get(id(e))
+            if hit is None or hit[0] is not e or hit[2] != len(e):
+                hit = (e, json.dumps(self._entry_to_disk(e), ensure_ascii=True), len(e))
+            live[id(e)] = hit
+            parts.append(hit[1])
+        self._ser_cache = live
+        data = "[\n" + ",\n".join(parts) + "\n]"
         tmp = self.journal_path.with_name(self.journal_path.name + ".tmp")
         try:
             with open(str(tmp), "w", encoding="utf-8") as f:
