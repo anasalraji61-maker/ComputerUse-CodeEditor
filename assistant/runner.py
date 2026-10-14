@@ -1,5 +1,6 @@
 """المنسّق (TaskRunner) — دورة العمل الكاملة: دفتر ← تخطيط ← فحص مسبق ← تنفيذ وتدقيق لكل خطوة ← تقرير."""
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -34,6 +35,8 @@ class TaskRunner:
         shell_tool: Optional[ShellTool] = None,
         max_steps: int = 60,
         max_tokens: int = 4000,
+        max_seconds: float = 1800.0,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self.allowed_root = Path(allowed_root).resolve()
         self.provider = provider
@@ -42,6 +45,8 @@ class TaskRunner:
         self.approver = approver
         self.max_steps = max_steps
         self.max_tokens = max_tokens
+        self.max_seconds = max_seconds  # سقف زمن المهمة (يشمل انتظار الموافقات): تقصير الخسارة لو علقت أداة
+        self._clock = clock
         self.safety = SafetyGuard(kill_switch=self.kill_switch)
         self.file_manager = FileManager(allowed_root=self.allowed_root, kill_switch=self.kill_switch)
         self.shell = shell_tool or ShellTool()
@@ -267,8 +272,11 @@ class TaskRunner:
         befores: Dict[int, Dict[str, Any]] = {}
         try:
             total = len(plan)
+            t_start = self._clock()
             for idx, step in enumerate(plan, 1):
                 self.kill_switch.check()
+                if self._clock() - t_start > self.max_seconds:
+                    raise BudgetExceededError(f"تجاوزت المهمة الحد الزمني ({int(self.max_seconds)} ثانية)؛ توقفت قبل الخطوة {step.step_id}.")
                 emit(event="step_start", index=idx, total=total, step_id=step.step_id,
                      action=step.action_type, target=step.target)
                 before = self.verifier.snapshot(step)

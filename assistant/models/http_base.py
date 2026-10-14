@@ -73,6 +73,7 @@ class HttpProvider(ModelProvider):
         timeout: float = 60.0,
         max_retries: int = 2,
         sleep: Callable[[float], None] = time.sleep,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ):
         self.model = model
         self._api_key = api_key or next((os.environ[k] for k in self.ENV_KEYS if os.environ.get(k)), "")
@@ -81,6 +82,7 @@ class HttpProvider(ModelProvider):
         self.timeout = timeout
         self.max_retries = max_retries
         self._sleep = sleep
+        self.cancel_check = cancel_check  # يُضبط من المتحكم: عند الإيقاف لا نعيد المحاولة ولا ننام
         self.usage = Usage()
         self.last_usage = (0, 0)
 
@@ -122,7 +124,11 @@ class HttpProvider(ModelProvider):
             if status not in self.RETRY_STATUS:
                 break
             if attempt < self.max_retries:
+                if self.cancel_check is not None and self.cancel_check():
+                    raise ProviderError("أُوقف الطلب بزر الإيقاف.")
                 self._sleep(1.5 * (attempt + 1))
+                if self.cancel_check is not None and self.cancel_check():
+                    raise ProviderError("أُوقف الطلب بزر الإيقاف.")
         if status in (401, 403):
             raise ProviderError(f"رُفض المفتاح من خدمة {self.PROVIDER_LABEL} (رمز {status}). تحقق من المفتاح وصلاحياته.")
         if status != 200:

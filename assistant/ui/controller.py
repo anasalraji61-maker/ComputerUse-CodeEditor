@@ -53,12 +53,20 @@ class AssistantController:
         self.winget_runner = winget_runner
         self.runner = self._make_runner(allowed_root)
         self.safety = SafetyGuard(self.kill_switch)
+        self._wire_cancel(self.provider)
 
     def _make_runner(self, root) -> TaskRunner:
         return TaskRunner(
             allowed_root=root, provider=self.provider, ledger=self.ledger,
             kill_switch=self.kill_switch, approver=self._approve, winget_runner=self.winget_runner,
         )
+
+    def _wire_cancel(self, prov):
+        """يربط زر الإيقاف بإعادة محاولات HTTP في المزوّد (وفي مزوّدي الموجّه)."""
+        check = lambda: self.kill_switch.is_triggered  # noqa: E731
+        for p in [prov] + list(getattr(prov, "providers", {}).values()):
+            if hasattr(p, "cancel_check") and p.cancel_check is None:
+                p.cancel_check = check
 
     @property
     def workspace(self):
