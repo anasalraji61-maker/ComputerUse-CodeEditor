@@ -223,14 +223,23 @@ def main(argv=None) -> int:
     ap.add_argument("--provider", choices=["anthropic", "gemini"], required=True)
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--max-usd", type=float, default=1.0)
+    ap.add_argument("--ask-key", action="store_true", help="اطلب المفتاح بإدخال مخفي (لا يُعرض ولا يُحفظ)")
     ap.add_argument("--with-rules", action="store_true", help="قياس الوضع المختلط (القواعد أولاً) بدل النموذج وحده")
     ap.add_argument("--out", default=str(ROOT / "docs" / "MEASUREMENT.md"))
     args = ap.parse_args(argv)
 
+    import os
     from assistant.models.factory import build_provider
     from assistant.models.http_base import ProviderConfigError
+    env = {**os.environ, "COS_PROVIDER": args.provider}
+    if args.ask_key:
+        import getpass
+        var = "ANTHROPIC_API_KEY" if args.provider == "anthropic" else "GEMINI_API_KEY"
+        key = getpass.getpass(f"Enter {args.provider} API key (hidden, never saved): ").strip()
+        if key:
+            env[var] = key  # يبقى في ذاكرة هذه العملية فقط
     try:
-        provider, note = build_provider({**__import__("os").environ, "COS_PROVIDER": args.provider})
+        provider, note = build_provider(env)
     except ProviderConfigError as exc:
         print(f"خطأ: {exc}", file=sys.stderr)
         return 2

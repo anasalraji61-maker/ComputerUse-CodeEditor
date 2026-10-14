@@ -81,6 +81,18 @@ try:
         # 4. تراجع عن آخر مهمة
         w.undo_btn.invoke()
         assert pump(root, lambda: "تم التراجع" in chat_text(w))
+        # 3ب. الأمثلة السريعة تملأ الحقل، وتغيير المجلد يعمل ويرفض غير الصالح
+        w.chips[0].invoke()
+        assert w.entry.get() == "رتّب الملفات حسب النوع"
+        w.entry.delete(0, "end")
+        newws = base / "ws2"; newws.mkdir()
+        assert w.apply_workspace(str(newws)) is True
+        assert pump(root, lambda: str(newws)[-20:] in w.ws_lbl.cget("text") and "مجلد العمل الآن" in chat_text(w))
+        assert w.apply_workspace(str(base / "ghost")) is False
+        assert pump(root, lambda: "مجلد غير مقبول" in chat_text(w))
+        assert "الرصيد" in w.balance_lbl.cget("text")
+        assert w.pretty_report("# عنوان\n## قسم\n- بند").splitlines() == ["━━ عنوان ━━", "▸ قسم", "  • بند"]
+
         root.destroy()
 
     print("PASS: test_ui_widget completed successfully")

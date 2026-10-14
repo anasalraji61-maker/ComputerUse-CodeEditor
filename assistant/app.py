@@ -5,10 +5,8 @@ from pathlib import Path
 
 
 def default_paths():
-    home = Path.home()
-    workspace = Path(os.environ.get("COS_WORKSPACE", home / "COS_Workspace"))
-    data_dir = Path(os.environ.get("COS_DATA_DIR", home / ".cos_assistant"))
-    return workspace, data_dir
+    from assistant.config import current_workspace, data_dir
+    return current_workspace(), data_dir()
 
 
 def build_controller(provider=None):

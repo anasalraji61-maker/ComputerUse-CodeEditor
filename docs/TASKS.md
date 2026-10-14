@@ -68,3 +68,7 @@
 ## B4 — المخطط المحلي بالقواعد (بلا مفتاح)
 الحالة: DONE (19/19 PASS حقيقي 2026-10-14 08:51)
 assistant/models/rules.py: ترتيب حسب النوع، إعادة تسمية ببادئة/تاريخ، نسخ، إنشاء مجلد/مشروع، فحص، winget، whoami؛ سؤال توضيحي عند الغموض؛ RuleFirstProvider (قواعد أولاً ثم النموذج الحقيقي) لخفض الكلفة؛ الوضع الافتراضي صار المحلي. اختبارات: test_rules.
+
+## B5 — اختيار المجلد وسهولة الاستخدام والتغليف
+الحالة: DOING (2026-10-14؛ بانتظار TEST_RESULTS الحقيقي)
+assistant/config.py (تحقق صارم من مجلد العمل + حفظ)، set_workspace في المتحكم، واجهة: أمثلة سريعة/تغيير وفتح المجلد/رصيد/تقرير منسّق، launch.py وbuild_exe.bat وrun_bench.bat (--ask-key)، .gitattributes لفرض CRLF لملفات bat. اختبارات: test_config وtest_scripts وتوسيع test_ui_widget.

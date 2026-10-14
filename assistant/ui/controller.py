@@ -15,6 +15,7 @@ from assistant.planner import PlanStep, PlanParseError
 from assistant.runner import TaskRunner
 from assistant.safety import KillSwitch, SafetyGuard
 from assistant.ledger import SQLiteLedger
+from assistant.config import validate_workspace, load_config, save_config, WorkspaceError
 
 MAX_QUESTIONS = 3
 APPROVAL_TIMEOUT_SEC = 120.0
@@ -43,11 +44,42 @@ class AssistantController:
         self._approval_event = threading.Event()
         self._approval_result = False
         self._approval_timeout = approval_timeout
-        self.runner = TaskRunner(
-            allowed_root=allowed_root, provider=provider, ledger=ledger,
-            kill_switch=self.kill_switch, approver=self._approve, winget_runner=winget_runner,
-        )
+        self.ledger = ledger
+        self.winget_runner = winget_runner
+        self.runner = self._make_runner(allowed_root)
         self.safety = SafetyGuard(self.kill_switch)
+
+    def _make_runner(self, root) -> TaskRunner:
+        return TaskRunner(
+            allowed_root=root, provider=self.provider, ledger=self.ledger,
+            kill_switch=self.kill_switch, approver=self._approve, winget_runner=self.winget_runner,
+        )
+
+    @property
+    def workspace(self):
+        return self.runner.allowed_root
+
+    def set_workspace(self, path) -> bool:
+        """تغيير مجلد العمل (فقط أثناء الخمول) بعد تحقق صارم، مع حفظ الاختيار."""
+        with self._lock:
+            if self.state != IDLE:
+                self.emit("error", text="لا يمكن تغيير المجلد أثناء مهمة جارية.")
+                return False
+            try:
+                p = validate_workspace(path)
+            except WorkspaceError as exc:
+                self.emit("error", text=f"مجلد غير مقبول: {exc}")
+                return False
+            self.runner = self._make_runner(p)
+            self.last_task_id = None
+        cfg = load_config()
+        cfg["workspace"] = str(p)
+        try:
+            save_config(cfg)
+        except OSError:
+            pass
+        self.emit("workspace", path=str(p))
+        return True
 
     # ---------- أحداث ----------
     def emit(self, type_: str, **data):

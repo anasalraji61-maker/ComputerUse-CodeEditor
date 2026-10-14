@@ -19,3 +19,10 @@ tools/.last_tested
 Thumbs.db
 tools/sync.log
 tools/.last_tested
+
+# تغليف وقياس
+dist/
+build/
+*.spec
+tools/sync.log
+tools/.last_tested

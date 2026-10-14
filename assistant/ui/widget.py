@@ -1,6 +1,7 @@
 """المربع العائم (tkinter) — محادثة، خطة، تقدّم، تقرير، زر إيقاف أحمر دائم، ونافذة موافقة للخطوات الخطرة."""
+import os
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, filedialog
 from typing import Any, Dict, List
 
 from assistant.ui.controller import AssistantController
@@ -9,6 +10,8 @@ FONT = ("Segoe UI", 10)
 FONT_B = ("Segoe UI", 10, "bold")
 LEVEL_COLORS = {"READ": "#2e7d32", "REVERSIBLE": "#1565c0", "DANGEROUS": "#ef6c00", "FORBIDDEN": "#c62828"}
 LEVEL_AR = {"READ": "قراءة", "REVERSIBLE": "قابل للتراجع", "DANGEROUS": "خطر", "FORBIDDEN": "محظور"}
+EXAMPLES = ["رتّب الملفات حسب النوع", "افحص المجلد", "أنشئ مشروع my_app", "انسخ ملفاً إلى Backup"]
+
 ACTION_AR = {
     "inspect": "فحص", "create_dir": "إنشاء مجلد", "move": "نقل", "copy": "نسخ", "rename": "إعادة تسمية",
     "delete": "نقل للسلة", "trash": "نقل للسلة", "winget_upgrade": "تحديث برنامج", "run_command": "تشغيل أمر",
@@ -28,8 +31,8 @@ class AssistantWidget:
         root.title("مساعد المهام")
         root.attributes("-topmost", True)
         root.configure(bg="#f5f5f5")
-        root.minsize(360, 520)
-        w, h = 400, 600
+        root.minsize(380, 600)
+        w, h = 420, 700
         x = max(0, root.winfo_screenwidth() - w - 24)
         y = max(0, root.winfo_screenheight() - h - 70)
         root.geometry(f"{w}x{h}+{x}+{y}")
@@ -49,6 +52,19 @@ class AssistantWidget:
         self.stop_btn.pack(side="left", padx=8, pady=8)
         tk.Label(header, text="مساعد المهام المكتبية", bg="#263238", fg="white", font=("Segoe UI", 12, "bold")
                  ).pack(side="right", padx=12)
+        self.balance_lbl = tk.Label(header, text="", bg="#263238", fg="#b0bec5", font=FONT)
+        self.balance_lbl.pack(side="left", padx=4)
+
+        # مجلد العمل: عرض + تغيير + فتح
+        wsrow = tk.Frame(r, bg="#eceff1")
+        wsrow.pack(fill="x")
+        self.ws_open_btn = tk.Button(wsrow, text="فتح", font=FONT, relief="flat", command=self._open_workspace)
+        self.ws_open_btn.pack(side="left", padx=(6, 2), pady=4)
+        self.ws_change_btn = tk.Button(wsrow, text="تغيير المجلد", font=FONT, relief="flat", command=self._choose_workspace)
+        self.ws_change_btn.pack(side="left", padx=2, pady=4)
+        self.ws_lbl = tk.Label(wsrow, text="", bg="#eceff1", fg="#37474f", font=("Segoe UI", 9), anchor="e", justify="right")
+        self.ws_lbl.pack(side="right", fill="x", expand=True, padx=8)
+        self._refresh_workspace_label()
 
         self.chat = tk.Text(r, wrap="word", height=12, state="disabled", font=FONT, bg="white", relief="flat",
                             padx=8, pady=6)
@@ -78,6 +94,15 @@ class AssistantWidget:
         self.undo_btn = tk.Button(actions, text="↩ تراجع", font=FONT, relief="flat",
                                   command=self.controller.undo_last)
         self.undo_btn.pack(side="left", padx=2)
+
+        chips = tk.Frame(r, bg="#f5f5f5")
+        chips.pack(fill="x", padx=8)
+        self.chips = []
+        for ex in EXAMPLES:
+            b = tk.Button(chips, text=ex, font=("Segoe UI", 9), relief="groove", bg="#e3f2fd",
+                          command=lambda t=ex: self._use_example(t))
+            b.pack(side="right", padx=2, pady=2)
+            self.chips.append(b)
 
         inp = tk.Frame(r, bg="#f5f5f5")
         inp.pack(fill="x", padx=8, pady=(0, 8))
@@ -119,6 +144,53 @@ class AssistantWidget:
     def _set_buttons(self, plan_ready: bool):
         self.start_btn.configure(state="normal" if plan_ready else "disabled")
         self.cancel_btn.configure(state="normal" if plan_ready else "disabled")
+
+    # ---------- مجلد العمل وأمثلة ----------
+    def _refresh_workspace_label(self):
+        path = str(self.controller.workspace)
+        short = path if len(path) <= 44 else "…" + path[-43:]
+        self.ws_lbl.configure(text=f"مجلد العمل: {short}")
+        try:
+            self.balance_lbl.configure(text=f"الرصيد: {self.controller.ledger.get_balance()}")
+        except Exception:
+            pass
+
+    def _choose_workspace(self):
+        path = filedialog.askdirectory(title="اختر مجلد العمل (مثل Downloads)", initialdir=str(self.controller.workspace))
+        if path:
+            self.apply_workspace(path)
+
+    def apply_workspace(self, path: str) -> bool:
+        ok = self.controller.set_workspace(path)
+        if ok:
+            self._clear_plan()
+            self._set_buttons(False)
+        return ok
+
+    def _open_workspace(self):
+        try:
+            os.startfile(str(self.controller.workspace))  # ويندوز فقط
+        except Exception:
+            self.add_message("تعذّر فتح المجلد تلقائياً. المسار: " + str(self.controller.workspace), "error")
+
+    def _use_example(self, text: str):
+        self.entry.delete(0, "end")
+        self.entry.insert(0, text)
+        self.entry.focus_set()
+
+    @staticmethod
+    def pretty_report(text: str) -> str:
+        out = []
+        for ln in text.splitlines():
+            if ln.startswith("# "):
+                out.append("━━ " + ln[2:] + " ━━")
+            elif ln.startswith("## "):
+                out.append("▸ " + ln[3:])
+            elif ln.startswith("- "):
+                out.append("  • " + ln[2:])
+            else:
+                out.append(ln)
+        return "\n".join(out)
 
     def _on_stop(self):
         self.controller.stop()
@@ -183,11 +255,15 @@ class AssistantWidget:
         elif t == "approval_request":
             self._ask_approval(ev["step"])
         elif t == "report":
-            self.add_message(ev["text"], "report")
+            self.add_message(self.pretty_report(ev["text"]), "report")
             self.add_message("تم بنجاح ✔" if ev["success"] else "فشلت المهمة ✖ (راجع التقرير أعلاه)",
                              "ok" if ev["success"] else "error")
             self.set_status("انتهت المهمة")
             self._set_buttons(False)
+            self._refresh_workspace_label()
+        elif t == "workspace":
+            self._refresh_workspace_label()
+            self.add_message("مجلد العمل الآن: " + ev["path"], "ok")
         elif t == "undo":
             self.add_message(f"تم التراجع عن {ev['count']} عملية.", "ok")
 
