@@ -259,6 +259,7 @@ class AssistantController:
         """تُستدعى من خيط التنفيذ: تنتظر قرار المستخدم؛ الإيقاف أو المهلة = رفض."""
         self._approval_event.clear()
         self._approval_result = False
+        self._pending_step_id = step.step_id
         self.emit("approval_request", step={
             "step_id": step.step_id, "action": step.action_type, "target": step.target, "params": step.params})
         self._approval_event.wait(timeout=self._approval_timeout)
@@ -267,7 +268,10 @@ class AssistantController:
         self._approval_result = False
         return result
 
-    def respond_approval(self, approved: bool):
+    def respond_approval(self, approved: bool, step_id=None):
+        """step_id (اختياري): ردّ متأخر أو مكرر على خطوة سابقة يُتجاهل ولا يُحتسب لخطوة أخرى."""
+        if step_id is not None and step_id != getattr(self, "_pending_step_id", step_id):
+            return
         self._approval_result = bool(approved)
         self._approval_event.set()
 

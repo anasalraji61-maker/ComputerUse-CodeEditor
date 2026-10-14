@@ -95,9 +95,9 @@ try:
         fm.move("x.txt", "D/x.txt")
         fm.move("y.txt", "D/y.txt")
         (root / "D" / "y.txt").unlink()  # اختفى ناتج آخر عملية
-        assert len(fm.journal) == 2
-        assert fm.undo_last() is False and len(fm.journal) == 1  # أُزيلت العملية ولم يُدَّعَ استعادة
-        assert fm.undo_all() == 1 and (root / "x.txt").exists() and not fm.journal
+        assert len(fm.journal) == 3  # create_dir D + نقلتان
+        assert fm.undo_last() is False and len(fm.journal) == 2  # أُزيلت العملية ولم يُدَّعَ استعادة
+        assert fm.undo_all() == 2 and (root / "x.txt").exists() and not fm.journal and not (root / "D").exists()
 
     # 6. نقل/نسخ إلى مجلد موجود يضع العنصر بداخله (لا «Photos (1)») ويقبله المدقق
     with tempfile.TemporaryDirectory() as tmp:
@@ -167,6 +167,25 @@ try:
         fm = FileManager(root)
         assert len(fm.journal) == 1
         assert fm.undo_all() == 0 and (root / "important.docx").exists()
+
+    # 12. المجلدات الآباء الضمنية تُسجَّل وتُزال عند التراجع (R37)
+    with tempfile.TemporaryDirectory() as tmp:
+        root, _ = mk(tmp, {"f.txt": "f"})
+        fm = FileManager(root)
+        fm.create_dir("a/b/c")
+        fm.move("f.txt", "x/y/f.txt")
+        assert fm.undo_all() == 6 and sorted(p.name for p in root.iterdir() if not p.name.startswith(".")) == ["f.txt"]
+
+    # 13. ردّ موافقة متأخر على خطوة أخرى يُتجاهل
+    with tempfile.TemporaryDirectory() as tmp:
+        root, led = mk(tmp)
+        c = AssistantController(rp, root, led)
+        c._pending_step_id = 2
+        c._approval_result = False
+        c.respond_approval(True, step_id=1)
+        assert c._approval_result is False and not c._approval_event.is_set()
+        c.respond_approval(True, step_id=2)
+        assert c._approval_result is True and c._approval_event.is_set()
 
     print("PASS: test_b8 completed successfully")
     sys.exit(0)

@@ -188,25 +188,37 @@ class FileManager:
                     pass
             raise
 
+    def _ensure_dirs(self, d: Path):
+        """ينشئ كل المجلدات الناقصة بين الجذر و d ويسجل كل واحد منها للتراجع (فلا يبقى مجلد يتيم بعد التراجع)."""
+        missing = []
+        cur = d
+        while cur != self.allowed_root and cur != cur.parent and not cur.exists():
+            missing.append(cur)
+            cur = cur.parent
+        made = []
+        try:
+            for m in reversed(missing):
+                m.mkdir(exist_ok=True)
+                made.append(m)
+                self.journal.append({"action": "create_dir", "path": str(m)})
+            if made:
+                self._save_journal()
+        except Exception:
+            for m in reversed(made):
+                if self.journal and self.journal[-1].get("path") == str(m):
+                    self.journal.pop()
+                try:
+                    m.rmdir()
+                except Exception:
+                    pass
+            raise
+
     def create_dir(self, dir_path: Union[str, Path]) -> Path:
-        """إنشاء مجلد داخل الجذر وتوثيقه في سجل التراجع مع التراجع إن فشل الحفظ."""
+        """إنشاء مجلد (وأي آباء ناقصين) داخل الجذر وتوثيق كل مستوى في سجل التراجع."""
         p = self.validate_path(dir_path)
         if p.exists():
             return p
-        p.mkdir(parents=True, exist_ok=True)
-        self.journal.append({
-            "action": "create_dir",
-            "path": str(p),
-        })
-        try:
-            self._save_journal()
-        except Exception:
-            self.journal.pop()
-            try:
-                p.rmdir()
-            except Exception:
-                pass
-            raise
+        self._ensure_dirs(p)
         return p
 
     def move(self, src: Union[str, Path], dest: Union[str, Path]) -> Path:
@@ -218,7 +230,7 @@ class FileManager:
         destination = self.validate_path(dest)
         if destination.is_dir() and destination != source:
             destination = self.validate_path(destination / source.name)  # الوجهة مجلد موجود: ضع العنصر بداخله
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_dirs(destination.parent)
         final_dest = self._get_unique_path(destination)
 
         shutil.move(str(source), str(final_dest))
@@ -255,7 +267,7 @@ class FileManager:
             destination = self.validate_path(destination / source.name)
             if source.is_dir() and (destination == source or source in destination.parents):
                 raise ValueError(f"لا يمكن نسخ المجلد '{source}' إلى داخل نفسه أو مجلد فرعي منه '{destination}'.")
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_dirs(destination.parent)
         final_dest = self._get_unique_path(destination)
 
         if source.is_dir():

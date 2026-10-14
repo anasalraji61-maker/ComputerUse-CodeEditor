@@ -44,4 +44,5 @@
 [IMPLEMENTED-awaiting-real-PASS] R34 (files): السجل يتجاهل العناصر غير القواميس ويرفض trash_path خارج .trash.
 [IMPLEMENTED-awaiting-real-PASS] R35 (rules/runner): مطابقة الأسماء كاملة لا بالجزء؛ الأسماء غير المرئية/الطويلة تُحجب عن المخطط.
 [IMPLEMENTED-awaiting-real-PASS] R36 (shell): NoDefaultCurrentDirectoryInExePath=1 حتى لا يُشغَّل exe مزروع في المجلد الحالي.
-[OPEN-low] R37: مجلدات الأب التي تُنشأ ضمنياً أثناء النقل/create_dir المتداخل لا تُسجَّل في السجل (تبقى فارغة بعد التراجع)؛ وسجل التراجع يخزن مسارات مطلقة (إعادة تسمية مجلد العمل تعطله).
+[IMPLEMENTED-awaiting-real-PASS] R37: مجلدات الأب الضمنية (نقل/نسخ/create_dir متداخل) تُسجَّل وتُزال بالتراجع. [OPEN-low] سجل التراجع يخزن مسارات مطلقة (إعادة تسمية مجلد العمل تعطله).
+[IMPLEMENTED-awaiting-real-PASS] R38: ردّ الموافقة مرتبط برقم الخطوة؛ الردّ المتأخر/المكرر لخطوة أخرى يُتجاهل.

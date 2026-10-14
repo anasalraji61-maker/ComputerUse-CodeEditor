@@ -312,7 +312,7 @@ class AssistantWidget:
         btns.pack(pady=12)
 
         def decide(ok: bool):
-            self.controller.respond_approval(ok)
+            self.controller.respond_approval(ok, step.get("step_id"))
             self._close_approval()
 
         tk.Button(btns, text="نعم، نفّذ", bg="#2e7d32", fg="white", font=FONT_B, relief="flat", padx=12,
