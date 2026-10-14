@@ -122,6 +122,9 @@ class Executor:
             if not self.shell_tool:
                 raise RuntimeError("أداة shell غير مهيأة للمنفذ.")
             cmd_list = params.get("cmd", [step.target])
+            head = str(step.target).split()[0] if str(step.target).split() else ""
+            if not isinstance(cmd_list, (list, tuple)) or not cmd_list or str(cmd_list[0]) != head:
+                raise ExecutionInterruptedError("الأمر المعروض للمستخدم لا يطابق الأمر الفعلي؛ رُفضت الخطوة.")
             code, out, err = self.shell_tool.run(cmd_list)
             info.update(success=(code == 0), exit_code=code, stdout=out, stderr=err, cmd=list(cmd_list))
             self.executed_log.append(f"تشغيل الأمر {cmd_list} (رمز الخروج: {code})")

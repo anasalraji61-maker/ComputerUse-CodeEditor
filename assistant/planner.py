@@ -23,6 +23,10 @@ class PlanStep:
     acceptance_criteria: str = "تحقق وجود الملف ومطابقة البصمة"
     status: str = "PENDING"
 
+    def __post_init__(self):
+        if isinstance(self.action_type, str):
+            self.action_type = self.action_type.strip().lower()  # نفس التطبيع عند المنفّذ والمدقق والأمان
+
 
 def _extract_json(text: str) -> Any:
     cleaned = (text or "").strip()

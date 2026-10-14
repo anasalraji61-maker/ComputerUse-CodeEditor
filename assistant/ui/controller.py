@@ -36,6 +36,7 @@ class AssistantController:
         self.kill_switch = KillSwitch()
         self.event_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self.state = IDLE
+        self._planning_cancelled = False
         self._lock = threading.RLock()
         self._request = ""
         self._plan: Optional[List[PlanStep]] = None
@@ -126,14 +127,30 @@ class AssistantController:
             if not text:
                 return self.emit("error", text="اكتب طلبك أولاً.")
             self.kill_switch.reset()
+            self._planning_cancelled = False
             self._request = text
             self._plan = None
             self._go(PLANNING)
         self.emit("status", text="أفهم طلبك…")
         self._spawn(self._clarify_then_plan, text)
 
+    def _cancel_if_stopped(self) -> bool:
+        """الإيقاف أثناء الفهم/التخطيط يلغي الطلب ولا يتحول إلى خطة جاهزة."""
+        with self._lock:
+            if self._planning_cancelled:
+                self._plan = None
+                self._go(IDLE)
+                cancelled = True
+            else:
+                cancelled = False
+        if cancelled:
+            self.emit("status", text="أُلغي الطلب بسبب الإيقاف.")
+        return cancelled
+
     def _clarify_then_plan(self, text: str):
         questions = self._ask_questions(text)
+        if self._cancel_if_stopped():
+            return
         if questions:
             with self._lock:
                 self._go(CLARIFYING)
@@ -156,6 +173,7 @@ class AssistantController:
         with self._lock:
             if self.state != CLARIFYING:
                 return self.emit("error", text="لا توجد أسئلة بانتظار الإجابة.")
+            self._planning_cancelled = False
             self._go(PLANNING)
         extra = " | ".join(a.strip() for a in answers if a and a.strip())
         full = self._request + (f"\nتوضيحات المستخدم: {extra}" if extra else "")
@@ -174,6 +192,8 @@ class AssistantController:
             with self._lock:
                 self._go(IDLE)
             return self.emit("error", text=f"تعذّر التخطيط: {exc}")
+        if self._cancel_if_stopped():
+            return
         with self._lock:
             self._plan = plan
             self._request_full = text
@@ -182,7 +202,7 @@ class AssistantController:
         steps = [
             {"step_id": s.step_id, "action": s.action_type, "target": s.target,
              "level": self.safety.classify_action(s.action_type).value,
-             "criteria": s.acceptance_criteria}
+             "criteria": s.acceptance_criteria, "params": s.params}
             for s in plan
         ]
         self.emit("plan", task_id=self._task_id, steps=steps)
@@ -257,6 +277,8 @@ class AssistantController:
         self._approval_result = False
         self._approval_event.set()  # يحرر أي نافذة موافقة معلّقة بالرفض
         with self._lock:
+            if self.state == PLANNING:
+                self._planning_cancelled = True
             if self.state in (PLAN_READY, CLARIFYING):
                 self._plan = None
                 self._go(IDLE)
@@ -275,4 +297,6 @@ class AssistantController:
         if not self.last_task_id:
             return self.emit("error", text="لا توجد مهمة للتراجع عنها.")
         n = self.runner.undo_task(self.last_task_id)
+        if n == 0:
+            return self.emit("error", text="لا يوجد ما يمكن التراجع عنه لهذه المهمة (تم سابقاً، أو اختفى ناتجها، أو توجد مهام أحدث).")
         self.emit("undo", count=n, task_id=self.last_task_id)

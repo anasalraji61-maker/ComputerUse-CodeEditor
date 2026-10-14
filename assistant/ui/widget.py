@@ -12,6 +12,20 @@ LEVEL_COLORS = {"READ": "#2e7d32", "REVERSIBLE": "#1565c0", "DANGEROUS": "#ef6c0
 LEVEL_AR = {"READ": "قراءة", "REVERSIBLE": "قابل للتراجع", "DANGEROUS": "خطر", "FORBIDDEN": "محظور"}
 EXAMPLES = ["رتّب الملفات حسب النوع", "افحص المجلد", "أنشئ مشروع my_app", "انسخ ملفاً إلى Backup"]
 
+def step_detail(params) -> str:
+    """ملخص بارامترات الخطوة (الوجهة/الاسم الجديد/الأمر) لتظهر للمستخدم قبل التنفيذ والموافقة."""
+    if not isinstance(params, dict):
+        return ""
+    parts = []
+    if params.get("dest"):
+        parts.append(f"← {params['dest']}")
+    if params.get("new_name"):
+        parts.append(f"← الاسم الجديد: {params['new_name']}")
+    if params.get("cmd"):
+        parts.append("الأمر الفعلي: " + " ".join(str(c) for c in params["cmd"]))
+    return "  ".join(parts)
+
+
 ACTION_AR = {
     "inspect": "فحص", "create_dir": "إنشاء مجلد", "move": "نقل", "copy": "نسخ", "rename": "إعادة تسمية",
     "delete": "نقل للسلة", "trash": "نقل للسلة", "winget_upgrade": "تحديث برنامج", "run_command": "تشغيل أمر",
@@ -138,7 +152,7 @@ class AssistantWidget:
             lvl = s["level"]
             action = ACTION_AR.get(s["action"], s["action"])
             row = tk.Label(self.plan_frame, bg="#f5f5f5", font=FONT, anchor="e", justify="right",
-                           text=f"{s['step_id']}. {action}: {s['target']}  [{LEVEL_AR.get(lvl, lvl)}]",
+                           text=f"{s['step_id']}. {action}: {s['target']} {step_detail(s.get('params'))}  [{LEVEL_AR.get(lvl, lvl)}]",
                            fg=LEVEL_COLORS.get(lvl, "#000"))
             row.pack(fill="x", padx=6)
             self._plan_rows[s["step_id"]] = row
@@ -292,7 +306,7 @@ class AssistantWidget:
         action = ACTION_AR.get(step["action"], step["action"])
         tk.Label(win, text="⚠ خطوة خطرة تحتاج موافقتك", bg="#fff3e0", fg="#e65100", font=("Segoe UI", 12, "bold")
                  ).pack(padx=16, pady=(14, 6))
-        tk.Label(win, text=f"{action}: {step['target']}", bg="#fff3e0", font=FONT, justify="right").pack(padx=16)
+        tk.Label(win, text=f"{action}: {step['target']}\n{step_detail(step.get('params'))}".rstrip(), bg="#fff3e0", font=FONT, justify="right").pack(padx=16)
         tk.Label(win, text="هل تسمح بتنفيذ هذه الخطوة فقط؟", bg="#fff3e0", font=FONT).pack(padx=16, pady=6)
         btns = tk.Frame(win, bg="#fff3e0")
         btns.pack(pady=12)

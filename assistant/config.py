@@ -54,8 +54,11 @@ def validate_workspace(path) -> Path:
             continue
         if p == rb or rb in p.parents:
             raise WorkspaceError("لا يُسمح بمجلدات النظام أو البرامج.")
-    if p == Path.home().resolve():
+    home = Path.home().resolve()
+    if p == home:
         raise WorkspaceError("لا يمكن اختيار مجلد المستخدم الرئيسي نفسه. اختر مجلداً داخله (مثل Downloads).")
+    if p in home.parents:
+        raise WorkspaceError("هذا المجلد يحوي مجلد المستخدم الرئيسي؛ اختر مجلداً فرعياً مخصصاً للعمل.")
     dd = data_dir().resolve()
     if p == dd or dd in p.parents or p in dd.parents:
         raise WorkspaceError("هذا المجلد يخص بيانات التطبيق نفسه.")
@@ -93,6 +96,10 @@ def current_workspace() -> Path:
             return validate_workspace(saved)
         except WorkspaceError:
             pass
-    d = default_workspace()
-    d.mkdir(parents=True, exist_ok=True)
-    return d.resolve()
+    for d in (default_workspace(), Path.home() / "COS_Workspace"):
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            return validate_workspace(d)  # الافتراضي يخضع لنفس التحقق (قد يأتي من متغير بيئة)
+        except (WorkspaceError, OSError):
+            continue
+    raise WorkspaceError("تعذّر تجهيز مجلد عمل آمن. اختر مجلداً من الواجهة.")

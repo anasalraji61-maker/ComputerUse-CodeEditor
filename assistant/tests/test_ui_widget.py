@@ -79,8 +79,18 @@ try:
         assert pump(root, lambda: w._approval_win is None and chat_text(w).count("فشلت المهمة") == 2)
 
         # 4. تراجع عن آخر مهمة
+        w.undo_btn.invoke()  # آخر مهمة فاشلة بلا عمليات: لا شيء يُتراجع عنه
+        assert pump(root, lambda: "لا يوجد ما يمكن التراجع" in chat_text(w))
+        # 4ب. تراجع حقيقي عن مهمة ناجحة
+        w.entry.insert(0, "أنشئ مجلد للتراجع")
+        w._on_send()
+        assert pump(root, lambda: chat_text(w).count("هذه الخطة") == 4)
+        w.start_btn.invoke()
+        assert pump(root, lambda: chat_text(w).count("تم بنجاح ✔") == 2)
+        assert (base / "ws" / "للتراجع").is_dir()
         w.undo_btn.invoke()
-        assert pump(root, lambda: "تم التراجع" in chat_text(w))
+        assert pump(root, lambda: "تم التراجع عن 1" in chat_text(w))
+        assert not (base / "ws" / "للتراجع").exists()
         # 3ب. الأمثلة السريعة تملأ الحقل، وتغيير المجلد يعمل ويرفض غير الصالح
         w.chips[0].invoke()
         assert w.entry.get() == "رتّب الملفات حسب النوع"

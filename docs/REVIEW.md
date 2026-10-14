@@ -30,3 +30,18 @@
 [IMPLEMENTED-awaiting-real-PASS] R22 (runner): قبل البدء تحقق من `ledger.can_afford(estimate)` وسقف الإنفاق وارفض المهمة بتقرير واضح إن لم يكفِ الرصيد. وعند فشل منتصف التنفيذ قدّم في التقرير قائمة ما نُفّذ فعلاً وزر/دالة `undo_task()` تستدعي undo_all للعمليات التي سجّلتها هذه المهمة فقط.
 [IMPLEMENTED-awaiting-real-PASS] R23 (safety.py، لـ B2): KillSwitch يجب أن يعتمد على `threading.Event` لأن الواجهة ستفعّله من خيط آخر. وأضف فحصه داخل الحلقات الطويلة في files.py (نسخ المجلدات ملفاً ملفاً بدل copytree غير القابل للقطع).
 [IMPLEMENTED-awaiting-real-PASS] R24 (الاختبارات): أضف اختبارات تفشل لو عادت الثغرات: إجراء غير معروف `rm_rf` يُرفض؛ موافقة خطوة لا تمتد لخطوة أخرى؛ خطوة نقل لم تُنفَّذ والوجهة موجودة مسبقاً = فشل؛ نسخ تالف بلا expected_hash (يُعدَّل ملف الوجهة بين التنفيذ والتدقيق) يُكتشف؛ مسار dest خارج الجذر في دليل المنفّذ يُرفض؛ رد مخطِّط غير JSON يعطي فشلاً بلا تنفيذ؛ رصيد غير كافٍ يمنع البدء.
+
+## مراجعة مستقلة بعد B7 (2026-10-14)
+[IMPLEMENTED-awaiting-real-PASS] R25 (config): المجلد الافتراضي (من COS_WORKSPACE) لم يكن يُتحقق منه. الآن validate_workspace على الاحتياطي أيضاً، ويُرفض أي مجلد يحوي مجلد المستخدم.
+[IMPLEMENTED-awaiting-real-PASS] R26 (files): .git/.ssh/.gnupg/.aws محمية داخل أي مجلد عمل؛ رفض ':' (تيارات NTFS) وCONIN$/CONOUT$/COM¹²³/LPT¹²³.
+[IMPLEMENTED-awaiting-real-PASS] R27 (files): رفض أي رابط رمزي أو تقاطع (junction/reparse point) حتى داخل الجذر.
+[IMPLEMENTED-awaiting-real-PASS] R28 (runner): undo_task لا يتراجع إلا إن كانت المهمة آخر مهمة؛ وإلا يعيد 0 ويشرح المتحكم السبب.
+[IMPLEMENTED-awaiting-real-PASS] R29 (files): undo_last يعيد False (ولا يدّعي استعادة) إن اختفى الناتج، ويُزيل العملية من السجل؛ undo_all يتخطاها ويتابع.
+[IMPLEMENTED-awaiting-real-PASS] R30 (files/verifier): الوجهة مجلد موجود ⇒ يوضع العنصر بداخله (لا «Photos (1)»)؛ المدقق يقبل هذا الشكل فقط.
+[IMPLEMENTED-awaiting-real-PASS] R31 (ui): عرض الوجهة/الاسم الجديد/الأمر الفعلي في الخطة ونافذة الموافقة؛ executor يرفض run_command إن اختلف الأمر الفعلي عن المعروض.
+[IMPLEMENTED-awaiting-real-PASS] R32 (controller): الإيقاف أثناء الفهم/التخطيط يلغي الطلب.
+[IMPLEMENTED-awaiting-real-PASS] R33 (planner): تطبيع action_type في PlanStep (strip/lower).
+[IMPLEMENTED-awaiting-real-PASS] R34 (files): السجل يتجاهل العناصر غير القواميس ويرفض trash_path خارج .trash.
+[IMPLEMENTED-awaiting-real-PASS] R35 (rules/runner): مطابقة الأسماء كاملة لا بالجزء؛ الأسماء غير المرئية/الطويلة تُحجب عن المخطط.
+[IMPLEMENTED-awaiting-real-PASS] R36 (shell): NoDefaultCurrentDirectoryInExePath=1 حتى لا يُشغَّل exe مزروع في المجلد الحالي.
+[OPEN-low] R37: مجلدات الأب التي تُنشأ ضمنياً أثناء النقل/create_dir المتداخل لا تُسجَّل في السجل (تبقى فارغة بعد التراجع)؛ وسجل التراجع يخزن مسارات مطلقة (إعادة تسمية مجلد العمل تعطله).

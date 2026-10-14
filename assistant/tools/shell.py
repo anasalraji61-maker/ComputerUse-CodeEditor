@@ -1,9 +1,14 @@
 """أداة تشغيل أوامر النظام الآمنة مع التحقق الدقيق من الأوامر والوسائط ومنع الحقن وحظر shell=True."""
+import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
+
+
+# ويندوز يبحث في المجلد الحالي أولاً عن الملفات التنفيذية؛ نعطّل ذلك حتى لا يُشغَّل exe مزروع في مجلد العمل
+os.environ.setdefault("NoDefaultCurrentDirectoryInExePath", "1")
 
 
 class CommandNotAllowedError(Exception):

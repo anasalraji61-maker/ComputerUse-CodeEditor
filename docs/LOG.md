@@ -18,3 +18,5 @@
 - 2026-10-14 — Claude (مباشرة) — B6: delete/trash خطر بموافقة؛ نوايا نقل وحذف في RuleProvider؛ journal ذرّي ونسخة للتالف؛ KillSwitch داخل Verifier؛ تعقيم أسماء الملفات في workspace_listing وتحذير حقن في المخطط؛ ledger.get_history وcontroller.history وزر سجل المهام؛ USER_GUIDE.md؛ اختبارات test_b6. كل الاختبارات PASS في السحابة (والواجهة تحت xvfb). بانتظار TEST_RESULTS الحقيقي.
 - 2026-10-14 — النتيجة الحقيقية لـ B6: 22/22 PASS (09:21). B6 = DONE.
 - 2026-10-14 — Claude (مباشرة) — B7: ترتيب حسب الشهر/السنة وكشف المكررات بالمحتوى (نقل أو حذف بموافقة) في RuleProvider مع bind_workspace من TaskRunner؛ اختبارات في test_b6. بانتظار TEST_RESULTS الحقيقي.
+- 2026-10-14 — النتيجة الحقيقية لـ B7: 22/22 PASS (09:26). B7 = DONE.
+- 2026-10-14 — Claude (مباشرة) — B8: مراجعة أمنية مستقلة بوكيل منفصل وجدت 13 ثغرة؛ أُصلحت كلها (انظر TASKS B8) مع test_b8 وتعديل test_ui_widget (تراجع حقيقي + رسالة عند عدم وجود ما يُتراجع عنه). بانتظار TEST_RESULTS الحقيقي.

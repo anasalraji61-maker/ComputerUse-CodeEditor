@@ -9,13 +9,31 @@ from typing import Union, List, Dict, Any, Optional
 from assistant.safety import KillSwitch, EmergencyStopTriggered
 
 
-_WIN_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)}
+_WIN_RESERVED = ({"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+                 | {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)}
+                 | {f"COM{c}" for c in "¹²³"} | {f"LPT{c}" for c in "¹²³"})
+_PROTECTED_NAMES = {".git", ".ssh", ".gnupg", ".aws"}  # لا تُمَس عبر خطط المساعد حتى لو وُجدت داخل مجلد العمل
+_REPARSE_FLAG = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT (روابط/تقاطعات ويندوز)
 
 
 def _bad_component(name: str) -> bool:
-    """أسماء أجهزة ويندوز المحجوزة (CON, NUL, COM1…) وأسماء تنتهي بنقطة أو مسافة."""
+    """أسماء أجهزة ويندوز المحجوزة (CON, NUL, COM1…) وأسماء تنتهي بنقطة أو مسافة أو فيها : (تيارات NTFS)."""
     stem = name.split(".")[0].strip().upper()
-    return stem in _WIN_RESERVED or name != name.rstrip(" .")
+    return stem in _WIN_RESERVED or name != name.rstrip(" .") or ":" in name
+
+
+def _is_link(p: Path) -> bool:
+    """رابط رمزي أو تقاطع (junction) أو أي نقطة إعادة توجيه في ويندوز."""
+    try:
+        if p.is_symlink():
+            return True
+        isj = getattr(os.path, "isjunction", None)
+        if isj is not None and isj(str(p)):
+            return True
+        attrs = getattr(os.lstat(str(p)), "st_file_attributes", 0)
+        return bool(attrs & _REPARSE_FLAG)
+    except OSError:
+        return False
 
 
 class PathOutOfBoundsError(Exception):
@@ -51,7 +69,7 @@ class FileManager:
             try:
                 data = json.loads(self.journal_path.read_text(encoding="utf-8"))
                 if isinstance(data, list):
-                    return data
+                    return [e for e in data if isinstance(e, dict)]
             except Exception:
                 pass
             # سجل تالف: لا نفقده بصمت، نحفظ نسخة للفحص ثم نبدأ سجلاً جديداً
@@ -84,9 +102,14 @@ class FileManager:
         else:
             unresolved = p
 
+        anchor = Path(path).anchor
         for part in Path(path).parts:
-            if part not in ("/", "\\") and not part.endswith(":") and part not in (".", "..") and _bad_component(part):
-                raise PathOutOfBoundsError(f"اسم غير مسموح في المسار (اسم جهاز محجوز أو ينتهي بنقطة/مسافة): '{part}'.")
+            if part == anchor or part in ("/", "\\") or part in (".", ".."):
+                continue
+            if _bad_component(part):
+                raise PathOutOfBoundsError(f"اسم غير مسموح في المسار (اسم جهاز محجوز أو يحوي ':' أو ينتهي بنقطة/مسافة): '{part}'.")
+            if part.lower() in _PROTECTED_NAMES:
+                raise ProtectedPathError(f"المسار يمر بمجلد محمي لا يُمَس عبر المساعد: '{part}'.")
 
         resolved = unresolved.resolve()
 
@@ -99,12 +122,9 @@ class FileManager:
         # فحص إذا كان هناك رابط رمزي في المسار يشير إلى خارج الجذر
         curr = unresolved
         while curr != self.allowed_root and curr != curr.parent:
-            if curr.is_symlink():
-                target = curr.resolve()
-                try:
-                    target.relative_to(self.allowed_root)
-                except ValueError:
-                    raise PathOutOfBoundsError(f"الرابط الرمزي '{curr}' يشير إلى هدف خارج الجذر: '{target}'.")
+            if _is_link(curr):
+                # أي رابط/تقاطع مرفوض (حتى داخل الجذر): قد يُظهر اسماً بريئاً ويؤثر على عنصر آخر
+                raise PathOutOfBoundsError(f"الروابط الرمزية والتقاطعات غير مدعومة: '{curr}'.")
             curr = curr.parent
 
         # R7: حماية المسارات الخاصة (الجذر، السجل، السلة)
@@ -151,13 +171,13 @@ class FileManager:
                 cur = Path(current)
                 rel = cur.relative_to(source)
                 for d in dirs:
-                    if (cur / d).is_symlink():
+                    if _is_link(cur / d):
                         raise PathOutOfBoundsError(f"روابط رمزية داخل المجلد غير مدعومة: {cur / d}")
                     (dest / rel / d).mkdir(parents=True, exist_ok=True)
                 for name in files:
                     self._check_stop()
                     f = cur / name
-                    if f.is_symlink():
+                    if _is_link(f):
                         raise PathOutOfBoundsError(f"روابط رمزية داخل المجلد غير مدعومة: {f}")
                     shutil.copy2(str(f), str(dest / rel / name))
         except BaseException:
@@ -196,6 +216,8 @@ class FileManager:
             raise FileNotFoundError(f"الملف المصدر غير موجود: {source}")
 
         destination = self.validate_path(dest)
+        if destination.is_dir() and destination != source:
+            destination = self.validate_path(destination / source.name)  # الوجهة مجلد موجود: ضع العنصر بداخله
         destination.parent.mkdir(parents=True, exist_ok=True)
         final_dest = self._get_unique_path(destination)
 
@@ -229,6 +251,10 @@ class FileManager:
             if destination == source or source in destination.parents:
                 raise ValueError(f"لا يمكن نسخ المجلد '{source}' إلى داخل نفسه أو مجلد فرعي منه '{destination}'.")
 
+        if destination.is_dir() and destination != source:
+            destination = self.validate_path(destination / source.name)
+            if source.is_dir() and (destination == source or source in destination.parents):
+                raise ValueError(f"لا يمكن نسخ المجلد '{source}' إلى داخل نفسه أو مجلد فرعي منه '{destination}'.")
         destination.parent.mkdir(parents=True, exist_ok=True)
         final_dest = self._get_unique_path(destination)
 
@@ -322,69 +348,68 @@ class FileManager:
         """محظور نهائياً بموجب قواعد الأمان."""
         raise PermanentDeleteForbidden("الحذف النهائي محظور نهائياً بموجب قواعد الأمان. استخدم دالة delete للنقل إلى سلة المحذوفات.")
 
-    def undo_last(self) -> bool:
-        """التراجع عن آخر عملية مع التحقق الأمني من المسارات (R8)، وعدم الحذف النهائي (R9)، وعدم فقدان السجل عند الفشل (R10)."""
-        if not self.journal:
-            return False
-
-        # R10: نقرأ العملية من نهاية السجل دون حذفها مسبقاً
-        op = self.journal[-1]
+    def _undo_op(self, op: Dict[str, Any]) -> str:
+        """يتراجع عن عملية واحدة. يعيد "ok" أو "missing" (الناتج المتوقع لم يعد موجوداً فلا شيء يُستعاد) ويرفع عند الخطأ."""
         action = op.get("action")
+        if action in ("move", "rename"):
+            src = self.validate_path(op["src"])
+            dest = self.validate_path(op["dest"])
+            if not dest.exists():
+                return "missing"
+            src.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(dest), str(self._get_unique_path(src)))  # لا كتابة فوق موجود
+            return "ok"
+        if action == "copy":
+            dest = self.validate_path(op["dest"])  # تراجع النسخ ينقل الناتج إلى السلة ولا يحذفه نهائياً (R9)
+            if not dest.exists():
+                return "missing"
+            shutil.move(str(dest), str(self._get_unique_path(self.trash_dir / dest.name)))
+            return "ok"
+        if action == "create_dir":
+            p = self.validate_path(op["path"])
+            if not (p.exists() and p.is_dir()):
+                return "missing"
+            if any(p.iterdir()):  # فيه ملفات: يُنقل للسلة لحمايتها
+                shutil.move(str(p), str(self._get_unique_path(self.trash_dir / p.name)))
+            else:
+                p.rmdir()
+            return "ok"
+        if action == "delete":
+            orig = self.validate_path(op["original_path"])
+            trash = self.validate_path(op["trash_path"], allow_trash_internal=True)
+            if self.trash_dir not in trash.parents:
+                raise ProtectedPathError("مسار السلة في السجل ليس داخل .trash؛ السجل مرفوض.")
+            if not trash.exists():
+                return "missing"
+            orig.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(trash), str(self._get_unique_path(orig)))
+            return "ok"
+        raise ValueError(f"عملية غير معروفة في السجل: {action!r}")
 
+    def undo_step(self) -> str:
+        """يتراجع عن آخر عملية: "ok" | "missing" (أُزيلت من السجل لأن الناتج اختفى) | "error" (بقيت في السجل) | "empty"."""
+        if not self.journal:
+            return "empty"
         try:
-            if action in ("move", "rename"):
-                # R8: إعادة التحقق من المسارات عبر validate_path
-                src = self.validate_path(op["src"])
-                dest = self.validate_path(op["dest"])
-                if dest.exists():
-                    src.parent.mkdir(parents=True, exist_ok=True)
-                    # R10: عدم الكتابة فوق ملف موجود بالتراجع
-                    final_src = self._get_unique_path(src)
-                    shutil.move(str(dest), str(final_src))
-
-            elif action == "copy":
-                # R9: تراجع النسخ ينقل الناتج إلى سلة المحذوفات بدل حذفه نهائياً
-                dest = self.validate_path(op["dest"])
-                if dest.exists():
-                    dest_trash = self.trash_dir / dest.name
-                    final_trash = self._get_unique_path(dest_trash)
-                    shutil.move(str(dest), str(final_trash))
-
-            elif action == "create_dir":
-                p = self.validate_path(op["path"])
-                if p.exists() and p.is_dir():
-                    # إن كان المجلد يحتوي على ملفات، يُنقل للسلة لحماية الملفات
-                    if any(p.iterdir()):
-                        p_trash = self.trash_dir / p.name
-                        shutil.move(str(p), str(self._get_unique_path(p_trash)))
-                    else:
-                        p.rmdir()
-
-            elif action == "delete":
-                # R8: التحقق من المسارات مع السماح الداخلي بالسلة
-                orig = self.validate_path(op["original_path"])
-                trash = self.validate_path(op["trash_path"], allow_trash_internal=True)
-                if trash.exists():
-                    orig.parent.mkdir(parents=True, exist_ok=True)
-                    final_orig = self._get_unique_path(orig)
-                    shutil.move(str(trash), str(final_orig))
-
-            # R10: نحذف العملية من السجل ونحفظ فقط بعد نجاح التراجع الفعلي
+            result = self._undo_op(self.journal[-1])  # R10: لا نحذف من السجل قبل نجاح الفعل
             self.journal.pop()
             self._save_journal()
-            return True
+            return result
+        except Exception:
+            return "error"
 
-        except Exception as err:
-            # R10: في حال حدوث أي خطأ، تبقى العملية في السجل ولا تضيع
-            return False
+    def undo_last(self) -> bool:
+        """True فقط إذا استُعيد شيء فعلاً. إن اختفى الناتج المتوقع أُزيلت العملية من السجل وتعاد False."""
+        return self.undo_step() == "ok"
 
     def undo_all(self) -> int:
-        """التراجع عن جميع العمليات المسجلة بالترتيب العكسي."""
+        """التراجع عن جميع العمليات بالترتيب العكسي؛ تتخطى العمليات التي اختفى ناتجها وتتوقف عند أي خطأ."""
         count = 0
         while self.journal:
-            if self.undo_last():
+            r = self.undo_step()
+            if r == "ok":
                 count += 1
-            else:
+            elif r != "missing":
                 break
         return count
 

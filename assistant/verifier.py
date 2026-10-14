@@ -84,7 +84,7 @@ class Verifier:
 
     # ---------- اللقطة قبل التنفيذ (R18) ----------
     def snapshot(self, step: PlanStep) -> Dict[str, Any]:
-        snap: Dict[str, Any] = {"step_id": step.step_id, "action": step.action_type.lower()}
+        snap: Dict[str, Any] = {"step_id": step.step_id, "action": step.action_type.strip().lower()}
         action = snap["action"]
         if action in ("move", "copy", "rename", "delete", "trash", "create_dir", "inspect"):
             try:
@@ -194,7 +194,10 @@ class Verifier:
             expected = src.parent / str(step.params.get("new_name", ""))
         else:
             expected = self.confine(step.params.get("dest"))
-        if not self._is_unique_variant(expected, actual):
+        candidates = [expected]
+        if action != "rename" and expected.is_dir() and expected != actual:
+            candidates.append(expected / src.name)  # الوجهة مجلد موجود: العنصر يوضع بداخله
+        if not any(self._is_unique_variant(c, actual) for c in candidates):
             return fail(f"الوجهة الفعلية '{actual.name}' لا تطابق الوجهة المخططة '{expected.name}'.")
         if not actual.exists():
             return fail(f"الوجهة '{actual}' غير موجودة فعلياً على القرص.")

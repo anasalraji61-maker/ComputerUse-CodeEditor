@@ -57,6 +57,14 @@ def _safe_name(name: str) -> Optional[str]:
     return name
 
 
+def mentions(name: str, p: str) -> bool:
+    """هل يرد الاسم كاملاً (لا جزءاً من اسم أطول) في نص الطلب المطبَّع؟"""
+    n = norm(name)
+    if not n:
+        return False
+    return re.search(r"(?<![\w.\-])" + re.escape(n) + r"(?![\w\-]|\.\w)", p) is not None
+
+
 class Analysis:
     def __init__(self, steps=None, question=None, note=None):
         self.steps, self.question, self.note = steps, question, note
@@ -157,7 +165,7 @@ class RuleProvider(ModelProvider):
             prefix = _safe_name(m.group(1))
         if not prefix:
             return Analysis(question="ما البادئة التي تريد إضافتها لأسماء الملفات؟ مثال: «بادئة 2026_»")
-        folder = next((d for d in sorted(top_dirs, key=len, reverse=True) if norm(d) in p), None)
+        folder = next((d for d in sorted(top_dirs, key=len, reverse=True) if mentions(d, p)), None)
         if folder:
             files = [e for e in context if e.startswith(folder + "/") and e.count("/") == 1 and not e.endswith("/")]
         else:
@@ -175,7 +183,7 @@ class RuleProvider(ModelProvider):
             if e.count("/") > (1 if e.endswith("/") else 1):
                 continue
             base = e.rstrip("/").split("/")[-1]
-            if base and norm(base) in p and (best is None or len(base) > len(best.rstrip("/").split("/")[-1])):
+            if base and mentions(base, p) and (best is None or len(base) > len(best.rstrip("/").split("/")[-1])):
                 best = e
         return best.rstrip("/") if best else None
 
@@ -275,7 +283,7 @@ class RuleProvider(ModelProvider):
     def _select(self, p: str, top_files: List[str]) -> Tuple[List[str], str]:
         """يختار الملفات المقصودة: اسم صريح أو فئة (الصور) أو امتداد (pdf أو .tmp). يعيد (القائمة، نوع المعيار)."""
         files = [f for f in top_files if not f.startswith(".")]
-        named = [f for f in files if norm(f) in p]
+        named = [f for f in files if mentions(f, p)]
         if named:
             return [max(named, key=len)], "name"
         for cat in CATEGORIES:

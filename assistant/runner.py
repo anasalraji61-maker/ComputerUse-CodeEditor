@@ -53,6 +53,7 @@ class TaskRunner:
         self.planner = Planner(provider=provider)
         self.verifier = Verifier(allowed_root=self.allowed_root, version_probe=self.version_probe, kill_switch=self.kill_switch)
         self._journal_starts: Dict[str, int] = {}
+        self._journal_ends: Dict[str, int] = {}
 
     def workspace_listing(self, max_entries: int = 60) -> str:
         """قائمة مختصرة بمحتويات مجلد العمل (مستويان) لتزويد المخطط بالسياق."""
@@ -62,7 +63,10 @@ class TaskRunner:
                 rel = p.relative_to(self.allowed_root)
                 if rel.parts[0] == ".trash" or rel.parts[0].startswith(".undo_journal") or len(rel.parts) > 2:
                     continue
-                name = "".join(ch for ch in rel.as_posix() if ch.isprintable())[:120]
+                real = rel.as_posix()
+                name = "".join(ch for ch in real if ch.isprintable())
+                if name != real or len(name) > 120:
+                    continue  # اسم فيه محارف غير مرئية/طويل جداً: لا يمكن الإشارة إليه بأمان فلا يُعرض للمخطط
                 out.append(name + ("/" if p.is_dir() else ""))
                 if len(out) >= max_entries:
                     out.append("… (القائمة مقتطعة)")
@@ -80,11 +84,16 @@ class TaskRunner:
         start = self._journal_starts.get(task_id)
         if start is None:
             return 0
+        end = self._journal_ends.get(task_id, len(self.file_manager.journal))
+        if len(self.file_manager.journal) > end:
+            return 0  # توجد مهام أحدث بعدها: يجب التراجع عنها أولاً حتى لا تُلغى عملياتها بالخطأ
         count = 0
         while len(self.file_manager.journal) > start:
-            if not self.file_manager.undo_last():
+            r = self.file_manager.undo_step()
+            if r == "ok":
+                count += 1
+            elif r != "missing":
                 break
-            count += 1
         return count
 
     # ---------- التنفيذ ----------
@@ -124,6 +133,7 @@ class TaskRunner:
         platform_failure = False
 
         def finish(success: bool) -> ExecutionReport:
+            self._journal_ends[task_id] = len(fm.journal)
             if started:
                 if success:
                     try:
