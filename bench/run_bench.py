@@ -223,6 +223,7 @@ def main(argv=None) -> int:
     ap.add_argument("--provider", choices=["anthropic", "gemini"], required=True)
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--max-usd", type=float, default=1.0)
+    ap.add_argument("--with-rules", action="store_true", help="قياس الوضع المختلط (القواعد أولاً) بدل النموذج وحده")
     ap.add_argument("--out", default=str(ROOT / "docs" / "MEASUREMENT.md"))
     args = ap.parse_args(argv)
 
@@ -233,6 +234,8 @@ def main(argv=None) -> int:
     except ProviderConfigError as exc:
         print(f"خطأ: {exc}", file=sys.stderr)
         return 2
+    if not args.with_rules and hasattr(provider, "fallback"):
+        provider = provider.fallback  # نقيس النموذج وحده لا القواعد المحلية
     provider.cache_size = 0  # لا ذاكرة مؤقتة أثناء القياس
     print(note)
     print(f"سيُشغَّل القياس: {args.runs} دورات × 5 مهام، بسقف إنفاق {args.max_usd}$.")

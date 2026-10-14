@@ -48,13 +48,13 @@ try:
         assert str(w.start_btn.cget("state")) == "disabled"
 
         # 1. طلب عادي: خطة بخطوتين ثم تنفيذ ناجح
-        w.entry.insert(0, "أنشئ مجلداً تجريبياً")
+        w.entry.insert(0, "أنشئ مجلد تجربة")
         w._on_send()
-        assert pump(root, lambda: len(w._plan_rows) == 2), "لم تظهر الخطة"
+        assert pump(root, lambda: len(w._plan_rows) == 1), "لم تظهر الخطة"
         assert str(w.start_btn.cget("state")) == "normal"
         w.start_btn.invoke()
         assert pump(root, lambda: "تم بنجاح ✔" in chat_text(w)), chat_text(w)
-        assert (base / "ws" / "مجلد_تجريبي").is_dir()
+        assert (base / "ws" / "تجربة").is_dir()
         assert float(w.progress.cget("value")) == 100.0
         assert str(w.start_btn.cget("state")) == "disabled"
 

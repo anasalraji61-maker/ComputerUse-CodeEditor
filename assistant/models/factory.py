@@ -8,6 +8,7 @@ from .http_base import ProviderConfigError
 from .anthropic_provider import AnthropicProvider
 from .gemini_provider import GeminiProvider
 from .router import ModelRouter
+from .rules import RuleFirstProvider
 
 DEFAULTS = {
     "anthropic": ("claude-haiku-5-5", "claude-sonnet-5-5"),
@@ -27,7 +28,7 @@ def build_provider(env: Optional[Mapping[str, str]] = None, **provider_kw) -> Tu
         kind = "anthropic" if _has(env, "ANTHROPIC_API_KEY") else "gemini" if _has(env, "GEMINI_API_KEY", "GOOGLE_API_KEY") else "demo"
 
     if kind == "demo":
-        return DemoProvider(), "وضع تجريبي محلي (بلا نموذج حقيقي). لتفعيل نموذج حقيقي عيّن COS_PROVIDER ومفتاحه."
+        return DemoProvider(), "الوضع المحلي (بلا مفاتيح وبلا كلفة): يفهم ترتيب الملفات حسب النوع، النسخ، إعادة التسمية بإضافة بادئة، إنشاء المشاريع، الفحص، وتحديث winget."
     if kind not in DEFAULTS:
         raise ProviderConfigError(f"قيمة COS_PROVIDER غير معروفة: '{kind}'. القيم: demo, anthropic, gemini, auto.")
 
@@ -39,4 +40,7 @@ def build_provider(env: Optional[Mapping[str, str]] = None, **provider_kw) -> Tu
     large = cls(model=large_m, api_key=key, **provider_kw) if large_m != small_m else small
     # يتحقق من وجود المفتاح الآن لا عند أول مهمة
     small._require_key()
-    return ModelRouter(small, large), f"نموذج حقيقي: {kind} (صغير: {small_m}، كبير: {large_m})."
+    router = ModelRouter(small, large)
+    return RuleFirstProvider(router), (
+        f"نموذج حقيقي: {kind} (صغير: {small_m}، كبير: {large_m}). الطلبات المعروفة تُخطَّط محلياً بلا كلفة."
+    )

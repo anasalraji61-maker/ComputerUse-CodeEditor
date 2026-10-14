@@ -10,7 +10,7 @@ import threading
 import uuid
 from typing import Any, Dict, List, Optional
 
-from assistant.models.base import ModelProvider
+from assistant.models.base import ModelProvider, CONTEXT_MARKER
 from assistant.planner import PlanStep, PlanParseError
 from assistant.runner import TaskRunner
 from assistant.safety import KillSwitch, SafetyGuard
@@ -111,7 +111,8 @@ class AssistantController:
 
     def _ask_questions(self, text: str) -> List[str]:
         try:
-            raw = self.provider.generate(text, system_prompt=CLARIFY_SYSTEM)
+            raw = self.provider.generate(
+                text, system_prompt=CLARIFY_SYSTEM + "\n\n" + CONTEXT_MARKER + "\n" + self.runner.workspace_listing())
             data = json.loads(raw)
             qs = data.get("questions", []) if isinstance(data, dict) else []
             clean = [q.strip()[:140] for q in qs if isinstance(q, str) and q.strip()]
@@ -187,6 +188,10 @@ class AssistantController:
                 self._go(IDLE)
         if event:
             self.emit(event[0], **event[1])
+            try:
+                self.emit("status", text=f"رصيدك: {self.runner.ledger.get_balance()} نقطة")
+            except Exception:
+                pass
             totals = getattr(self.provider, "totals", None)
             if callable(totals):
                 t = totals()

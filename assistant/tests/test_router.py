@@ -14,6 +14,7 @@ try:
     from assistant.models.factory import build_provider
     from assistant.models.http_base import ProviderConfigError
     from assistant.models.demo import DemoProvider
+    from assistant.models.rules import RuleFirstProvider
     from assistant.models.pricing import cost_usd, usd_to_points, COST_USD_PER_POINT
     from assistant.planner import PLANNER_SYSTEM
 
@@ -61,22 +62,22 @@ try:
 
     # المصنع
     prov, note = build_provider({})
-    assert isinstance(prov, DemoProvider) and "تجريبي" in note
+    assert isinstance(prov, DemoProvider) and "المحلي" in note
     try:
         build_provider({"COS_PROVIDER": "anthropic"})
         raise AssertionError("كان يجب طلب المفتاح")
     except ProviderConfigError as exc:
         assert "ANTHROPIC_API_KEY" in str(exc)
     prov, note = build_provider({"COS_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "k"})
-    assert isinstance(prov, ModelRouter) and "claude-haiku-5-5" in note and "claude-sonnet-5-5" in note
+    assert isinstance(prov, RuleFirstProvider) and isinstance(prov.fallback, ModelRouter) and "claude-haiku-5-5" in note and "claude-sonnet-5-5" in note
     prov, _ = build_provider({"COS_PROVIDER": "gemini", "GEMINI_API_KEY": "k"})
-    assert prov.providers[SMALL].model.startswith("gemini")
+    assert prov.fallback.providers[SMALL].model.startswith("gemini")
     prov, _ = build_provider({"COS_PROVIDER": "auto", "GOOGLE_API_KEY": "k"})
-    assert prov.providers[SMALL].model.startswith("gemini")
+    assert prov.fallback.providers[SMALL].model.startswith("gemini")
     prov, _ = build_provider({"COS_PROVIDER": "auto"})
     assert isinstance(prov, DemoProvider)
     prov, _ = build_provider({"COS_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "k", "COS_SMALL_MODEL": "m1", "COS_LARGE_MODEL": "m1"})
-    assert prov.providers[SMALL] is prov.providers[LARGE]
+    assert prov.fallback.providers[SMALL] is prov.fallback.providers[LARGE]
     try:
         build_provider({"COS_PROVIDER": "nonsense"})
         raise AssertionError

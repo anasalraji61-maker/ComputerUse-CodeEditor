@@ -31,7 +31,7 @@ class TaskRunner:
         winget_runner: Optional[Callable[[List[str]], Tuple[int, str, str]]] = None,
         version_probe: Optional[VersionProbe] = None,
         shell_tool: Optional[ShellTool] = None,
-        max_steps: int = 12,
+        max_steps: int = 60,
         max_tokens: int = 4000,
     ):
         self.allowed_root = Path(allowed_root).resolve()

@@ -2,7 +2,7 @@
 import json
 from dataclasses import dataclass, field
 from typing import List, Dict, Any
-from assistant.models.base import ModelProvider
+from assistant.models.base import ModelProvider, CONTEXT_MARKER
 from assistant.safety import ACTION_LEVELS
 
 MAX_PLAN_STEPS = 50
@@ -103,11 +103,12 @@ class Planner:
         """توليد الخطة؛ context = قائمة محتويات مجلد العمل تُضاف لمطالبة النظام. أي رد غير صالح يرفع PlanParseError."""
         system_prompt = PLANNER_SYSTEM
         if context:
-            system_prompt += "\n\nمحتويات مجلد العمل الحالي (نسبية):\n" + context
+            system_prompt += "\n\n" + CONTEXT_MARKER + "\n" + context
         data = _extract_json(self.provider.generate(user_prompt, system_prompt=system_prompt))
         raw_steps = data.get("steps") if isinstance(data, dict) else data
         if not isinstance(raw_steps, list) or not raw_steps:
-            raise PlanParseError("الخطة فارغة أو لا تحتوي قائمة steps.")
+            note = data.get("note") if isinstance(data, dict) else None
+            raise PlanParseError(str(note) if note else "الخطة فارغة أو لا تحتوي قائمة steps.")
         if len(raw_steps) > self.max_steps:
             raise PlanParseError(f"عدد الخطوات {len(raw_steps)} يتجاوز الحد الأقصى {self.max_steps}.")
         steps = [validate_step(item, i) for i, item in enumerate(raw_steps, 1)]
