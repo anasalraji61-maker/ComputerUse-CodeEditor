@@ -144,6 +144,7 @@ try:
     with tempfile.TemporaryDirectory() as tmp:
         root, led = mk(tmp)
         prov = Slow()
+        base_threads = threading.active_count()
         c = AssistantController(prov, root, led)
         c.submit_request("افحص")
         end = time.time() + 3
@@ -156,6 +157,10 @@ try:
         while c.state != IDLE and time.time() < end:
             time.sleep(0.02)
         assert c.state == IDLE and c._plan is None
+        # العامل القديم قد يبقى لحظات يكتب في المجلد؛ ننتظر انتهاءه قبل حذف المجلد المؤقت
+        end = time.time() + 5
+        while threading.active_count() > base_threads and time.time() < end:
+            time.sleep(0.02)
         c.start()  # لا خطة جاهزة
         assert any(e["type"] == "error" for e in c.drain_events())
 
