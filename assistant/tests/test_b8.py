@@ -46,7 +46,8 @@ try:
             os.environ["COS_DATA_DIR"] = str(pathlib.Path(tmp) / "data")
             os.environ["HOME"] = os.environ["USERPROFILE"] = str(pathlib.Path(tmp) / "home")
             (pathlib.Path(tmp) / "home").mkdir()
-            os.environ["COS_WORKSPACE"] = "/etc"  # بيئة خبيثة/خاطئة: لا يُقبل ويعود لمجلد آمن داخل المنزل
+            # قيمة بيئة مرفوضة (جذر المستخدم نفسه): لا تُقبل ويعود لمجلد آمن داخل المنزل (لا نستعمل مسارات نظام حقيقية أبداً)
+            os.environ["COS_WORKSPACE"] = str(pathlib.Path(tmp) / "home")
             assert cfg.current_workspace().name == "COS_Workspace"
             os.environ["COS_WORKSPACE"] = str(pathlib.Path(tmp) / "okws")
             assert cfg.current_workspace().name == "okws"

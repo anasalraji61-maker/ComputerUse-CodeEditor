@@ -1,29 +1,29 @@
 # نتائج الاختبارات الفعلية (آلية)
 
-آخر تشغيل: 2026-10-14 09:36:12 — 23 ملف، فشل: 2
+آخر تشغيل: 2026-10-14 09:41:09 — 23 ملف، فشل: 0
 
 هذه النتائج تُنتَج على لابتوب المالك. لا تدّعِ نجاحاً غير مذكور هنا.
 
 | الملف | النتيجة | الزمن |
 |---|---|---|
-| `assistant/tests/test_b6.py` | PASS | 1.3s |
-| `assistant/tests/test_b8.py` | **FAIL** | 0.1s |
-| `assistant/tests/test_bench.py` | PASS | 0.9s |
-| `assistant/tests/test_benchmarks_20runs.py` | PASS | 1.8s |
+| `assistant/tests/test_b6.py` | PASS | 0.3s |
+| `assistant/tests/test_b8.py` | PASS | 0.3s |
+| `assistant/tests/test_bench.py` | PASS | 0.6s |
+| `assistant/tests/test_benchmarks_20runs.py` | PASS | 1.1s |
 | `assistant/tests/test_budget.py` | PASS | 0.1s |
-| `assistant/tests/test_config.py` | **FAIL** | 0.1s |
+| `assistant/tests/test_config.py` | PASS | 0.3s |
 | `assistant/tests/test_controller.py` | PASS | 0.5s |
 | `assistant/tests/test_deliberate_failures.py` | PASS | 0.1s |
 | `assistant/tests/test_files.py` | PASS | 0.1s |
-| `assistant/tests/test_ledger.py` | PASS | 0.5s |
+| `assistant/tests/test_ledger.py` | PASS | 0.2s |
 | `assistant/tests/test_models.py` | PASS | 0.1s |
 | `assistant/tests/test_no_secrets.py` | PASS | 0.1s |
 | `assistant/tests/test_planner.py` | PASS | 0.1s |
 | `assistant/tests/test_planner_executor_verifier.py` | PASS | 0.1s |
 | `assistant/tests/test_providers.py` | PASS | 0.1s |
 | `assistant/tests/test_router.py` | PASS | 0.1s |
-| `assistant/tests/test_rules.py` | PASS | 0.7s |
-| `assistant/tests/test_runner.py` | PASS | 0.4s |
+| `assistant/tests/test_rules.py` | PASS | 0.4s |
+| `assistant/tests/test_runner.py` | PASS | 0.2s |
 | `assistant/tests/test_safety.py` | PASS | 0.1s |
 | `assistant/tests/test_scripts.py` | PASS | 0.0s |
 | `assistant/tests/test_shell.py` | PASS | 0.1s |
@@ -36,12 +36,7 @@ PASS: test_b6 completed successfully
 ```
 ### assistant/tests/test_b8.py
 ```
-Traceback (most recent call last):
-  File "C:\Users\AkarTech\Documents\COS_Projects\ComputerUse-CodeEditor\assistant\tests\test_b8.py", line 50, in <module>
-    assert cfg.current_workspace().name == "COS_Workspace"
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-AssertionError
-FAIL: test_b8
+PASS: test_b8 completed successfully
 ```
 ### assistant/tests/test_bench.py
 ```
@@ -57,14 +52,7 @@ PASS: test_budget completed successfully
 ```
 ### assistant/tests/test_config.py
 ```
-Traceback (most recent call last):
-  File "C:\Users\AkarTech\Documents\COS_Projects\ComputerUse-CodeEditor\assistant\tests\test_config.py", line 42, in <module>
-    rejects(blocked)
-    ~~~~~~~^^^^^^^^^
-  File "C:\Users\AkarTech\Documents\COS_Projects\ComputerUse-CodeEditor\assistant\tests\test_config.py", line 29, in rejects
-    raise AssertionError(f"كان يجب رفض {p!r} {why}")
-AssertionError: كان يجب رفض '/etc' 
-FAIL: test_config
+PASS: test_config completed successfully
 ```
 ### assistant/tests/test_controller.py
 ```

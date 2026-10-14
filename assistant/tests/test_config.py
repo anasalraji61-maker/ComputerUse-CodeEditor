@@ -38,7 +38,7 @@ try:
         rejects(pathlib.Path(good.anchor), "جذر القرص")
         rejects(pathlib.Path.home(), "جذر المستخدم")
         for blocked in ("/etc", "/usr", "/bin"):
-            if os.path.isdir(blocked):
+            if os.name != "nt" and os.path.isdir(blocked):
                 rejects(blocked)
         (base / "data").mkdir()
         rejects(base / "data", "بيانات التطبيق")
