@@ -28,7 +28,7 @@ def build_provider(env: Optional[Mapping[str, str]] = None, **provider_kw) -> Tu
         kind = "anthropic" if _has(env, "ANTHROPIC_API_KEY") else "gemini" if _has(env, "GEMINI_API_KEY", "GOOGLE_API_KEY") else "demo"
 
     if kind == "demo":
-        return DemoProvider(), "الوضع المحلي (بلا مفاتيح وبلا كلفة): يفهم ترتيب الملفات حسب النوع، النسخ، إعادة التسمية بإضافة بادئة، إنشاء المشاريع، الفحص، وتحديث winget."
+        return DemoProvider(), "الوضع المحلي (بلا مفاتيح وبلا كلفة): يفهم ترتيب الملفات (حسب النوع أو الشهر)، النقل، النسخ، الحذف للسلة، المكررات، إعادة التسمية، إنشاء المجلدات والمشاريع، الفحص، وتحديث winget."
     if kind not in DEFAULTS:
         raise ProviderConfigError(f"قيمة COS_PROVIDER غير معروفة: '{kind}'. القيم: demo, anthropic, gemini, auto.")
 

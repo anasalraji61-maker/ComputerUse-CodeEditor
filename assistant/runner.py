@@ -117,6 +117,17 @@ class TaskRunner:
                 break
         return count
 
+    def _preflight_paths(self, step: PlanStep) -> None:
+        """يرفع استثناءً إن كان أي مسار في الخطوة مرفوضاً (خارج الجذر/محجوز/محمي/رابط) دون أي تنفيذ."""
+        fm = self.file_manager
+        a = step.action_type
+        if a in ("create_dir", "move", "copy", "rename", "delete", "trash") or (a == "inspect" and step.target not in (".", "./")):
+            src = fm.validate_path(step.target)
+            if a in ("move", "copy"):
+                fm.validate_path(step.params["dest"])
+            elif a == "rename":
+                fm.validate_path(src.parent / str(step.params["new_name"]))
+
     # ---------- التنفيذ ----------
     def run(
         self,
@@ -215,6 +226,12 @@ class TaskRunner:
         for s in plan:
             if self.safety.classify_action(s.action_type) == SafetyLevel.FORBIDDEN:
                 failures.append(f"الخطة تحوي إجراءً محظوراً '{s.action_type}' (الخطوة {s.step_id}) — لم يُنفَّذ شيء.")
+                return finish(False)
+        for s in plan:  # كل المسارات تُفحص قبل البدء: لا تنفيذ جزئي ثم رفض في منتصف الخطة
+            try:
+                self._preflight_paths(s)
+            except Exception as exc:
+                failures.append(f"مسار مرفوض قبل التنفيذ في الخطوة {s.step_id}: {exc} — لم يُنفَّذ شيء.")
                 return finish(False)
         if len(plan) > self.max_steps:
             failures.append(f"عدد خطوات الخطة {len(plan)} يتجاوز سقف الميزانية {self.max_steps} — لم يُنفَّذ شيء.")

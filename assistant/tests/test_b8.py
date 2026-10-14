@@ -198,6 +198,14 @@ try:
     assert kinds("تخلص من ملفات tmp") == [("delete", "notes.tmp"), ("delete", "x.tmp")]
     assert kinds("ضع شيء") == []
 
+    # 15. فحص مسبق للمسارات: خطوة سيئة في آخر الخطة لا تترك تنفيذاً جزئياً
+    with tempfile.TemporaryDirectory() as tmp:
+        root, led = mk(tmp, {"a.txt": "a"})
+        r = TaskRunner(root, rp, led)
+        rep = r.run("pf", "x", plan=[PlanStep(1, "create_dir", "OK"), PlanStep(2, "move", "a.txt", {"dest": "OK/CON"})])
+        assert not rep.success and "لم يُنفَّذ شيء" in rep.failures[0]
+        assert not (root / "OK").exists() and (root / "a.txt").exists()
+
     print("PASS: test_b8 completed successfully")
     sys.exit(0)
 except SystemExit:
