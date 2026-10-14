@@ -11,7 +11,9 @@ from assistant.planner import PlanStep
 from assistant.safety import MUTATING_ACTIONS
 from assistant.tools.files import is_unc_like, check_not_big_cloud_file, CloudFileNotLocalError
 
-_NO_UPGRADE = re.compile(r"no (applicable|available) upgrade|no newer package|no installed package|no applicable update", re.I)
+_NO_UPGRADE = re.compile(r"no (applicable|available) upgrade|no newer package|no installed package|no applicable update"
+                         r"|لا (?:يوجد|توجد|تتوفر|يتوفر)\s+(?:أي\s+)?(?:ترقي|تحديث|إصدار|اصدار)", re.I)
+_VERSIONISH = re.compile(r"\d[\w.+\-]*")
 VersionProbe = Callable[[str], Tuple[int, str, str]]
 
 
@@ -119,10 +121,23 @@ class Verifier:
 
     @staticmethod
     def _package_line(out: str, pkg: str) -> str:
+        """سطر الحزمة بمطابقة معرّفها كاملاً (عمود Id) لا كجزء من معرّف آخر: Git.GitLFS ليس Git.Git."""
+        want = (pkg or "").strip().lower()
         for ln in (out or "").splitlines():
-            if pkg.lower() in ln.lower():
+            if want and want in (tok.lower() for tok in ln.split()):
                 return " ".join(ln.split())[:160]
         return ""
+
+    @staticmethod
+    def _still_upgradable(line: str, pkg: str) -> bool:
+        """هل يظهر في سطر الحزمة عمود «Available» بإصدار مختلف عن المثبّت؟ (مستقل عن لغة رسائل winget)"""
+        toks = line.split()
+        low = [t.lower() for t in toks]
+        want = (pkg or "").strip().lower()
+        if want not in low:
+            return False
+        vers = [t for t in toks[low.index(want) + 1:] if _VERSIONISH.fullmatch(t)]
+        return len(vers) >= 2 and vers[0] != vers[1]
 
     # ---------- التدقيق بعد التنفيذ ----------
     def verify_step(
@@ -189,14 +204,16 @@ class Verifier:
                 if self.version_probe is None:
                     return fail("لا توجد أداة تحقق مستقلة لـ winget؛ لا يمكن تأكيد النجاح.")
                 code, out, _err = self.version_probe(step.target)
-                if code != 0 or step.target.lower() not in (out or "").lower():
+                after_line = self._package_line(out, step.target)
+                if code != 0 or not after_line:
                     return fail(f"الفحص المستقل لم يجد الحزمة '{step.target}' (رمز {code}).")
                 ev["type"] = "رمز الخروج + فحص مستقل"
-                after_line = self._package_line(out, step.target)
                 before_line = (before or {}).get("probe_line")
                 if before_line and after_line and before_line == after_line:
                     if _NO_UPGRADE.search(str(info.get("stdout", "")) + " " + str(info.get("stderr", ""))):
                         return fail(f"لا يوجد تحديث متاح: الحزمة محدّثة أصلاً (لم يتغير سطرها): {after_line}")
+                    if self._still_upgradable(after_line, step.target):  # الدليل من القرص نفسه: سطرها لم يتغير وإصدار أحدث ما زال متاحاً
+                        return fail(f"لم تتم الترقية: سطر الحزمة لم يتغير وإصدار أحدث ما زال متاحاً: {after_line}")
                     ev["value"] = f"0 والحزمة ظاهرة، لكن سطرها لم يتغير: {after_line}"
                 elif before_line and after_line:
                     ev["value"] = f"0 والحزمة ظاهرة. قبل: {before_line} ← بعد: {after_line}"
@@ -259,6 +276,8 @@ class Verifier:
 
         ev["type"] = "ملف موجود ومطابق"
         ev["value"] = f"{after_digest[:18]}… (مطابق للأصل قبل التنفيذ)"
+        if not any(actual == c for c in candidates):  # هبط على اسم فريد «name (1).ext» لأن المخطط موجود أصلاً
+            ev["value"] += f" — destination renamed to {actual.name} (الوجهة أُعيدت تسميتها إلى «{actual.name}» لوجود اسم مطابق)"
         return True, ev, None
 
     def verify_journal(
@@ -296,5 +315,57 @@ class Verifier:
         if not isinstance(data, list) or len(data) - journal_start < need:
             ev["value"] = "ناقص"
             return False, ev, f"سجل التراجع لا يحوي عمليات هذه المهمة كاملة (المطلوب {need})."
+        missing = self._unjournaled_steps(plan_steps, befores, data[journal_start:])
+        if missing:
+            ev["value"] = "ناقص"
+            return False, ev, ("سجل التراجع لا يحوي عملية الخطوات التالية فلن يمكن التراجع عنها: "
+                               + "، ".join(f"{a} «{t}»" for a, t in missing[:5]) + ".")
         ev["value"] = f"صالح ويحوي {len(data) - journal_start} عملية لهذه المهمة"
         return True, ev, None
+
+    # ---------- مطابقة سجل التراجع لكل خطوة ----------
+    _JOURNAL_ACTION = {"move": "move", "copy": "copy", "rename": "rename", "delete": "delete", "trash": "delete", "create_dir": "create_dir"}
+    _JOURNAL_SRC_KEY = {"move": "src", "copy": "src", "rename": "src", "delete": "original_path", "create_dir": "path"}
+
+    def _jnorm(self, value: Any) -> Optional[str]:
+        """مسار من سجل التراجع (rel:… أو مطلق داخل الجذر) أو هدف خطوة ← صيغة مقارنة موحّدة نسبية صغيرة الحروف، أو None."""
+        if not isinstance(value, (str, Path)):
+            return None
+        v = str(value)
+        if v.startswith("rel:"):
+            v = v[4:]
+        try:
+            p = Path(v)
+            rel = p.resolve().relative_to(self.allowed_root) if p.is_absolute() else Path(os.path.normpath(v))
+        except (ValueError, OSError):
+            return None
+        return rel.as_posix().casefold()
+
+    def _unjournaled_steps(self, plan_steps, befores, entries) -> List[Tuple[str, str]]:
+        """الخطوات المغيِّرة التي لا يقابلها إدخال في السجل (بحسب الإجراء والمسار)، كل إدخال يخدم خطوة واحدة.
+        الخطوة بلا target معروف تُقارَن بالإجراء وحده. (create_dir ينشئ أحياناً مجلدات أصل إضافية في السجل: لا بأس.)"""
+        used = set()
+        missing: List[Tuple[str, str]] = []
+        for s in plan_steps:
+            a = s.action_type.strip().lower()
+            if a not in MUTATING_ACTIONS:
+                continue
+            if a == "create_dir" and befores.get(s.step_id, {}).get("exists"):
+                continue
+            want_action = self._JOURNAL_ACTION.get(a)
+            target = getattr(s, "target", None)
+            want_path = self._jnorm(target) if target is not None else None
+            key = self._JOURNAL_SRC_KEY.get(want_action)
+            hit = None
+            for i, e in enumerate(entries):
+                if i in used or not isinstance(e, dict) or e.get("action") != want_action:
+                    continue
+                if want_path is not None and key and self._jnorm(e.get(key)) != want_path:
+                    continue
+                hit = i
+                break
+            if hit is None:
+                missing.append((a, str(target) if target is not None else "?"))
+            else:
+                used.add(hit)
+        return missing

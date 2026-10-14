@@ -131,11 +131,23 @@ class TaskRunner:
             r = self.file_manager.undo_step()
             if r == "ok":
                 count += 1
-            elif r != "missing":
+            elif r not in ("missing", "skipped"):
                 break
         if len(self.file_manager.journal) <= start:  # انتهت المهمة: لا تبقى حدودها صالحة لتراجع ثانٍ
             self._journal_starts.pop(task_id, None)
             self._journal_ends.pop(task_id, None)
+        return count
+
+    def undo_untagged(self) -> int:
+        """إدخالات آخر السجل بلا وسم مهمة (سجلات قديمة/استخدام مباشر): يمكن التراجع عنها دون معرّف مهمة."""
+        count = 0
+        fm = self.file_manager
+        while fm.journal and fm.journal[-1].get("task") is None:
+            r = fm.undo_step()
+            if r == "ok":
+                count += 1
+            elif r not in ("missing", "skipped"):
+                break
         return count
 
     def last_journaled_task(self) -> Optional[str]:

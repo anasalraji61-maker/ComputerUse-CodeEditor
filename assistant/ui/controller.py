@@ -11,7 +11,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from assistant.models.base import ModelProvider, CONTEXT_MARKER
-from assistant.models.rules import parse_context
+from assistant.models.rules import parse_context, strip_format_chars
 from assistant.executor import ApprovalTimedOut
 from assistant.planner import PlanStep, PlanParseError, sanitize_display
 from assistant.runner import TaskRunner
@@ -146,7 +146,7 @@ class AssistantController:
 
     # ---------- 1) الطلب ----------
     def submit_request(self, text: str):
-        text = (text or "").strip()
+        text = strip_format_chars(text or "").strip()  # علامات الاتجاه/العرض الصفري تُحذف قبل أي فهم أو تخطيط
         with self._lock:
             if self.state not in (IDLE,):
                 return self.emit("error", text="المساعد مشغول بمهمة حالية. أوقفها أو انتظر انتهاءها.")
@@ -397,16 +397,20 @@ class AssistantController:
         if self.state == RUNNING:
             return self.emit("error", text="لا يمكن التراجع أثناء التنفيذ. أوقف المهمة أولاً.")
         task_id = self.last_task_id or self.runner.last_journaled_task()  # بعد إعادة التشغيل نقرأ الوسم من السجل المحفوظ
-        if not task_id:
+        fm = self.runner.file_manager
+        untagged = (not task_id) and bool(fm.journal) and fm.journal[-1].get("task") is None
+        if not task_id and not untagged:
             return self.emit("error", text="لا توجد مهمة للتراجع عنها.")
-        self.runner.file_manager.undo_notes.clear()
-        n = self.runner.undo_task(task_id)
+        fm.undo_notes.clear()
+        n = self.runner.undo_untagged() if untagged else self.runner.undo_task(task_id)
         notes = list(self.runner.file_manager.undo_notes)
         self.runner.file_manager.undo_notes.clear()
         if self.last_task_id == task_id:
             self.last_task_id = None  # تراجع ثانٍ يستهدف المهمة السابقة لا المهمة نفسها
         if n == 0:
+            for note in notes:
+                self.emit("status", text=sanitize_display(note, 300))
             return self.emit("error", text="لا يوجد ما يمكن التراجع عنه لهذه المهمة (تم سابقاً، أو اختفى ناتجها، أو توجد مهام أحدث).")
         for note in notes:
             self.emit("status", text=sanitize_display(note, 300))
-        self.emit("undo", count=n, task_id=task_id)
+        self.emit("undo", count=n, task_id=task_id or "")

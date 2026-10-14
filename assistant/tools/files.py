@@ -121,8 +121,8 @@ class FileManager:
                 if not want_dir and internal.is_dir():
                     raise ProtectedPathError(f"'{internal.name}' موجود كمجلد — غيّر اسمه يدوياً ثم أعد المحاولة.")
         self.trash_dir.mkdir(parents=True, exist_ok=True)
-        self.journal: List[Dict[str, Any]] = self._load_journal()
         self.undo_notes: List[str] = []  # ملاحظات التراجع (مثل استعادة عنصر باسم بديل لأن اسمه الأصلي صار مشغولاً)
+        self.journal: List[Dict[str, Any]] = self._load_journal()
         self.current_task: Optional[str] = None  # معرّف المهمة الجارية؛ يُوسَم به كل إدخال لتبقى المهمة قابلة للتراجع بعد إعادة التشغيل
 
     def _entry_to_disk(self, entry: Dict[str, Any]) -> Dict[str, Any]:
@@ -151,13 +151,29 @@ class FileManager:
         try:
             if not tmp.is_file():
                 return
-            data = json.loads(tmp.read_text(encoding="utf-8"))
+            data = json.loads(tmp.read_text(encoding="utf-8-sig"))
             ok = isinstance(data, list) and all(isinstance(e, dict) for e in data)
             newer = (not self.journal_path.exists()) or tmp.stat().st_mtime_ns >= self.journal_path.stat().st_mtime_ns
+            if ok and newer and self.journal_path.exists():
+                # لا نتبنّى إلا امتداداً/اقتطاعاً بخطوة واحدة للسجل الحالي؛ غير ذلك ليس من هذا السجل (نسخة تطبيق أخرى/عبث)
+                try:
+                    cur = json.loads(self.journal_path.read_text(encoding="utf-8-sig"))
+                except Exception:
+                    cur = None
+                if isinstance(cur, list):
+                    n = min(len(cur), len(data))
+                    related = cur[:n] == data[:n] and (len(data) >= len(cur) or len(cur) - len(data) <= 1)
+                    if not related:
+                        ok = False
             if ok and newer:
                 os.replace(str(tmp), str(self.journal_path))
-            else:
+            elif ok:
                 tmp.unlink()
+            else:
+                try:
+                    os.replace(str(tmp), str(self._get_unique_path(self.allowed_root / ".undo_journal.rejected.json")))
+                except OSError:
+                    tmp.unlink()
         except Exception:
             try:
                 tmp.unlink()
@@ -170,7 +186,7 @@ class FileManager:
             text = None
             for attempt in range(4):  # قفل مؤقت من مضاد فيروسات/OneDrive لا يعني أن السجل تالف
                 try:
-                    text = self.journal_path.read_text(encoding="utf-8")
+                    text = self.journal_path.read_text(encoding="utf-8-sig")
                     break
                 except UnicodeDecodeError:
                     text = ""
@@ -182,15 +198,23 @@ class FileManager:
             try:
                 data = json.loads(text)
                 if isinstance(data, list):
-                    return [self._entry_from_disk(e) for e in data if isinstance(e, dict)]
+                    good = [e for e in data if isinstance(e, dict)]
+                    if len(good) != len(data):  # عناصر غير صالحة ستُسقط عند الحفظ التالي: نبقي نسخة للفحص
+                        try:
+                            shutil.copy2(str(self.journal_path), str(self._get_unique_path(self.allowed_root / ".undo_journal.corrupt.json")))
+                            self.undo_notes.append("سجل التراجع فيه عناصر غير صالحة تُجوهلت؛ حُفظت نسخة منه للفحص.")
+                        except Exception:
+                            pass
+                    return [self._entry_from_disk(e) for e in good]
             except Exception:
                 pass
             # سجل تالف فعلاً: لا نفقده بصمت، نحفظ نسخة للفحص ثم نبدأ سجلاً جديداً
             try:
                 backup = self._get_unique_path(self.allowed_root / ".undo_journal.corrupt.json")
                 self.journal_path.replace(backup)
+                self.undo_notes.append("سجل التراجع كان تالفاً؛ حُفظ للفحص وبدأ سجل جديد.")
             except Exception:
-                pass
+                raise ProtectedPathError("سجل التراجع تالف وتعذّر حفظ نسخة منه؛ لم يُمَس. افحص الملف .undo_journal.json يدوياً.")
             return []
         return []
 
@@ -199,7 +223,13 @@ class FileManager:
         data = json.dumps([self._entry_to_disk(e) for e in self.journal], ensure_ascii=True, indent=2)  # ASCII: أسماء بمحارف شاذة (surrogate) لا تكسر الترميز
         tmp = self.journal_path.with_name(self.journal_path.name + ".tmp")
         try:
-            tmp.write_text(data, encoding="utf-8")
+            with open(str(tmp), "w", encoding="utf-8") as f:
+                f.write(data)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())  # قطع الكهرباء بعد الاستبدال لا يترك سجلاً فارغاً
+                except OSError:
+                    pass
             os.replace(str(tmp), str(self.journal_path))  # كتابة ذرّية: لا يبقى سجل نصف مكتوب
         except BaseException:
             try:
@@ -291,7 +321,7 @@ class FileManager:
 
     def _get_unique_path(self, target: Path) -> Path:
         """توليد مسار فريد في حال وجود تعارض لمنع الكتابة فوق ملفات موجودة."""
-        if not target.exists():
+        if not os.path.lexists(str(target)):  # رابط معلّق يُعدّ موجوداً: وإلا كتبنا عبره خارج المجلد
             return target
         parent = target.parent
         stem = target.stem
@@ -299,7 +329,7 @@ class FileManager:
         counter = 1
         while True:
             candidate = parent / f"{stem} ({counter}){suffix}"
-            if not candidate.exists():
+            if not os.path.lexists(str(candidate)):
                 return candidate
             counter += 1
 
@@ -384,7 +414,7 @@ class FileManager:
         if source.is_dir() and (source in destination.parents or destination == source):
             raise ValueError(f"لا يمكن نقل المجلد '{source}' إلى داخل نفسه أو مجلد فرعي منه '{destination}'.")
         self._ensure_dirs(destination.parent)
-        final_dest = self._get_unique_path(destination)
+        final_dest = self.validate_path(self._get_unique_path(destination))
 
         _safe_move(str(source), str(final_dest))
         self.journal.append({
@@ -423,7 +453,7 @@ class FileManager:
             if source.is_dir() and (destination == source or source in destination.parents):
                 raise ValueError(f"لا يمكن نسخ المجلد '{source}' إلى داخل نفسه أو مجلد فرعي منه '{destination}'.")
         self._ensure_dirs(destination.parent)
-        final_dest = self._get_unique_path(destination)
+        final_dest = self.validate_path(self._get_unique_path(destination))
 
         if source.is_dir():
             self._copy_tree(source, final_dest)
@@ -451,11 +481,8 @@ class FileManager:
             self._save_journal()
         except Exception:
             self.journal.pop()
-            try:
-                if source.is_dir():
-                    shutil.rmtree(str(final_dest))
-                else:
-                    final_dest.unlink()
+            try:  # لا حذف نهائي: النسخة التي لم تُسجَّل تُنقل للسلة
+                _safe_move(str(final_dest), str(self._get_unique_path(self.trash_dir / ("partial_" + final_dest.name))))
             except Exception:
                 pass
             raise
@@ -494,7 +521,7 @@ class FileManager:
                 _safe_move(str(tmp), str(source))
                 raise
         else:
-            final_dest = self._get_unique_path(final_target)
+            final_dest = self.validate_path(self._get_unique_path(final_target))
             _safe_move(str(source), str(final_dest))
         self.journal.append({
             "task": self.current_task,
@@ -568,7 +595,11 @@ class FileManager:
                 if case_only:  # تراجع عن تغيير حالة الأحرف فقط: عبر اسم مؤقت
                     tmp = self._get_unique_path(dest.parent / (".cos_rename_tmp_" + raw_dest.name))
                     _safe_move(str(dest), str(tmp))
-                    _safe_move(str(tmp), str(dest.parent / raw_src.name))
+                    try:
+                        _safe_move(str(tmp), str(dest.parent / raw_src.name))
+                    except BaseException:
+                        _safe_move(str(tmp), str(dest))  # لا يبقى الملف باسم مؤقت مخفي
+                        raise
                     return "ok"
             target = self._get_unique_path(src)  # لا كتابة فوق موجود
             _safe_move(str(dest), str(target))
@@ -606,16 +637,42 @@ class FileManager:
         raise ValueError(f"عملية غير معروفة في السجل: {action!r}")
 
     def undo_step(self) -> str:
-        """يتراجع عن آخر عملية: "ok" | "missing" (أُزيلت من السجل لأن الناتج اختفى) | "error" (بقيت في السجل) | "empty"."""
+        """يتراجع عن آخر عملية: "ok" | "missing" (أُزيلت من السجل لأن الناتج اختفى) | "skipped" (خطأ دائم: تُخطّيت وحُفظت للفحص) | "error" (بقيت في السجل) | "empty"."""
         if not self.journal:
             return "empty"
+        entry = self.journal[-1]
         try:
-            result = self._undo_op(self.journal[-1])  # R10: لا نحذف من السجل قبل نجاح الفعل
-            self.journal.pop()
-            self._save_journal()
-            return result
+            result = self._undo_op(entry)  # R10: لا نحذف من السجل قبل نجاح الفعل
+        except (ProtectedPathError, PathOutOfBoundsError, KeyError, TypeError, ValueError, AttributeError) as e:
+            # خطأ دائم (إدخال فاسد/مسار مرفوض): لا يجوز أن يسدّ التراجع عن كل ما تحته؛ نحفظه للفحص ونتخطاه
+            return self._skip_entry(entry, e)
         except Exception:
             return "error"
+        self.journal.pop()
+        try:
+            self._save_journal()
+        except Exception:
+            # الأثر على القرص حدث فعلاً؛ فشل الحفظ لا يجعل الخطوة «خطأ» (سيُعاد تنظيف الإدخال القديم لاحقاً كـ missing)
+            self.undo_notes.append("تم التراجع لكن تعذّر تحديث سجل التراجع؛ قد يظهر إدخال قديم لاحقاً.")
+        return result
+
+    def _skip_entry(self, entry: Dict[str, Any], err: BaseException) -> str:
+        try:
+            note = self.allowed_root / ".undo_journal.skipped.jsonl"
+            with open(str(note), "a", encoding="utf-8") as f:
+                f.write(json.dumps({"entry": self._entry_to_disk(entry) if isinstance(entry, dict) else str(entry),
+                                    "error": str(err)}, ensure_ascii=True) + "\n")
+        except Exception:
+            pass
+        self.journal.pop()
+        try:
+            self._save_journal()
+        except Exception:
+            self.journal.append(entry)
+            return "error"
+        what = entry.get("action") if isinstance(entry, dict) else "?"
+        self.undo_notes.append(f"تعذّر التراجع عن عملية ({what}) لأن مسارها مرفوض أو سجلها فاسد؛ تُخطّيت وحُفظت للفحص.")
+        return "skipped"
 
     def undo_last(self) -> bool:
         """True فقط إذا استُعيد شيء فعلاً. إن اختفى الناتج المتوقع أُزيلت العملية من السجل وتعاد False."""
@@ -628,7 +685,7 @@ class FileManager:
             r = self.undo_step()
             if r == "ok":
                 count += 1
-            elif r != "missing":
+            elif r not in ("missing", "skipped"):
                 break
         return count
 
