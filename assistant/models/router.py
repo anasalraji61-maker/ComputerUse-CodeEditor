@@ -46,9 +46,22 @@ class ModelRouter(ModelProvider):
     def _is_cacheable(text: str) -> bool:
         """لا نخزّن إلا ردوداً صالحة (JSON قاموس)؛ الرد التالف يجب أن يُعاد طلبه لا أن يتكرر."""
         try:
-            return isinstance(json.loads(text), dict)
+            data = json.loads(text)
         except (ValueError, TypeError):
             return False
+        if not isinstance(data, dict):
+            return False
+        if "steps" in data:  # خطة غير صالحة لا تُخزَّن: إعادة الطلب يجب أن تسأل النموذج من جديد
+            from assistant.planner import validate_step, PlanParseError
+            steps = data["steps"]
+            if not isinstance(steps, list) or not steps:
+                return False
+            try:
+                for i, st in enumerate(steps, 1):
+                    validate_step(st, i)
+            except PlanParseError:
+                return False
+        return True
 
     def generate(self, prompt: str, system_prompt: str = "", tier: Optional[str] = None) -> str:
         tier = tier or self.choose_tier(prompt, system_prompt)
@@ -61,7 +74,15 @@ class ModelRouter(ModelProvider):
             self.calls.append({"tier": tier, "cached": True, "input": 0, "output": 0, "usd": 0.0})
             return self._cache[key]
         provider = self.providers[tier]
-        text = provider.generate(prompt, system_prompt=system_prompt)
+        try:
+            text = provider.generate(prompt, system_prompt=system_prompt)
+        except Exception:
+            tin, tout = getattr(provider, "last_usage", (0, 0))
+            if tin or tout:  # نداء فاشل لكنه مفوتَر (رد فارغ استهلك توكنات تفكير): يدخل في العدّاد وسقف الإنفاق
+                self.calls.append({"tier": tier, "cached": False, "model": getattr(provider, "model", provider.name()),
+                                   "input": tin, "output": tout, "usd": cost_usd(getattr(provider, "model", ""), tin, tout),
+                                   "failed": True})
+            raise
         tin, tout = getattr(provider, "last_usage", (0, 0))
         usd = cost_usd(getattr(provider, "model", ""), tin, tout)
         self.calls.append({"tier": tier, "cached": False, "model": getattr(provider, "model", provider.name()),

@@ -98,9 +98,10 @@ class Executor:
             self.executed_log.append(f"فحص العنصر: {step.target}")
 
         elif action == "create_dir":
+            existed = self.file_manager.validate_path(step.target).exists()
             created = self.file_manager.create_dir(step.target)
             info.update(success=True, path=str(created))
-            self.executed_log.append(f"تم إنشاء المجلد: {created}")
+            self.executed_log.append(f"المجلد موجود مسبقاً (لم يتغير شيء): {created}" if existed else f"تم إنشاء المجلد: {created}")
 
         elif action == "move":
             moved = self.file_manager.move(step.target, params["dest"])

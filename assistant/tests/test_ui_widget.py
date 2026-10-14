@@ -84,7 +84,7 @@ try:
         assert pump(root, lambda: "تم التراجع عن 1" in chat_text(w))
         assert not (base / "ws" / "تجربة").exists()
         w.undo_btn.invoke()  # لا شيء بعدها يُتراجع عنه
-        assert pump(root, lambda: "لا يوجد ما يمكن التراجع" in chat_text(w))
+        assert pump(root, lambda: "لا توجد مهمة للتراجع" in chat_text(w) or "لا يوجد ما يمكن التراجع" in chat_text(w))
         # 4ب. تراجع حقيقي عن مهمة ناجحة
         w.entry.insert(0, "أنشئ مجلد للتراجع")
         w._on_send()

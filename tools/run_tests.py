@@ -24,11 +24,31 @@ def py_files():
         yield p
 
 
+def _fp_files():
+    """كل ملفات المستودع (لا .py فقط): تغيير وثيقة يحوي مفتاحاً يجب أن يعيد تشغيل فحص الأسرار."""
+    skip_names = {OUT.name, STATE.name, "sync.log"}
+    for p in sorted(ROOT.rglob("*")):
+        rel = p.relative_to(ROOT)
+        if not p.is_file() or SKIP.intersection(rel.parts) or p.name in skip_names:
+            continue
+        if p.suffix.lower() in {".pyc", ".db", ".exe", ".log"}:
+            continue
+        try:
+            if p.stat().st_size > 5_000_000:
+                continue
+        except OSError:
+            continue
+        yield p
+
+
 def fingerprint():
     h = hashlib.sha1()
-    for p in py_files():
+    for p in _fp_files():
         h.update(str(p.relative_to(ROOT)).encode())
-        h.update(p.read_bytes())
+        try:
+            h.update(p.read_bytes())
+        except OSError:
+            h.update(b"?")
     return h.hexdigest()
 
 

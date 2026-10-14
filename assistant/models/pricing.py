@@ -24,7 +24,7 @@ COST_USD_PER_POINT = 0.03
 
 
 # نموذج غير مسعَّر لا يُحتسب مجاناً أبداً: نستعمل أعلى سعر معروف (تقدير متحفظ) ويُنبَّه في التقرير
-FALLBACK_PRICE: Tuple[float, float] = (2.00, 12.00)
+FALLBACK_PRICE: Tuple[float, float] = (15.00, 75.00)  # أعلى من أي سعر قائمة معروف لنماذج الفئة الكبرى
 
 
 def is_priced(model: str) -> bool:

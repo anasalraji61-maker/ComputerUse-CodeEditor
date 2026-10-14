@@ -39,7 +39,7 @@ def validate_workspace(path) -> Path:
         if is_unc_like(path):
             raise WorkspaceError("المسارات الشبكية غير مسموحة.")
         p = Path(str(path).strip()).expanduser().resolve()
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         raise WorkspaceError("مسار غير صالح.")
     if not p.exists() or not p.is_dir():
         raise WorkspaceError("المجلد غير موجود.")
@@ -88,7 +88,8 @@ def _config_path() -> Path:
 
 def load_config() -> dict:
     try:
-        return json.loads(_config_path().read_text(encoding="utf-8"))
+        data = json.loads(_config_path().read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 

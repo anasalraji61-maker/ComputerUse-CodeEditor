@@ -213,7 +213,7 @@ def render_markdown(res: Dict[str, Any]) -> str:
     for key, r in res["results"].items():
         n = max(1, r["runs"])
         rate = 100.0 * r["ok"] / n if r["runs"] else 0.0
-        gate_ok &= (r["runs"] > 0 and rate >= 90.0)
+        gate_ok &= (r["runs"] >= max(3, int(res.get("runs", 3))) and rate >= 90.0)  # دورة واحدة لا تثبت البوابة
         tot_usd += r["usd"]
         L.append(f"| {r['title']} | {r['runs']} | {rate:.0f}% ({r['ok']}/{r['runs']}) | {r['steps'] / n:.1f} | "
                  f"{r['secs'] / n:.2f} | {r['tin']} | {r['tout']} | {r['usd']:.4f} | {r['usd'] / COST_USD_PER_POINT:.2f} |")

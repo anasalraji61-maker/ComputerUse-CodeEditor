@@ -15,6 +15,13 @@ findstr /x /c:"tools/.last_tested" .gitignore >nul 2>&1 || echo tools/.last_test
 for /f %%b in ('git rev-parse --abbrev-ref HEAD') do set BR=%%b
 
 git pull --rebase --autostash origin %BR% >> tools\sync.log 2>&1
+if errorlevel 1 (
+  echo PULL FAILED - rebase aborted, nothing pushed >> tools\sync.log
+  git rebase --abort >> tools\sync.log 2>&1
+  exit /b 4
+)
+if exist ".git\rebase-merge" exit /b 5
+if exist ".git\rebase-apply" exit /b 5
 
 rem اختبارات فعلية (تعيد التشغيل فقط عند تغير ملفات py). عند الفشل: لا يرفع الكود، يرفع ملف النتائج فقط لتراه
 set PYEXE=py
@@ -22,6 +29,7 @@ where python >nul 2>&1 && set PYEXE=python
 %PYEXE% tools\run_tests.py >> tools\sync.log 2>&1
 if errorlevel 1 (
   echo TESTS FAILING - code not pushed >> tools\sync.log
+  git reset -q
   git add docs/TEST_RESULTS.md
   git diff --cached --quiet || git commit -m "sync: test results only (tests failing, code not pushed)" >> tools\sync.log 2>&1
   git push origin %BR% >> tools\sync.log 2>&1

@@ -123,7 +123,7 @@ class SQLiteLedger:
     @staticmethod
     def estimate_cost(task_type: str, steps_count: int = 1) -> int:
         """تقدير كلفة المهمة قبل التنفيذ: نقطة واحدة لكل ~8 خطوات نصية."""
-        words = re.sub(r"\S*[./\\]\S*", " ", task_type.lower())  # أسماء الملفات (screen.png) ليست طلب شاشة
+        words = " ".join(t for t in task_type[:4000].lower().split() if not any(c in t for c in "./\\"))  # أسماء الملفات (screen.png) ليست طلب شاشة
         if re.search(r"\bscreen\b", words):
             return 5
         base = max(1, (max(0, int(steps_count)) + 7) // 8)

@@ -143,6 +143,7 @@ class Planner:
     def __init__(self, provider: ModelProvider, max_steps: int = MAX_PLAN_STEPS):
         self.provider = provider
         self.max_steps = max_steps
+        self.last_note = None  # ملاحظة النموذج/القواعد المرافقة لآخر خطة (مثل تنبيه الاقتطاع)
 
     def plan(self, user_prompt: str, context: str = "") -> List[PlanStep]:
         """توليد الخطة؛ context = قائمة محتويات مجلد العمل تُضاف لمطالبة النظام. أي رد غير صالح يرفع PlanParseError."""
@@ -150,6 +151,7 @@ class Planner:
         if context:
             system_prompt += "\n\n" + CONTEXT_MARKER + "\n" + context
         data = _extract_json(self.provider.generate(user_prompt, system_prompt=system_prompt))
+        self.last_note = None
         raw_steps = data.get("steps") if isinstance(data, dict) else data
         if not isinstance(raw_steps, list) or not raw_steps:
             note = data.get("note") if isinstance(data, dict) else None
@@ -157,6 +159,8 @@ class Planner:
         if len(raw_steps) > self.max_steps:
             raise PlanParseError(f"عدد الخطوات {len(raw_steps)} يتجاوز الحد الأقصى {self.max_steps}.")
         steps = [validate_step(item, i) for i, item in enumerate(raw_steps, 1)]
+        note = data.get("note") if isinstance(data, dict) else None
+        self.last_note = sanitize_display(note, 300) if isinstance(note, str) and note.strip() else None
         ids = [s.step_id for s in steps]
         if len(set(ids)) != len(ids):
             raise PlanParseError("أرقام الخطوات (step_id) مكررة.")

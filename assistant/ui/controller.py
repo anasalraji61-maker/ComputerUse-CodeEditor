@@ -19,6 +19,7 @@ from assistant.ledger import SQLiteLedger
 from assistant.config import validate_workspace, load_config, save_config, WorkspaceError
 
 MAX_QUESTIONS = 3
+MAX_REQUEST_CHARS = 4000
 APPROVAL_TIMEOUT_SEC = 120.0
 
 CLARIFY_SYSTEM = (
@@ -40,7 +41,7 @@ class AssistantController:
         self.kill_switch = KillSwitch()
         self.event_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self.state = IDLE
-        self._planning_cancelled = False
+        self._gen = 0  # جيل الطلب: الإيقاف يرفع الرقم فيُهمَل أي ناتج متأخر من خيط قديم
         self._lock = threading.RLock()
         self._request = ""
         self._plan: Optional[List[PlanStep]] = None
@@ -143,28 +144,28 @@ class AssistantController:
                 return self.emit("error", text="المساعد مشغول بمهمة حالية. أوقفها أو انتظر انتهاءها.")
             if not text:
                 return self.emit("error", text="اكتب طلبك أولاً.")
-            if self.usage_meter is not None and self.usage_meter.exceeded():
+            if len(text) > MAX_REQUEST_CHARS:
+                return self.emit("error", text=f"الطلب طويل جداً ({len(text)} حرفاً). اختصره إلى أقل من {MAX_REQUEST_CHARS} حرف.")
+            if self._cap_exceeded():
                 return self.emit("error", text=self.usage_meter.message())
             self.kill_switch.reset()
-            self._planning_cancelled = False
+            self._gen += 1
+            gen = self._gen
             self._request = text
             self._plan = None
             self._go(PLANNING)
         self.emit("status", text="أفهم طلبك…")
-        self._spawn(self._clarify_then_plan, text)
+        self._spawn(self._clarify_then_plan, text, gen)
 
-    def _cancel_if_stopped(self) -> bool:
-        """الإيقاف أثناء الفهم/التخطيط يلغي الطلب ولا يتحول إلى خطة جاهزة."""
+    def _cap_exceeded(self) -> bool:
+        """سقف الإنفاق اليومي يخص المزوّدات المدفوعة فقط (التي تعدّ الكلفة)؛ الوضع المحلي المجاني لا يُحجب به."""
+        return (self.usage_meter is not None and callable(getattr(self.provider, "totals", None))
+                and self.usage_meter.exceeded())
+
+    def _is_stale(self, gen: int) -> bool:
+        """الإيقاف (أو طلب أحدث) رفع الجيل: ناتج هذا الخيط يُهمَل بلا أثر."""
         with self._lock:
-            if self._planning_cancelled:
-                self._plan = None
-                self._go(IDLE)
-                cancelled = True
-            else:
-                cancelled = False
-        if cancelled:
-            self.emit("status", text="أُلغي الطلب بسبب الإيقاف.")
-        return cancelled
+            return gen != self._gen
 
     def _usd_total(self) -> float:
         fn = getattr(self.provider, "totals", None)
@@ -183,18 +184,20 @@ class AssistantController:
                 pass
         return spent
 
-    def _clarify_then_plan(self, text: str):
+    def _clarify_then_plan(self, text: str, gen: int):
         before = self._usd_total()
         questions = self._ask_questions(text)
         self._record_spend(before)
-        if self._cancel_if_stopped():
-            return
         if questions:
             with self._lock:
+                if gen != self._gen:
+                    return
                 self._go(CLARIFYING)
             self.emit("questions", questions=questions)
             return
-        self._make_plan(text)
+        if self._is_stale(gen):
+            return
+        self._make_plan(text, gen)
 
     def _ask_questions(self, text: str) -> List[str]:
         try:
@@ -211,34 +214,37 @@ class AssistantController:
         with self._lock:
             if self.state != CLARIFYING:
                 return self.emit("error", text="لا توجد أسئلة بانتظار الإجابة.")
-            self._planning_cancelled = False
+            if self._cap_exceeded():
+                self._plan = None
+                self._go(IDLE)
+                return self.emit("error", text=self.usage_meter.message())
+            self._gen += 1
+            gen = self._gen
             self._go(PLANNING)
         extra = " | ".join(c for c in (sanitize_display(a, 300) for a in answers if isinstance(a, str)) if c)
-        full = self._request + (f"\nتوضيحات المستخدم: {extra}" if extra else "")
+        full = (self._request + (f"\nتوضيحات المستخدم: {extra}" if extra else ""))[:MAX_REQUEST_CHARS + 600]
         self.emit("status", text="أُعدّ الخطة…")
-        self._spawn(self._make_plan, full)
+        self._spawn(self._make_plan, full, gen)
 
     # ---------- 2) الخطة ----------
-    def _make_plan(self, text: str):
+    def _make_plan(self, text: str, gen: int):
         before = self._usd_total()
         try:
             plan = self.runner.make_plan(text)
-        except PlanParseError as exc:
-            self._record_spend(before)
-            with self._lock:
-                self._go(IDLE)
-            return self.emit("error", text=f"تعذّر فهم الخطة: {sanitize_display(exc, 400)}")
         except Exception as exc:
             self._record_spend(before)
             with self._lock:
+                if gen != self._gen:
+                    return
                 self._go(IDLE)
-            return self.emit("error", text=f"تعذّر التخطيط: {sanitize_display(exc, 400)}")
+            what = "تعذّر فهم الخطة" if isinstance(exc, PlanParseError) else "تعذّر التخطيط"
+            return self.emit("error", text=f"{what}: {sanitize_display(exc, 400)}")
         spent = self._record_spend(before)
         if spent > 0:
             self.emit("status", text=f"كلفة التخطيط: {spent:.4f}$")
-        if self._cancel_if_stopped():
-            return
-        with self._lock:
+        with self._lock:  # فحص الإلغاء والنشر في كتلة واحدة: لا تظهر خطة بعد الإيقاف
+            if gen != self._gen:
+                return
             self._plan = plan
             self._request_full = text
             self._task_id = "task_" + uuid.uuid4().hex[:10]
@@ -250,7 +256,7 @@ class AssistantController:
             for s in plan
         ]
         estimate = self._estimate(text, len(plan))
-        self.emit("plan", task_id=self._task_id, steps=steps, estimate=estimate)
+        self.emit("plan", task_id=self._task_id, steps=steps, estimate=estimate, note=self.runner.last_plan_note)
 
     def _estimate(self, objective: str, n_steps: int) -> Dict[str, Any]:
         """كلفة المهمة المتوقعة بالنقاط والرصيد الحالي وهل يكفيان، لتُعرض قبل الضغط على «ابدأ»."""
@@ -315,19 +321,20 @@ class AssistantController:
             self._approval_seq += 1
             aid = self._approval_seq
             self._pending_approval = aid
-        self._approval_event.clear()
-        self._approval_result = False
-        if self.kill_switch.is_triggered:  # الإيقاف سبق الطلب (لا ننتظر 120 ثانية)
-            self._pending_approval = None
-            return False
+            self._approval_event.clear()
+            self._approval_result = False
+            if self.kill_switch.is_triggered:  # الإيقاف سبق الطلب (لا ننتظر 120 ثانية)
+                self._pending_approval = None
+                return False
         self.emit("approval_request", step={
             "step_id": step.step_id, "action": step.action_type, "target": step.target, "params": step.params,
             "approval_id": aid})
         signalled = self._approval_event.wait(timeout=self._approval_timeout)
-        result = self._approval_result and not self.kill_switch.is_triggered and self._pending_approval == aid
-        self._pending_approval = None  # أي ردّ متأخر بعد هذه اللحظة يُتجاهل
-        self._approval_event.clear()
-        self._approval_result = False
+        with self._lock:
+            result = self._approval_result and not self.kill_switch.is_triggered and self._pending_approval == aid
+            self._pending_approval = None  # أي ردّ متأخر بعد هذه اللحظة يُتجاهل
+            self._approval_event.clear()
+            self._approval_result = False
         self.emit("approval_closed", approval_id=aid)  # تُغلق الواجهة النافذة المعلّقة (مهلة/إيقاف/نهاية)
         if not signalled and not self.kill_switch.is_triggered:
             raise ApprovalTimedOut()  # انتهت المهلة دون ردّ: تُعرض في التقرير كمهلة لا كرفض
@@ -335,10 +342,11 @@ class AssistantController:
 
     def respond_approval(self, approved: bool, approval_id=None):
         """approval_id: ردّ متأخر أو مكرر على طلب آخر يُتجاهل (لا يُحتسب لخطوة أخرى)."""
-        if approval_id is None or approval_id != self._pending_approval:
-            return  # بلا معرّف مطابق للطلب المعلّق لا يُقبل ردّ (يمنع ربط موافقة قديمة بخطوة أخرى)
-        self._approval_result = bool(approved)
-        self._approval_event.set()
+        with self._lock:  # الفحص والكتابة معاً: ردّ متأخر لا يتسلل إلى طلب لاحق
+            if approval_id is None or approval_id != self._pending_approval:
+                return  # بلا معرّف مطابق للطلب المعلّق لا يُقبل ردّ (يمنع ربط موافقة قديمة بخطوة أخرى)
+            self._approval_result = bool(approved)
+            self._approval_event.set()
 
     # ---------- 5) الإيقاف والتراجع ----------
     def stop(self, reason: str = "ضغط المستخدم على زر الإيقاف"):
@@ -346,12 +354,13 @@ class AssistantController:
             self.kill_switch.trigger(reason)
             self._approval_result = False
             self._approval_event.set()  # يحرر أي نافذة موافقة معلّقة بالرفض
-            if self.state == PLANNING:
-                self._planning_cancelled = True
-            if self.state in (PLAN_READY, CLARIFYING):
+            was_planning = self.state == PLANNING
+            if was_planning:
+                self._gen += 1  # يُهمل ناتج خيط الفهم/التخطيط الجاري ويتحرر المتحكم فوراً
+            if self.state in (PLAN_READY, CLARIFYING, PLANNING):
                 self._plan = None
                 self._go(IDLE)
-        self.emit("status", text="تم الضغط على الإيقاف.")
+        self.emit("status", text="تم الضغط على الإيقاف." + (" أُلغي الطلب." if was_planning else ""))
 
     def history(self, limit: int = 10):
         try:
@@ -366,7 +375,14 @@ class AssistantController:
         task_id = self.last_task_id or self.runner.last_journaled_task()  # بعد إعادة التشغيل نقرأ الوسم من السجل المحفوظ
         if not task_id:
             return self.emit("error", text="لا توجد مهمة للتراجع عنها.")
+        self.runner.file_manager.undo_notes.clear()
         n = self.runner.undo_task(task_id)
+        notes = list(self.runner.file_manager.undo_notes)
+        self.runner.file_manager.undo_notes.clear()
         if n == 0:
             return self.emit("error", text="لا يوجد ما يمكن التراجع عنه لهذه المهمة (تم سابقاً، أو اختفى ناتجها، أو توجد مهام أحدث).")
+        if self.last_task_id == task_id:
+            self.last_task_id = None  # تراجع ثانٍ يستهدف المهمة السابقة لا المهمة نفسها
+        for note in notes:
+            self.emit("status", text=sanitize_display(note, 300))
         self.emit("undo", count=n, task_id=task_id)

@@ -56,6 +56,7 @@ class AssistantWidget:
         x = max(0, root.winfo_screenwidth() - w - 24)
         y = max(0, root.winfo_screenheight() - h - 70)
         root.geometry(f"{w}x{h}+{x}+{y}")
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build()
         self.add_message("مرحباً! اكتب المهمة التي تريد تنفيذها، وسأعرض عليك الخطة قبل البدء.", "assistant")
         root.after(self.POLL_MS, self._poll)
@@ -238,6 +239,22 @@ class AssistantWidget:
                 out.append(ln)
         return "\n".join(out)
 
+    def _on_close(self):
+        """إغلاق النافذة أثناء تنفيذ: نسأل ثم نوقف المهمة ونمهلها لحظات لتنتهي نظيفة بدل قتل الخيط وترك نسخة ناقصة."""
+        if self.controller.state == "RUNNING":
+            try:
+                from tkinter import messagebox
+                if not messagebox.askyesno("مهمة جارية", "توجد مهمة قيد التنفيذ. أوقفها وأغلق؟", parent=self.root):
+                    return
+            except Exception:
+                pass
+            self.controller.stop()
+            import time
+            end = time.time() + 5.0
+            while self.controller.state == "RUNNING" and time.time() < end:
+                time.sleep(0.1)
+        self.root.destroy()
+
     def _on_stop(self):
         self.controller.stop()
         self._close_approval()
@@ -280,7 +297,7 @@ class AssistantWidget:
             self.set_status("حدث خطأ")
             self._set_buttons(self.controller.state == "PLAN_READY")  # خطأ عابر لا يعطّل خطة ما زالت جاهزة
         elif t == "questions":
-            self.awaiting_answers = True
+            self.awaiting_answers = self.controller.state == "CLARIFYING"  # حدث قديم بعد الإيقاف لا يبتلع الطلب التالي
             self.add_message("أحتاج توضيحاً قبل الخطة (أجب في سطر واحد):\n" +
                              "\n".join(f"{i}. {q}" for i, q in enumerate(ev["questions"], 1)), "assistant")
             self.set_status("بانتظار إجابتك")
@@ -290,6 +307,8 @@ class AssistantWidget:
             msg = f"هذه الخطة ({len(ev['steps'])} خطوات). راجعها ثم اضغط «ابدأ التنفيذ»."
             if n_danger:
                 msg += f"\nتنبيه: {n_danger} خطوة خطرة ستطلب موافقتك واحدة واحدة."
+            if ev.get("note"):
+                msg += f"\nملاحظة: {ev['note']}"
             est = ev.get("estimate") or {}
             if est.get("points") is not None:
                 msg += f"\nالكلفة المتوقعة: {est['points']} نقطة · رصيدك: {est['balance']} نقطة"

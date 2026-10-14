@@ -59,6 +59,7 @@ class TaskRunner:
             bind(self.allowed_root)  # يسمح لمخطط القواعد بقراءة أحجام/تواريخ الملفات (قراءة فقط)
         self.planner = Planner(provider=provider)
         self.verifier = Verifier(allowed_root=self.allowed_root, version_probe=self.version_probe, kill_switch=self.kill_switch)
+        self.last_plan_note: Optional[str] = None
         self._journal_starts: Dict[str, int] = {}
         self._journal_ends: Dict[str, int] = {}
 
@@ -103,7 +104,9 @@ class TaskRunner:
         return "\n".join(out) if out else "(فارغ)"
 
     def make_plan(self, objective: str) -> List[PlanStep]:
-        return self.planner.plan(objective, context=self.workspace_listing())
+        plan = self.planner.plan(objective, context=self.workspace_listing())
+        self.last_plan_note = self.planner.last_note
+        return plan
 
     # ---------- التراجع الخاص بالمهمة (R22) ----------
     def undo_task(self, task_id: str) -> int:
@@ -122,11 +125,17 @@ class TaskRunner:
             return 0  # توجد مهام أحدث بعدها: يجب التراجع عنها أولاً حتى لا تُلغى عملياتها بالخطأ
         count = 0
         while len(self.file_manager.journal) > start:
+            tag = self.file_manager.journal[-1].get("task")
+            if tag is not None and tag != task_id:
+                break  # حدود قديمة: لا نمسّ عمليات مهمة أخرى
             r = self.file_manager.undo_step()
             if r == "ok":
                 count += 1
             elif r != "missing":
                 break
+        if len(self.file_manager.journal) <= start:  # انتهت المهمة: لا تبقى حدودها صالحة لتراجع ثانٍ
+            self._journal_starts.pop(task_id, None)
+            self._journal_ends.pop(task_id, None)
         return count
 
     def last_journaled_task(self) -> Optional[str]:
@@ -163,6 +172,7 @@ class TaskRunner:
 
         fm = self.file_manager
         journal_start = len(fm.journal)
+        prev_start = self._journal_starts.get(task_id)
         self._journal_starts[task_id] = journal_start
         fm.current_task = task_id
         executor = Executor(
@@ -193,7 +203,7 @@ class TaskRunner:
                     try:
                         self.ledger.record_task_success(task_id, charged_points=charge)
                     except (SpendingLimitExceededError, InsufficientBalanceError, ValueError, sqlite3.Error) as exc:
-                        failures.append(f"تعذّر تسجيل الكلفة في الدفتر: {exc}")
+                        failures.append(f"تعذّر تسجيل الكلفة في الدفتر: {exc}. ملاحظة: الملفات تغيّرت فعلاً (يمكنك التراجع).")
                         success = False
                         try:
                             self.ledger.record_task_failure(task_id, reason=str(exc), is_platform_failure=True)
@@ -232,6 +242,16 @@ class TaskRunner:
         except (InsufficientBalanceError, SpendingLimitExceededError) as exc:
             failures.append(f"لم تبدأ المهمة: {exc}")
             return finish(False)
+        except Exception as exc:  # معرّف مكرر / قاعدة بيانات مقفلة: لا نترك حالة عالقة ولا نكسر تراجع مهمة سابقة بنفس المعرّف
+            failures.append(f"تعذّر بدء المهمة: {exc}")
+            if prev_start is None:
+                self._journal_starts.pop(task_id, None)
+            else:
+                self._journal_starts[task_id] = prev_start
+            fm.current_task = None
+            return ExecutionReport(task_id=task_id, objective=objective, success=False, executed_steps=[],
+                                   evidence=[], failures=failures, points_charged=0, undo_available=False,
+                                   undo_journal_path=str(fm.journal_path), approvals=[], skipped=[])
 
         # 2. التخطيط (يُتخطى إن وُفّرت خطة جاهزة)
         try:

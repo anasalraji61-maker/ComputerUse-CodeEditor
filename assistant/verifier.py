@@ -8,8 +8,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from assistant.planner import PlanStep
 from assistant.safety import MUTATING_ACTIONS
-from assistant.tools.files import is_unc_like
+from assistant.tools.files import is_unc_like, check_not_big_cloud_file
 
+_NO_UPGRADE = re.compile(r"no (applicable|available) upgrade|no newer package|no installed package|no applicable update", re.I)
 VersionProbe = Callable[[str], Tuple[int, str, str]]
 
 
@@ -30,6 +31,7 @@ class Verifier:
 
     # ---------- أدوات مساعدة ----------
     def calculate_hash(self, file_path: Path) -> str:
+        check_not_big_cloud_file(Path(file_path))  # لا نُنزّل ملفاً سحابياً كبيراً بصمت لمجرد حساب بصمته
         h = hashlib.sha256()
         with open(file_path, "rb") as f:
             while chunk := f.read(65536):
@@ -184,7 +186,9 @@ class Verifier:
                 after_line = self._package_line(out, step.target)
                 before_line = (before or {}).get("probe_line")
                 if before_line and after_line and before_line == after_line:
-                    ev["value"] = f"0 والحزمة ظاهرة، لكن سطرها لم يتغير (ربما محدّثة أصلاً): {after_line}"
+                    if _NO_UPGRADE.search(str(info.get("stdout", "")) + " " + str(info.get("stderr", ""))):
+                        return fail(f"لا يوجد تحديث متاح: الحزمة محدّثة أصلاً (لم يتغير سطرها): {after_line}")
+                    ev["value"] = f"0 والحزمة ظاهرة، لكن سطرها لم يتغير: {after_line}"
                 elif before_line and after_line:
                     ev["value"] = f"0 والحزمة ظاهرة. قبل: {before_line} ← بعد: {after_line}"
                 else:

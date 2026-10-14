@@ -1,6 +1,6 @@
 # نتائج الاختبارات الفعلية (آلية)
 
-آخر تشغيل: 2026-10-14 18:36:27 — 36 ملف، فشل: 1
+آخر تشغيل: 2026-10-14 18:41:23 — 37 ملف، فشل: 0
 
 هذه النتائج تُنتَج على لابتوب المالك. لا تدّعِ نجاحاً غير مذكور هنا.
 
@@ -14,9 +14,10 @@
 | `assistant/tests/test_b19.py` | PASS | 0.9s |
 | `assistant/tests/test_b20.py` | PASS | 0.1s |
 | `assistant/tests/test_b21.py` | PASS | 0.1s |
-| `assistant/tests/test_b22.py` | PASS | 0.9s |
+| `assistant/tests/test_b22.py` | PASS | 0.8s |
 | `assistant/tests/test_b23.py` | PASS | 3.0s |
-| `assistant/tests/test_b24.py` | **FAIL** | 0.3s |
+| `assistant/tests/test_b24.py` | PASS | 0.9s |
+| `assistant/tests/test_b25.py` | PASS | 0.2s |
 | `assistant/tests/test_b6.py` | PASS | 0.3s |
 | `assistant/tests/test_b8.py` | PASS | 0.4s |
 | `assistant/tests/test_bench.py` | PASS | 0.6s |
@@ -24,17 +25,17 @@
 | `assistant/tests/test_budget.py` | PASS | 0.1s |
 | `assistant/tests/test_config.py` | PASS | 0.3s |
 | `assistant/tests/test_controller.py` | PASS | 0.5s |
-| `assistant/tests/test_deliberate_failures.py` | PASS | 6.4s |
+| `assistant/tests/test_deliberate_failures.py` | PASS | 0.9s |
 | `assistant/tests/test_files.py` | PASS | 0.1s |
 | `assistant/tests/test_fuzz.py` | PASS | 3.6s |
-| `assistant/tests/test_ledger.py` | PASS | 0.2s |
+| `assistant/tests/test_ledger.py` | PASS | 0.3s |
 | `assistant/tests/test_models.py` | PASS | 0.1s |
 | `assistant/tests/test_no_secrets.py` | PASS | 0.1s |
 | `assistant/tests/test_planner.py` | PASS | 0.1s |
 | `assistant/tests/test_planner_executor_verifier.py` | PASS | 0.1s |
 | `assistant/tests/test_providers.py` | PASS | 0.1s |
 | `assistant/tests/test_router.py` | PASS | 0.1s |
-| `assistant/tests/test_rules.py` | PASS | 0.6s |
+| `assistant/tests/test_rules.py` | PASS | 0.5s |
 | `assistant/tests/test_runner.py` | PASS | 0.2s |
 | `assistant/tests/test_safety.py` | PASS | 0.1s |
 | `assistant/tests/test_scripts.py` | PASS | 0.0s |
@@ -85,30 +86,11 @@ PASS: test_b23 completed successfully
 ```
 ### assistant/tests/test_b24.py
 ```
-Exception in thread Thread-4 (_readerthread):
-Traceback (most recent call last):
-  File "C:\Python314\Lib\threading.py", line 1082, in _bootstrap_inner
-    self._context.run(self.run)
-    ~~~~~~~~~~~~~~~~~^^^^^^^^^^
-  File "C:\Python314\Lib\threading.py", line 1024, in run
-    self._target(*self._args, **self._kwargs)
-    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Python314\Lib\subprocess.py", line 1614, in _readerthread
-    buffer.append(fh.read())
-                  ~~~~~~~^^
-  File "C:\Python314\Lib\encodings\cp1252.py", line 23, in decode
-    return codecs.charmap_decode(input,self.errors,decoding_table)[0]
-           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-UnicodeDecodeError: 'charmap' codec can't decode byte 0x81 in position 252: character maps to <undefined>
-Traceback (most recent call last):
-  File "C:\Users\AkarTech\Documents\COS_Projects\ComputerUse-CodeEditor\assistant\tests\test_b24.py", line 36, in <module>
-    rc, out = scan(repo)
-              ~~~~^^^^^^
-  File "C:\Users\AkarTech\Documents\COS_Projects\ComputerUse-CodeEditor\assistant\tests\test_b24.py", line 25, in scan
-    return r.returncode, r.stdout + r.stderr
-                         ~~~~~~~~~^~~~~~~~~~
-TypeError: can only concatenate str (not "NoneType") to str
-FAIL: test_b24
+PASS: test_b24 completed successfully
+```
+### assistant/tests/test_b25.py
+```
+PASS: test_b25 completed successfully
 ```
 ### assistant/tests/test_b6.py
 ```

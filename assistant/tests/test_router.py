@@ -74,7 +74,7 @@ try:
 
     # التسعير
     assert abs(cost_usd("claude-sonnet-5-5", 1_000_000, 1_000_000) - 12.0) < 1e-9
-    assert cost_usd("unknown-model", 1_000_000, 1_000_000) == 14.0 and usd_to_points(0.06) == 2.0  # غير مسعَّر = أعلى سعر معروف لا مجاناً
+    assert cost_usd("unknown-model", 1_000_000, 1_000_000) == 90.0 and usd_to_points(0.06) == 2.0  # غير مسعَّر = أعلى سعر معروف لا مجاناً
 
     # المصنع
     prov, note = build_provider({})

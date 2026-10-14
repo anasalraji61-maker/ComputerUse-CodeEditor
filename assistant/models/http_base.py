@@ -76,7 +76,7 @@ class HttpProvider(ModelProvider):
         cancel_check: Optional[Callable[[], bool]] = None,
     ):
         self.model = model
-        self._api_key = api_key or next((os.environ[k] for k in self.ENV_KEYS if os.environ.get(k)), "")
+        self._api_key = (api_key or next((os.environ[k] for k in self.ENV_KEYS if os.environ.get(k)), "")).strip()
         self.transport = transport or default_transport
         self.max_tokens = max_tokens
         self.timeout = timeout
@@ -94,6 +94,8 @@ class HttpProvider(ModelProvider):
             raise ProviderConfigError(
                 f"مفتاح {self.PROVIDER_LABEL} غير موجود. عيّن متغير البيئة {self.ENV_KEYS[0]} ثم أعد التشغيل."
             )
+        if any(ch.isspace() or ord(ch) < 32 or ord(ch) > 126 for ch in self._api_key):
+            raise ProviderConfigError(f"مفتاح {self.PROVIDER_LABEL} يحوي فراغات أو محارف غير صالحة؛ انسخه من جديد بلا مسافات.")
         return self._api_key
 
     def _redact(self, text: str) -> str:
@@ -116,6 +118,7 @@ class HttpProvider(ModelProvider):
 
     def generate(self, prompt: str, system_prompt: str = "") -> str:
         self._require_key()
+        self.last_usage = (0, 0)
         url, headers, payload = self._build(prompt, system_prompt)
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         status, raw = 0, b""

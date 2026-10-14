@@ -32,3 +32,13 @@ build/
 .cos_assistant/
 tools/sync.log
 tools/.last_tested
+*.env
+.envrc
+usage.json
+secrets*.json
+*.db-*
+*.sqlite*
+*.sqlite3
+config.local.json
+tools/sync.log
+tools/.last_tested

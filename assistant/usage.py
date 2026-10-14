@@ -27,11 +27,16 @@ class UsageMeter:
         self._lock = threading.Lock()
 
     def _load(self) -> dict:
+        """ملف غير موجود = لا إنفاق. ملف موجود لكنه تالف/مقفل = نفترض أن السقف استُهلك (الفشل يغلق ولا يفتح)."""
+        if not self.path.exists():
+            return {}
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
+            if isinstance(data, dict):
+                return data
         except Exception:
-            return {}
+            pass
+        return {self._today().isoformat(): self.cap}
 
     def spent_today(self) -> float:
         with self._lock:

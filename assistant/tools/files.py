@@ -4,6 +4,7 @@ import os
 import shutil
 import hashlib
 import re
+import time
 from pathlib import Path
 from typing import Union, List, Dict, Any, Optional
 
@@ -65,6 +66,25 @@ _JOURNAL_PATH_KEYS = ("src", "dest", "path", "original_path", "trash_path")
 _REL = "rel:"
 
 
+_CLOUD_ATTRS = 0x400000 | 0x40000 | 0x1000  # RECALL_ON_DATA_ACCESS | RECALL_ON_OPEN | OFFLINE (ملفات OneDrive غير المحمّلة)
+CLOUD_HYDRATE_LIMIT = 25 * 1024 * 1024
+
+
+class CloudFileNotLocalError(Exception):
+    """ملف سحابي (OneDrive…) غير محمّل على الجهاز وكبير: قراءته ستنزّله كاملاً بصمت، فنرفضه برسالة واضحة."""
+
+
+def check_not_big_cloud_file(p: Path, limit: int = CLOUD_HYDRATE_LIMIT, _lstat=None) -> None:
+    try:
+        st = (_lstat or os.lstat)(str(p))
+    except OSError:
+        return
+    if getattr(st, "st_file_attributes", 0) & _CLOUD_ATTRS and st.st_size > limit:
+        raise CloudFileNotLocalError(
+            f"الملف '{p.name}' ({st.st_size // (1024 * 1024)}MB) غير محمّل محلياً من السحابة؛ قراءته ستنزّله كاملاً. "
+            f"اجعله «الاحتفاظ دائماً على هذا الجهاز» ثم أعد المحاولة.")
+
+
 class PathOutOfBoundsError(Exception):
     """استثناء عند محاولة الوصول إلى مسار خارج المجلد الجذر المسموح به أو عبر روابط غير آمنة."""
     pass
@@ -102,6 +122,7 @@ class FileManager:
                     raise ProtectedPathError(f"'{internal.name}' موجود كمجلد — غيّر اسمه يدوياً ثم أعد المحاولة.")
         self.trash_dir.mkdir(parents=True, exist_ok=True)
         self.journal: List[Dict[str, Any]] = self._load_journal()
+        self.undo_notes: List[str] = []  # ملاحظات التراجع (مثل استعادة عنصر باسم بديل لأن اسمه الأصلي صار مشغولاً)
         self.current_task: Optional[str] = None  # معرّف المهمة الجارية؛ يُوسَم به كل إدخال لتبقى المهمة قابلة للتراجع بعد إعادة التشغيل
 
     def _entry_to_disk(self, entry: Dict[str, Any]) -> Dict[str, Any]:
@@ -126,13 +147,25 @@ class FileManager:
 
     def _load_journal(self) -> List[Dict[str, Any]]:
         if self.journal_path.exists():
+            text = None
+            for attempt in range(4):  # قفل مؤقت من مضاد فيروسات/OneDrive لا يعني أن السجل تالف
+                try:
+                    text = self.journal_path.read_text(encoding="utf-8")
+                    break
+                except UnicodeDecodeError:
+                    text = ""
+                    break
+                except OSError:
+                    if attempt == 3:
+                        raise ProtectedPathError("تعذّر قراءة سجل التراجع الآن (الملف مقفل). أعد المحاولة بعد لحظات؛ لم يُمَس السجل.")
+                    time.sleep(0.3)
             try:
-                data = json.loads(self.journal_path.read_text(encoding="utf-8"))
+                data = json.loads(text)
                 if isinstance(data, list):
                     return [self._entry_from_disk(e) for e in data if isinstance(e, dict)]
             except Exception:
                 pass
-            # سجل تالف: لا نفقده بصمت، نحفظ نسخة للفحص ثم نبدأ سجلاً جديداً
+            # سجل تالف فعلاً: لا نفقده بصمت، نحفظ نسخة للفحص ثم نبدأ سجلاً جديداً
             try:
                 backup = self._get_unique_path(self.allowed_root / ".undo_journal.corrupt.json")
                 self.journal_path.replace(backup)
@@ -199,6 +232,10 @@ class FileManager:
         if resolved == self.journal_path:
             raise ProtectedPathError("لا يمكن استهداف ملف سجل التراجع المحمي مباشرة.")
 
+        rel_top = resolved.relative_to(self.allowed_root).parts
+        if rel_top and rel_top[0].lower().startswith(".undo_journal"):  # يشمل الملف المؤقت .tmp ونسخة التالف .corrupt
+            raise ProtectedPathError("الأسماء التي تبدأ بـ .undo_journal محجوزة لسجل التراجع.")
+
         if resolved == self.trash_dir and not allow_trash_internal:
             raise ProtectedPathError("لا يمكن استهداف مجلد سلة المحذوفات .trash مباشرة.")
 
@@ -206,6 +243,15 @@ class FileManager:
             raise ProtectedPathError("المسار يقع داخل سلة المحذوفات .trash المحمية.")
 
         return resolved
+
+    def _scan_protected(self, source: Path) -> None:
+        """نسخ/نقل/حذف مجلد أب لا يلتف على حماية .ssh/.git…: نمرّ على أسماء ما بداخله قبل أي أثر."""
+        if not source.is_dir():
+            return
+        for _cur, dirs, files in os.walk(str(source), followlinks=False):
+            for name in list(dirs) + list(files):
+                if name.lower() in _PROTECTED_NAMES or _ALIAS83.match(name):
+                    raise ProtectedPathError(f"المجلد يحوي عنصراً محمياً '{name}' فلا يُنسخ/يُنقل/يُحذف عبر المساعد.")
 
     def _get_unique_path(self, target: Path) -> Path:
         """توليد مسار فريد في حال وجود تعارض لمنع الكتابة فوق ملفات موجودة."""
@@ -244,6 +290,7 @@ class FileManager:
                     f = cur / name
                     if _is_link(f):
                         raise PathOutOfBoundsError(f"روابط رمزية داخل المجلد غير مدعومة: {f}")
+                    check_not_big_cloud_file(f)
                     shutil.copy2(str(f), str(dest / rel / name))
         except BaseException:
             if created_any and dest.exists():
@@ -297,6 +344,7 @@ class FileManager:
             destination = self.validate_path(destination / source.name)  # الوجهة مجلد موجود: ضع العنصر بداخله
         if destination == source or os.path.normcase(str(destination)) == os.path.normcase(str(source)):
             raise ValueError(f"المصدر والوجهة هما نفس المكان: {source}")
+        self._scan_protected(source)
         if source.is_dir() and (source in destination.parents or destination == source):
             raise ValueError(f"لا يمكن نقل المجلد '{source}' إلى داخل نفسه أو مجلد فرعي منه '{destination}'.")
         self._ensure_dirs(destination.parent)
@@ -327,6 +375,7 @@ class FileManager:
             raise FileNotFoundError(f"الملف المصدر غير موجود: {source}")
 
         destination = self.validate_path(dest)
+        self._scan_protected(source)
 
         # R12: منع نسخ مجلد إلى داخل نفسه أو إلى مجلد فرعي منه
         if source.is_dir():
@@ -344,7 +393,16 @@ class FileManager:
             self._copy_tree(source, final_dest)
         else:
             self._check_stop()
-            shutil.copy2(str(source), str(final_dest))
+            check_not_big_cloud_file(source)
+            try:
+                shutil.copy2(str(source), str(final_dest))
+            except BaseException:
+                if os.path.lexists(str(final_dest)):  # نسخة ناقصة يتيمة: تُنقل للسلة لا تُترك
+                    try:
+                        _safe_move(str(final_dest), str(self._get_unique_path(self.trash_dir / ("partial_" + final_dest.name))))
+                    except Exception:
+                        pass
+                raise
 
         self.journal.append({
             "task": self.current_task,
@@ -425,6 +483,7 @@ class FileManager:
         if not p.exists():
             raise FileNotFoundError(f"الملف المراد حذفه غير موجود: {p}")
 
+        self._scan_protected(p)
         if _is_link(self.trash_dir) or not self.trash_dir.is_dir():
             raise ProtectedPathError("مجلد السلة .trash لم يعد مجلداً عادياً — أوقفت الحذف حمايةً للملفات.")
         dest = self.trash_dir / p.name
@@ -475,7 +534,10 @@ class FileManager:
                     _safe_move(str(dest), str(tmp))
                     _safe_move(str(tmp), str(dest.parent / raw_src.name))
                     return "ok"
-            _safe_move(str(dest), str(self._get_unique_path(src)))  # لا كتابة فوق موجود
+            target = self._get_unique_path(src)  # لا كتابة فوق موجود
+            _safe_move(str(dest), str(target))
+            if target != src:
+                self.undo_notes.append(f"استُعيد '{src.name}' باسم '{target.name}' لأن اسمه الأصلي صار مشغولاً.")
             return "ok"
         if action == "copy":
             dest = self.validate_path(op["dest"])  # تراجع النسخ ينقل الناتج إلى السلة ولا يحذفه نهائياً (R9)
@@ -500,7 +562,10 @@ class FileManager:
             if not trash.exists():
                 return "missing"
             orig.parent.mkdir(parents=True, exist_ok=True)
-            _safe_move(str(trash), str(self._get_unique_path(orig)))
+            target = self._get_unique_path(orig)
+            _safe_move(str(trash), str(target))
+            if target != orig:
+                self.undo_notes.append(f"استُعيد '{orig.name}' باسم '{target.name}' لأن اسمه الأصلي صار مشغولاً.")
             return "ok"
         raise ValueError(f"عملية غير معروفة في السجل: {action!r}")
 

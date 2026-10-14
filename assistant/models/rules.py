@@ -167,6 +167,13 @@ def _visible(rel: str) -> bool:
     return not base.startswith(".") and base.lower() not in SYSTEM_FILES
 
 
+def _trunc_note(done: int, dropped: int):
+    """تنبيه عند اقتطاع الخطة بسبب حد الخطوات، حتى لا يظن المستخدم أن كل شيء شمله التنفيذ."""
+    if dropped <= 0:
+        return None
+    return f"اقتُصرت هذه الخطة على {done} عنصراً بسبب حد الخطوات؛ بقي {dropped} عنصراً. أعد الطلب بعد التنفيذ لإكمال الباقي."
+
+
 class Analysis:
     def __init__(self, steps=None, question=None, note=None):
         self.steps, self.question, self.note = steps, question, note
@@ -224,7 +231,10 @@ class RuleProvider(ModelProvider):
             qs = [a.question] if a.question and a.question != HELP_QUESTION else []
             return json.dumps({"questions": qs}, ensure_ascii=False)
         if a.steps:
-            return json.dumps({"steps": a.steps}, ensure_ascii=False)
+            out = {"steps": a.steps}
+            if a.note:
+                out["note"] = a.note   # مثل «اقتُصرت الخطة على 48 عنصراً»: تصل للمستخدم مع الخطة
+            return json.dumps(out, ensure_ascii=False)
         return json.dumps({"steps": [], "note": a.note or a.question or HELP_QUESTION}, ensure_ascii=False)
 
     def understands(self, prompt: str, context: List[str]) -> bool:
@@ -563,6 +573,7 @@ class RuleProvider(ModelProvider):
             return Analysis(question="يوجد ملف باسم أحد مجلدات الترتيب (مثل «صور» أو «أخرى»). غيّر اسمه أولاً.")
         existing = {r.casefold() for r in ents}
         moves, cats = [], []
+        dropped = max(0, len(files) - MAX_AUTO_STEPS)
         for f in sorted(files, key=str.lower)[:MAX_AUTO_STEPS]:
             ext = f.rsplit(".", 1)[-1].lower() if "." in f else ""
             cat = EXT_TO_CAT.get(ext, OTHER)
@@ -573,6 +584,7 @@ class RuleProvider(ModelProvider):
             moves.append((f, cat))
         while len(cats) + len(moves) > MAX_AUTO_STEPS:
             moves.pop()
+            dropped += 1
             cats = [c for c in cats if any(m[1] == c for m in moves)]
         if not moves:
             return Analysis(note="كل الملفات مرتّبة أو وجهاتها موجودة أصلاً.")
@@ -581,7 +593,7 @@ class RuleProvider(ModelProvider):
             steps.append(_step(i, "create_dir", c, "وجود المجلد")); i += 1
         for f, c in moves:
             steps.append(_step(i, "move", f, "المصدر اختفى والوجهة مطابقة", dest=f"{c}/{f}")); i += 1
-        return Analysis(steps)
+        return Analysis(steps, note=_trunc_note(len(moves), dropped))
 
     def _rename(self, prompt: str, ents: Ents) -> Analysis:
         """إعادة تسمية كل ملفات مجلد (أو مجلد العمل) بإضافة بادئة. لا يدعم اختيار ملفات بعينها: يسأل بدل أن يعمّم."""
@@ -771,7 +783,9 @@ class RuleProvider(ModelProvider):
             if key not in folders:
                 folders.append(key)
             moves.append((f, key))
+        n_before = len(moves)
         moves = moves[: max(0, MAX_AUTO_STEPS - len(folders))]
+        dropped = n_before - len(moves)
         folders = [k for k in folders if any(m[1] == k for m in moves)]
         if not moves:
             return Analysis(note="لا توجد ملفات لترتيبها حسب التاريخ في مجلد العمل.")
@@ -780,7 +794,7 @@ class RuleProvider(ModelProvider):
             steps.append(_step(i, "create_dir", k, "وجود المجلد")); i += 1
         for f, k in moves:
             steps.append(_step(i, "move", f, "المصدر اختفى والوجهة مطابقة", dest=f"{k}/{f}")); i += 1
-        return Analysis(steps)
+        return Analysis(steps, note=_trunc_note(len(moves), dropped))
 
     def _duplicates(self, delete: bool, ents: Ents) -> Analysis:
         """يكشف الملفات المكررة بمحتواها (حجم ثم SHA-256) ويُبقي نسخة واحدة (الأقصر مساراً ثم الأقل عمقاً أصلاً)؛
@@ -888,7 +902,8 @@ class RuleProvider(ModelProvider):
             return Analysis(question=res.ask)
         if not res.items:
             return Analysis([_step(1, "inspect", ".", "العنصر موجود فعلاً")])
-        return Analysis([_step(i, "inspect", t, "العنصر موجود فعلاً") for i, t in enumerate(res.items[:MAX_AUTO_STEPS], 1)])
+        return Analysis([_step(i, "inspect", t, "العنصر موجود فعلاً") for i, t in enumerate(res.items[:MAX_AUTO_STEPS], 1)],
+                        note=_trunc_note(min(len(res.items), MAX_AUTO_STEPS), max(0, len(res.items) - MAX_AUTO_STEPS)))
 
 
 class RuleFirstProvider(ModelProvider):

@@ -35,7 +35,7 @@ def build_provider(env: Optional[Mapping[str, str]] = None, **provider_kw) -> Tu
     small_m = env.get("COS_SMALL_MODEL") or DEFAULTS[kind][0]
     large_m = env.get("COS_LARGE_MODEL") or DEFAULTS[kind][1]
     cls = AnthropicProvider if kind == "anthropic" else GeminiProvider
-    key = next((env[k] for k in cls.ENV_KEYS if env.get(k)), "")
+    key = next((env[k] for k in cls.ENV_KEYS if env.get(k, "").strip()), "").strip()
     small = cls(model=small_m, api_key=key, **provider_kw)
     large = cls(model=large_m, api_key=key, **provider_kw) if large_m != small_m else small
     # يتحقق من وجود المفتاح الآن لا عند أول مهمة
