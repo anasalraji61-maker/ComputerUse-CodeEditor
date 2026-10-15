@@ -1,6 +1,6 @@
 # البرومت الأول لـ Google AI Studio (Build mode)
 
-انسخ النص التالي كاملاً في أول رسالة. قبلها: من Settings → GitHub اربط المستودع `anasalraji61-maker/ComputerUse-CodeEditor` (ربط واحد فقط).
+انسخ النص التالي كاملاً في أول رسالة. قبلها: من Settings → GitHub اربط المستودع `anasalraji61-maker/ComputerUse-CodeEditor` (ربط واحد فقط). ملاحظة تسمية: هذا هو اسم المستودع على GitHub (كما في `git remote` والـREADME)؛ وفي مشروع Claude يُسمّى العمل «WindowsComputerUse» و«COS Automation Lab»، وهما الشيء نفسه — استعمل `ComputerUse-CodeEditor` دائماً عند الربط.
 
 ---
 

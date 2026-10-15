@@ -1,12 +1,20 @@
 """وحدة المخطّط (Planner) — تحويل طلب المستخدم إلى خطوات عمل محققة الصحة بشروط قبول مقيسة."""
 import json
 from dataclasses import dataclass, field
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from assistant.models.base import ModelProvider, CONTEXT_MARKER
 from assistant.safety import ACTION_LEVELS
-from assistant.tools.files import is_unc_like
+from assistant.tools.files import is_unc_like, name_problem, name_len, MAX_NAME_UNITS
 
-MAX_PLAN_STEPS = 50
+MAX_PLAN_STEPS = 200
+MAX_RESPONSE_CHARS = 1_000_000  # رد النموذج الخام الأكبر من ~1MB يُرفض قبل أي تحليل (حماية الذاكرة/المعالج)
+MAX_TARGET_CHARS = 260
+MAX_DEST_CHARS = 260
+MAX_CMD_ARG_CHARS = 120
+MAX_CMD_ARGS = 16
+MAX_CRITERIA_CHARS = 300
+MAX_DISPLAY_MARKS = 2  # علامات دمج متتالية في النص المعروض (ملاحظات النموذج…)
+MAX_HASH_CHARS = 128
 # محارف تبدو فراغاً لكنها ليست فراغاً عادياً (Hangul filler، braille blank، mongolian vowel separator…)
 _INVISIBLE_FILLERS = {"\u3164", "\u2800", "\u115f", "\u1160", "\uffa0", "\u180e", "\u034f", "\u17b4", "\u17b5"}
 
@@ -32,6 +40,8 @@ class PlanStep:
 
 
 def _extract_json(text: str) -> Any:
+    if isinstance(text, str) and len(text) > MAX_RESPONSE_CHARS:
+        raise PlanParseError(f"رد النموذج كبير جداً ({len(text)} محرفاً > {MAX_RESPONSE_CHARS}).")
     cleaned = (text or "").strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else ""
@@ -41,30 +51,45 @@ def _extract_json(text: str) -> Any:
         return json.loads(cleaned.strip())
     except (ValueError, TypeError) as exc:
         raise PlanParseError(f"رد النموذج ليس JSON صالحاً: {exc}")
+    except (RecursionError, MemoryError):
+        raise PlanParseError("رد النموذج متداخل بعمق مفرط أو كبير جداً؛ مرفوض.")
 
 
 def _clean_text(value: str, what: str, step_id) -> None:
-    """يرفض محارف التحكم والاتجاه (U+202E…) التي تخدع المستخدم في عرض الأسماء."""
+    """يرفض محارف التحكم والاتجاه (U+202E…) التي تخدع المستخدم في عرض الأسماء. الأسماء والمسارات (target/dest/new_name) تمرّ
+    على الفحص الموحّد name_problem (نفسه الذي تستعمله قائمة المجلد والقواعد)، والباقي (cmd…) بفحص أصرم."""
     import unicodedata
-    for ch in value:
-        if (unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp") or not ch.isprintable()
-                or ch in _INVISIBLE_FILLERS or (unicodedata.category(ch) == "Zs" and ch != " ")):
-            raise PlanParseError(f"الخطوة {step_id}: {what} يحوي محرفاً غير مرئي/تحكمياً (U+{ord(ch):04X}).")
+    if what in ("target", "params.dest", "params.new_name"):
+        why = name_problem(value)
+        if why:
+            raise PlanParseError(f"الخطوة {step_id}: {what} غير مقبول: {why}.")
+    else:
+        for ch in value:
+            if (unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp") or not ch.isprintable()
+                    or ch in _INVISIBLE_FILLERS or (unicodedata.category(ch) == "Zs" and ch != " ")):
+                raise PlanParseError(f"الخطوة {step_id}: {what} يحوي محرفاً غير مرئي/تحكمياً (U+{ord(ch):04X}).")
     if what in ("target", "params.dest") and is_unc_like(value):
         raise PlanParseError(f"الخطوة {step_id}: {what} مسار شبكي/جهاز غير مسموح.")
 
 
 def sanitize_display(value: Any, limit: int = 400) -> str:
-    """ينظّف نصاً كتبه النموذج قبل عرضه: بلا محارف تحكم/اتجاه/فراغ خفي، أسطر مدمجة، وطول محدود."""
+    """ينظّف نصاً كتبه النموذج قبل عرضه: بلا محارف تحكم/اتجاه/فراغ خفي/محددات شكل، حركات دمج محدودة، أسطر مدمجة، وطول محدود."""
     import unicodedata
     out = []
-    for ch in str(value if value is not None else ""):
+    run = 0
+    for ch in str(value if value is not None else "")[: max(0, limit) * 4 + 64]:  # لا نعالج نصاً ضخماً كله
         cat = unicodedata.category(ch)
         if ch in "\n\r\t" or ch in _INVISIBLE_FILLERS or cat in ("Zl", "Zp") or (cat == "Zs" and ch != " "):
             out.append(" ")
-        elif cat in ("Cc", "Cf", "Cs", "Co", "Cn") or not ch.isprintable():
+            run = 0
+        elif cat in ("Cc", "Cf", "Cs", "Co", "Cn") or not ch.isprintable() or 0xFE00 <= ord(ch) <= 0xFE0F or 0xE0100 <= ord(ch) <= 0xE01EF:
             continue
+        elif cat in ("Mn", "Me"):
+            run += 1
+            if run <= MAX_DISPLAY_MARKS and out and out[-1] != " ":
+                out.append(ch)
         else:
+            run = 0
             out.append(ch)
     text = " ".join("".join(out).split())
     return text[:limit] + ("…" if len(text) > limit else "")
@@ -86,6 +111,8 @@ def _check_path_segments(value: str, label: str, step_id: Any, allow_lone_dot: b
     if allow_lone_dot and v.strip() in (".", "./"):
         return
     for seg in v.split("/"):
+        if name_len(seg) > MAX_NAME_UNITS:
+            raise PlanParseError(f"الخطوة {step_id}: {label} فيه اسم أطول من {MAX_NAME_UNITS} (وحدة اسم نظام الملفات).")
         if seg.strip() in ("..", "."):
             raise PlanParseError(f"الخطوة {step_id}: {label} يحوي مقطع '{seg.strip()}' غير مسموح؛ استخدم مساراً صريحاً داخل مجلد العمل.")
 
@@ -116,6 +143,19 @@ def validate_step(item: Any, index: int) -> PlanStep:
         cmd = params.get("cmd", [target])
         if not isinstance(cmd, list) or not cmd or not all(isinstance(c, str) for c in cmd):
             raise PlanParseError(f"الخطوة {raw_id}: params.cmd يجب أن تكون قائمة نصوص غير فارغة.")
+    if len(target) > MAX_TARGET_CHARS:
+        raise PlanParseError(f"الخطوة {raw_id}: الهدف أطول من {MAX_TARGET_CHARS} محرفاً.")
+    for k, cap in (("dest", MAX_DEST_CHARS), ("expected_hash", MAX_HASH_CHARS)):
+        v = params.get(k)
+        if isinstance(v, str) and len(v) > cap:
+            raise PlanParseError(f"الخطوة {raw_id}: params.{k} أطول من {cap} محرفاً.")
+    nn0 = params.get("new_name")
+    if isinstance(nn0, str) and (len(nn0) > MAX_NAME_UNITS or name_len(nn0) > MAX_NAME_UNITS):
+        raise PlanParseError(f"الخطوة {raw_id}: params.new_name أطول من {MAX_NAME_UNITS} (وحدة اسم نظام الملفات).")
+    if action == "run_command":
+        cmd0 = params.get("cmd", [target])
+        if isinstance(cmd0, list) and (len(cmd0) > MAX_CMD_ARGS or any(len(c) > MAX_CMD_ARG_CHARS for c in cmd0 if isinstance(c, str))):
+            raise PlanParseError(f"الخطوة {raw_id}: params.cmd طويلة جداً (أقصى {MAX_CMD_ARGS} وسيطاً، {MAX_CMD_ARG_CHARS} محرفاً لكل وسيط).")
     if target != target.strip():
         raise PlanParseError(f"الخطوة {raw_id}: الهدف يبدأ أو ينتهي بمسافة؛ لا أستطيع استهدافه بأمان.")
     _clean_text(target, "target", raw_id)
@@ -138,13 +178,15 @@ def validate_step(item: Any, index: int) -> PlanStep:
     nn = clean_params.get("new_name")
     if nn is not None and (any(sep in nn for sep in "/\\") or nn.strip() in (".", "..") or nn != nn.strip()):
         raise PlanParseError(f"الخطوة {raw_id}: params.new_name اسم فقط بلا مسار ولا فراغ طرفي.")
-    crit = item.get("acceptance_criteria", "تحقق الحالة الفعلية")
+    crit = sanitize_display(item.get("acceptance_criteria", "تحقق الحالة الفعلية"), MAX_CRITERIA_CHARS)
+    if not crit:
+        crit = "تحقق الحالة الفعلية"
     return PlanStep(
         step_id=raw_id,
         action_type=action,
         target=target.strip(),
         params=clean_params,
-        acceptance_criteria=str(crit),
+        acceptance_criteria=crit,
     )
 
 
@@ -165,8 +207,19 @@ PLANNER_SYSTEM = """أنت مخطط مهام سطح المكتب. أعد JSON ف
 def _check_order(steps: List[PlanStep]) -> None:
     """خطوة تلي نقل/حذف/إعادة تسمية عنصر وتستهدفه (أو ما بداخله) ستفشل في منتصف التنفيذ بعد تغييرات سابقة: نرفضها قبل البدء."""
     gone: List[str] = []
+    seen_copies: Dict[tuple, int] = {}   # (مصدر، وجهة) -> مرات النسخ منذ آخر نقل/حذف/إعادة تسمية يمسّ الوجهة أو المصدر
     for st in steps:
         t = _norm_rel(st.target)
+        d = _norm_rel(str(st.params.get("dest", ""))) if st.action_type in ("copy", "move") else ""
+        if st.action_type == "copy":
+            key = (t, d)
+            if key in seen_copies:
+                raise PlanParseError(f"الخطوة {st.step_id}: نسخة مكررة مطابقة (نفس المصدر والوجهة) لخطوة سابقة ('{st.target}' ← '{st.params.get('dest')}').")
+            seen_copies[key] = 1
+        if st.action_type in ("move", "rename", "delete", "trash"):
+            # ما يُنقل/يُحذف يفتح الباب لنسخ لاحق مشروع بالمسار نفسه (نسخ ← حذف الوجهة ← نسخ من جديد)
+            for key in [k for k in seen_copies if any(x == t or x.startswith(t + "/") or t.startswith(x + "/") for x in key)]:
+                seen_copies.pop(key, None)
         if st.action_type in ("move", "copy", "rename", "delete", "trash", "inspect"):
             for g in gone:
                 if t == g or t.startswith(g + "/"):
@@ -183,24 +236,31 @@ class Planner:
         self.max_steps = max_steps
         self.last_note = None  # ملاحظة النموذج/القواعد المرافقة لآخر خطة (مثل تنبيه الاقتطاع)
 
-    def plan(self, user_prompt: str, context: str = "") -> List[PlanStep]:
-        """توليد الخطة؛ context = قائمة محتويات مجلد العمل تُضاف لمطالبة النظام. أي رد غير صالح يرفع PlanParseError."""
+    def plan_with_note(self, user_prompt: str, context: str = "") -> "tuple[List[PlanStep], Optional[str]]":
+        """توليد الخطة وملاحظتها معاً بشكل ذرّي (لا حالة مشتركة قابلة للتبديل بين طلبين متزامنين).
+        context = قائمة محتويات مجلد العمل تُضاف لمطالبة النظام. أي رد غير صالح يرفع PlanParseError."""
         system_prompt = PLANNER_SYSTEM
         if context:
             system_prompt += "\n\n" + CONTEXT_MARKER + "\n" + context
         data = _extract_json(self.provider.generate(user_prompt, system_prompt=system_prompt))
-        self.last_note = None
         raw_steps = data.get("steps") if isinstance(data, dict) else data
         if not isinstance(raw_steps, list) or not raw_steps:
             note = data.get("note") if isinstance(data, dict) else None
-            raise PlanParseError(str(note) if note else "الخطة فارغة أو لا تحتوي قائمة steps.")
+            raise PlanParseError(sanitize_display(note, 300) if note else "الخطة فارغة أو لا تحتوي قائمة steps.")
         if len(raw_steps) > self.max_steps:
             raise PlanParseError(f"عدد الخطوات {len(raw_steps)} يتجاوز الحد الأقصى {self.max_steps}.")
         steps = [validate_step(item, i) for i, item in enumerate(raw_steps, 1)]
         note = data.get("note") if isinstance(data, dict) else None
-        self.last_note = sanitize_display(note, 300) if isinstance(note, str) and note.strip() else None
+        clean_note = sanitize_display(note, 300) if isinstance(note, str) and note.strip() else None
         ids = [s.step_id for s in steps]
         if len(set(ids)) != len(ids):
             raise PlanParseError("أرقام الخطوات (step_id) مكررة.")
         _check_order(steps)
+        return steps, clean_note
+
+    def plan(self, user_prompt: str, context: str = "") -> List[PlanStep]:
+        """غلاف توافق: يعيد الخطوات فقط ويضع الملاحظة في last_note (مشتركة وغير ذرّية — يُفضَّل plan_with_note)."""
+        self.last_note = None
+        steps, note = self.plan_with_note(user_prompt, context)
+        self.last_note = note
         return steps

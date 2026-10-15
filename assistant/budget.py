@@ -7,6 +7,16 @@ class BudgetExceededError(Exception):
     pass
 
 
+class InvalidChargeError(BudgetExceededError, ValueError):
+    """قيمة خصم غير صالحة (NaN/لانهاية/سالبة/غير عددية): تُرفض بدل أن تُنقص العدّاد أو تتجاوز الفحص."""
+
+
+def _check_amount(name: str, value) -> None:
+    import math
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise InvalidChargeError(f"قيمة {name} غير صالحة ({value!r}): يجب أن تكون عدداً محدوداً غير سالب.")
+
+
 class BudgetTracker:
     """إدارة ومراقبة استهلاك الموارد لمنع الحلقات اللانهائية والهدر."""
 
@@ -28,7 +38,9 @@ class BudgetTracker:
         self.current_points = 0
 
     def charge(self, steps: int = 1, tokens: int = 0, retries: int = 0, points: int = 0):
-        """خصم الموارد وفحص السقوف؛ يرفع BudgetExceededError فوراً عند التجاوز."""
+        """خصم الموارد وفحص السقوف؛ يرفع BudgetExceededError فوراً عند التجاوز، وInvalidChargeError لقيمة NaN/سالبة."""
+        for name, v in (("الخطوات", steps), ("التوكنات", tokens), ("المحاولات", retries), ("النقاط", points)):
+            _check_amount(name, v)
         if self.current_steps + steps > self.max_steps:
             raise BudgetExceededError(
                 f"تم تجاوز سقف الخطوات ({self.current_steps + steps} > {self.max_steps})."

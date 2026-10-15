@@ -48,16 +48,17 @@ class ExecutionReport:
     def render_arabic_text(self) -> str:
         """توليد النص النهائي للتقرير باللغة العربية الفصحى."""
         status_text = "تم بنجاح" if self.success else "فشل"
+        _one = lambda v: " ".join(str(v).split())   # سطر واحد: يمنع تزوير أقسام التقرير عبر أسطر جديدة في الأسماء
         lines = [
             f"# تقرير المهمة: {status_text}",
-            f"- معرف المهمة: {self.task_id}",
-            f"- المطلوب: {self.objective}",
+            f"- معرف المهمة: {_one(self.task_id)}",
+            f"- المطلوب: {_one(self.objective)}",
             "",
             "## ما نُفّذ:",
         ]
         if self.executed_steps:
             for i, step in enumerate(self.executed_steps, 1):
-                lines.append(f"{i}. {step}")
+                lines.append(f"{i}. {_one(step)}")
         else:
             lines.append("- لم تُنفّذ أي خطوات.")
 
@@ -65,9 +66,9 @@ class ExecutionReport:
         lines.append("## الأدلة القاطعة:")
         if self.evidence:
             for ev in self.evidence:
-                item_desc = ev.get("item", "عنصر")
-                proof_type = ev.get("type", "تحقق")
-                proof_val = ev.get("value", "مطابق")
+                item_desc = _one(ev.get("item", "عنصر"))
+                proof_type = _one(ev.get("type", "تحقق"))
+                proof_val = _one(ev.get("value", "مطابق"))
                 lines.append(f"- [{proof_type}] {item_desc}: {proof_val}")
         else:
             lines.append("- لا تتوفر أدلة مسجلة.")
@@ -76,7 +77,7 @@ class ExecutionReport:
         lines.append("## ما فشل:")
         if self.failures:
             for fail in self.failures:
-                lines.append(f"- ⚠️ {fail}")
+                lines.append(f"- ⚠️ {_one(fail)}")
         else:
             lines.append("- لا يوجد أي فشل.")
 
@@ -84,13 +85,13 @@ class ExecutionReport:
             lines.append("")
             lines.append("## ما تُخطّي بقرارك:")
             for item in self.skipped:
-                lines.append(f"- {item}")
+                lines.append(f"- {_one(item)}")
 
         if self.approvals:
             lines.append("")
             lines.append("## قرارات الموافقة:")
             for a in self.approvals:
-                lines.append(f"- {a}")
+                lines.append(f"- {_one(a)}")
 
         lines.append("")
         lines.append(f"## الكلفة بالنقاط: {self.points_charged} نقطة.")
@@ -98,7 +99,7 @@ class ExecutionReport:
         lines.append("")
         lines.append("## طريقة التراجع:")
         if self.undo_available:
-            lines.append("- اضغط زر «تراجع» في النافذة للتراجع عن هذه المهمة (يتراجع عن آخر مهمة فقط).")
+            lines.append("- اضغط زر «تراجع» في النافذة للتراجع عن هذه المهمة (إن ضغطت مرة أخرى يتراجع عن المهمة التي قبلها).")
             if self.undo_journal_path:
                 lines.append(f"- سجل التراجع موثق في الملف: {self.undo_journal_path}")
         else:

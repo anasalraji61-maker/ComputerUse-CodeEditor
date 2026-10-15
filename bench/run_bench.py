@@ -2,7 +2,9 @@
 
 التشغيل اليدوي (يستهلك رصيد API فعلياً):
     set ANTHROPIC_API_KEY=...        (أو GEMINI_API_KEY)
-    python -m bench.run_bench --provider anthropic --runs 5 --max-usd 1.0
+    python -m bench.run_bench --provider anthropic            (الافتراضي: 20 دورة = بوابة SPEC، والسقف يُحسب من التقدير)
+    python -m bench.run_bench --provider gemini --runs 5 --max-usd 1.0
+يطبع تقدير الكلفة والسقف قبل البدء ويطلب تأكيداً (أو --yes).
 
 أمان: winget يُحاكى دائماً (لا تحديث حقيقي لأي برنامج)، وكل مهمة في مجلد مؤقت معزول، ولا ذاكرة مؤقتة (cache)
 حتى لا تُقاس نتيجة مخزّنة، ويتوقف القياس عند بلوغ --max-usd.
@@ -129,6 +131,25 @@ TASKS: List[BenchTask] = [
 ]
 
 
+DEFAULT_RUNS = 20          # بوابة SPEC: 20 دورة لكل مهمة
+# تقدير متحفظ لنداءات المهمة الواحدة: نداء توضيح صغير + نداء تخطيط كبير (توكنات إدخال/إخراج)
+_EST_SMALL = (3000, 300)
+_EST_LARGE = (6000, 1200)
+
+
+def estimate_cost(provider: str, runs: int, env: Optional[Dict[str, str]] = None) -> Dict[str, float]:
+    """تقدير كلفة القياس بالدولار من أسعار النماذج الافتراضية (أو COS_SMALL_MODEL/COS_LARGE_MODEL): per_task وtotal وcap المقترح."""
+    from assistant.models.factory import DEFAULTS
+    from assistant.models.pricing import cost_usd
+    env = env or {}
+    small = env.get("COS_SMALL_MODEL") or DEFAULTS[provider][0]
+    large = env.get("COS_LARGE_MODEL") or DEFAULTS[provider][1]
+    per_task = cost_usd(small, *_EST_SMALL) + cost_usd(large, *_EST_LARGE)
+    total = per_task * len(TASKS) * max(0, runs)
+    cap = max(1.0, math.ceil(total * 2 * 2) / 2)   # ضعف التقدير مقرَّباً لأعلى نصف دولار، بحد أدنى 1$
+    return {"per_task": per_task, "total": total, "cap": cap}
+
+
 def _scrub(text: str, tmp: str) -> str:
     """يحذف المسارات المحلية (المؤقتة ومجلد المستخدم) من نص يُكتب في تقرير يُرفع إلى مستودع عام."""
     for real, shown in ((str(pathlib.Path(tmp).resolve()), "<tmp>"), (str(pathlib.Path(tmp)), "<tmp>"),
@@ -233,8 +254,9 @@ def render_markdown(res: Dict[str, Any]) -> str:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="قياس المهام الخمس بمزوّد حقيقي")
     ap.add_argument("--provider", choices=["anthropic", "gemini"], required=True)
-    ap.add_argument("--runs", type=int, default=5)
-    ap.add_argument("--max-usd", type=float, default=1.0)
+    ap.add_argument("--runs", type=int, default=DEFAULT_RUNS, help="دورات لكل مهمة (الافتراضي 20 = بوابة SPEC)")
+    ap.add_argument("--max-usd", type=float, default=None, help="سقف الإنفاق؛ الافتراضي ضعف التقدير (حد أدنى 1$)")
+    ap.add_argument("--yes", action="store_true", help="تأكيد صريح بإنفاق الرصيد بلا سؤال تفاعلي")
     ap.add_argument("--ask-key", action="store_true", help="اطلب المفتاح بإدخال مخفي (لا يُعرض ولا يُحفظ)")
     ap.add_argument("--with-rules", action="store_true", help="قياس الوضع المختلط (القواعد أولاً) بدل النموذج وحده")
     ap.add_argument("--out", default=str(ROOT / "docs" / "MEASUREMENT.md"))
@@ -259,8 +281,19 @@ def main(argv=None) -> int:
         provider = provider.fallback  # نقيس النموذج وحده لا القواعد المحلية
     provider.cache_size = 0  # لا ذاكرة مؤقتة أثناء القياس
     print(note)
-    print(f"سيُشغَّل القياس: {args.runs} دورات × 5 مهام، بسقف إنفاق {args.max_usd}$.")
-    res = run_bench(provider, runs=args.runs, max_usd=args.max_usd, progress=print)
+    est = estimate_cost(args.provider, args.runs, env)
+    max_usd = args.max_usd if args.max_usd is not None else est["cap"]
+    print(f"سيُشغَّل القياس: {args.runs} دورات × {len(TASKS)} مهام بنموذج حقيقي.")
+    print(f"التقدير: ~{est['per_task']:.4f}$ للمهمة الواحدة، ~{est['total']:.2f}$ للقياس كله؛ سقف الإنفاق {max_usd:.2f}$ (يتوقف عنده).")
+    print("هذا يستهلك رصيد API حقيقياً.")
+    if not args.yes:
+        if not sys.stdin or not sys.stdin.isatty():
+            print("لم يُؤكَّد الإنفاق: أضف --yes للتشغيل بلا تفاعل.", file=sys.stderr)
+            return 3
+        if input("اكتب y للمتابعة وإنفاق الرصيد (أي شيء آخر يلغي): ").strip().lower() not in ("y", "yes", "ن", "نعم"):
+            print("أُلغي القياس ولم يُنفق شيء.")
+            return 3
+    res = run_bench(provider, runs=args.runs, max_usd=max_usd, progress=print)
     out = pathlib.Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(render_markdown(res), encoding="utf-8")

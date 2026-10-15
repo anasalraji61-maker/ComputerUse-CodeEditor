@@ -163,7 +163,9 @@ try:
     # 10. اسم طويل جداً: اسم بديل (1) ونسخة ناقصة في السلة لا يتجاوزان حد النظام
     with tempfile.TemporaryDirectory() as tmp:
         ws = pathlib.Path(tmp).resolve()
-        long_name = "L" * 250 + ".t"
+        # على ويندوز يحدّ المسار الكلي (259) فنقيس الاسم بحيث يبقى المسار كله (مع « (1)» والمؤقت) تحت 240
+        near_limit = os.name != "nt" and not os.environ.get("WINSIM_LOG") and not __import__("assistant.tools.files", fromlist=["x"]).IS_WINDOWS   # محاكي ويندوز يحدّ المسار الكلي بـ259 أيضاً
+        long_name = "L" * (250 if near_limit else max(20, 215 - len(str(ws)))) + ".t"
         (ws / long_name).write_text("x", encoding="utf-8")
         fm = FileManager(ws)
         dest = fm.copy(long_name, long_name)

@@ -1,6 +1,8 @@
 """دفتر النقاط المحلي (Ledger) عبر SQLite — رصيد محلي وتقدير الكلفة وسقف الإنفاق."""
+import os
 import re
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -34,7 +36,103 @@ class SQLiteLedger:
     ):
         self.db_path = Path(db_path).resolve()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_db(initial_balance, spending_limit)
+        # تتحقق الواجهة منها بعد الإنشاء: ملف تالف/فارغ لا يمنع التشغيل، بل يُعزل ويُنشأ دفتر جديد مع تنبيه ظاهر
+        self.recovered_from_corruption = False
+        self.recovery_message = ""
+        self.quarantined_path: Optional[Path] = None
+        self.reconciled_stuck = 0
+        try:
+            st = self.db_path.stat() if self.db_path.exists() else None
+            # صفري البايت وأقدم من بضع ثوانٍ فقط: ملف حديث الإنشاء قد يكون لمُشغِّل متزامن يهيّئه الآن
+            empty = st is not None and st.st_size == 0 and (time.time() - st.st_mtime) > self.FRESH_FILE_SEC
+        except OSError:
+            empty = False
+        if empty:  # ملف صفري البايت (انقطاع أثناء الإنشاء/تفريغ): لا إعادة ضبط صامتة للرصيد
+            self._mark_recovered("ملف دفتر النقاط كان فارغاً (0 بايت) فأُنشئ دفتر جديد برصيده الافتراضي.")
+        for attempt in range(6):
+            try:
+                self._init_db(initial_balance, spending_limit)
+                self._integrity_check()
+                break
+            except sqlite3.DatabaseError as exc:
+                if isinstance(exc, sqlite3.OperationalError) and not self._looks_corrupt(exc):
+                    raise   # قفل/صلاحيات/قرص ممتلئ: ليست تلفاً، لا نعزل شيئاً
+                if attempt < 5 and self._is_fresh():
+                    time.sleep(0.5)   # ملف حديث (مُشغِّل آخر يهيّئه الآن): نمهله ونعيد قبل أن نحكم بتلفه
+                    continue
+                self._quarantine(exc)
+                self._init_db(initial_balance, spending_limit)
+                break
+        self._reconcile_stuck()
+
+    FRESH_FILE_SEC = 5.0
+
+    def _is_fresh(self) -> bool:
+        try:
+            return (time.time() - self.db_path.stat().st_mtime) <= self.FRESH_FILE_SEC
+        except OSError:
+            return False
+
+    @staticmethod
+    def _looks_corrupt(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return any(k in msg for k in ("malformed", "not a database", "corrupt", "disk image"))
+
+    def _mark_recovered(self, msg: str) -> None:
+        self.recovered_from_corruption = True
+        self.recovery_message = (self.recovery_message + " " + msg).strip()
+
+    def _integrity_check(self) -> None:
+        with self._get_connection() as conn:
+            row = conn.execute("PRAGMA quick_check(1)").fetchone()
+            if row is not None and str(row[0]).lower() != "ok":
+                raise sqlite3.DatabaseError("database disk image is malformed (quick_check)")
+
+    def _quarantine(self, exc: Exception) -> None:
+        """يعزل الملف التالف (مع ملفات -wal/-shm) إلى ledger.db.corrupt.<ts> ليُنشأ دفتر جديد."""
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        dest = self.db_path.with_name(f"{self.db_path.name}.corrupt.{ts}")
+        n = 0
+        while dest.exists() and n < 100:
+            n += 1
+            dest = self.db_path.with_name(f"{self.db_path.name}.corrupt.{ts}.{n}")
+        moved = False
+        try:
+            os.replace(str(self.db_path), str(dest))
+            moved = True
+            self.quarantined_path = dest
+        except OSError:
+            pass
+        for suffix in ("-wal", "-shm", "-journal"):
+            side = self.db_path.with_name(self.db_path.name + suffix)
+            try:
+                if side.exists():
+                    if moved:
+                        os.replace(str(side), str(dest.with_name(dest.name + suffix)))
+                    else:
+                        side.unlink()
+            except OSError:
+                pass
+        if not moved:
+            try:
+                self.db_path.unlink()   # لا نقدر على الأرشفة: نفضّل البدء من جديد على عدم التشغيل
+            except OSError:
+                raise exc
+        self._mark_recovered("ملف دفتر النقاط كان تالفاً"
+                             + (f" وحُفظ للفحص باسم {dest.name}" if moved else "")
+                             + "؛ أُنشئ دفتر جديد برصيده الافتراضي (قد تختلف نقاطك عن السابق).")
+
+    def _reconcile_stuck(self) -> None:
+        """مهمة بقيت STARTED أكثر من ساعة (أُغلق التطبيق/انهار أثناءها) تُغلق FAILED بلا خصم، فلا تبقى معلّقة في السجل."""
+        try:
+            with self._get_connection(immediate=True) as conn:
+                cur = conn.execute(
+                    "UPDATE transactions SET status = 'FAILED', charged_points = 0, "
+                    "reason = 'انقطعت المهمة قبل اكتمالها (أُغلق التطبيق أو انهار) - لا خصم' "
+                    "WHERE status = 'STARTED' AND created_at < datetime('now', '-1 hour')")
+                self.reconciled_stuck = cur.rowcount or 0
+        except sqlite3.Error:
+            pass
 
     @contextmanager
     def _get_connection(self, immediate: bool = False):
@@ -67,6 +165,33 @@ class SQLiteLedger:
                          (points, points if raise_limit else 0))
             conn.execute("INSERT INTO transactions (task_id, task_type, estimated_points, charged_points, status, reason) "
                          "VALUES ('topup', 'TOPUP', 0, ?, 'TOPUP', ?)", (-points, reason))
+
+    # ---- مرحلة التجربة: شحن تلقائي صغير بدل أن يتوقف التطبيق للأبد ----
+    TRIAL_MIN_POINTS = 20
+    TRIAL_TOPUP_POINTS = 100
+
+    @staticmethod
+    def trial_phase_enabled() -> bool:
+        """علم مرحلة التجربة: مفعّل افتراضياً؛ COS_TRIAL_TOPUP=0 يعطّله (عند الانتقال إلى رصيد حقيقي)."""
+        return os.environ.get("COS_TRIAL_TOPUP", "1").strip().lower() not in ("0", "false", "no", "off")
+
+    def ensure_trial_balance(self, min_points: int = TRIAL_MIN_POINTS, topup_points: int = TRIAL_TOPUP_POINTS) -> bool:
+        """إن نزل الرصيد دون min_points يشحن topup_points (ويرفع سقف نقاط الدفتر بالقدر نفسه) في معاملة واحدة ذرّية، ويعيد True إن شحن.
+        نفس منطق بدء التشغيل؛ يستدعيه المتحكم قبل فحص القدرة على الدفع. مسجَّل كمعاملة TOPUP.
+        ملاحظة: هذا رصيد نقاط محلي تجريبي لا مال؛ سقف الإنفاق الحقيقي بالدولار على النماذج المدفوعة يبقى في UsageMeter (usage.py)
+        ولا يتأثر بهذا الشحن."""
+        if not self.trial_phase_enabled():
+            return False
+        min_points, topup_points = _points(min_points, "الحد الأدنى"), _points(topup_points, "مقدار الشحن")
+        with self._get_connection(immediate=True) as conn:
+            row = conn.execute("SELECT balance FROM account WHERE id = 1").fetchone()
+            if row is None or int(row["balance"]) >= min_points or topup_points == 0:
+                return False
+            conn.execute("UPDATE account SET balance = balance + ?, spending_limit = spending_limit + ? WHERE id = 1",
+                         (topup_points, topup_points))
+            conn.execute("INSERT INTO transactions (task_id, task_type, estimated_points, charged_points, status, reason) "
+                         "VALUES ('topup', 'TOPUP', 0, ?, 'TOPUP', 'شحن تجريبي تلقائي')", (-topup_points,))
+            return True
 
     def _init_db(self, initial_balance: int, spending_limit: int):
         with self._get_connection() as conn:
@@ -120,9 +245,34 @@ class SQLiteLedger:
             ).fetchall()
             return [dict(r) for r in rows]
 
-    @staticmethod
-    def estimate_cost(task_type: str, steps_count: int = 1) -> int:
-        """تقدير كلفة المهمة قبل التنفيذ: نقطة واحدة لكل ~8 خطوات نصية."""
+    # إجراءات قراءة فقط/عديمة الأثر عند تكرارها بنفس الوسائط: لا يجوز تضخيم الكلفة بحشوها
+    _IDEMPOTENT_ACTIONS = ("inspect", "create_dir")
+
+    @classmethod
+    def effective_step_count(cls, steps) -> int:
+        """عدد الخطوات المحسوبة: كل خطوة قراءة/إنشاء-مجلد متطابقة (الإجراء، الهدف، الوسائط) تُحسب مرة واحدة. غيرها تُحسب كلها."""
+        seen = set()
+        n = 0
+        for st in steps or ():
+            get = (lambda k, d=None: st.get(k, d)) if isinstance(st, dict) else (lambda k, d=None: getattr(st, k, d))
+            action = str(get("action_type", "") or "").strip().lower()
+            if action in cls._IDEMPOTENT_ACTIONS:
+                try:
+                    key = (action, str(get("target", "")).strip().casefold(), repr(sorted((get("params") or {}).items())))
+                except Exception:
+                    key = (action, repr(get("target")), repr(get("params")))
+                if key in seen:
+                    continue
+                seen.add(key)
+            n += 1
+        return n
+
+    @classmethod
+    def estimate_cost(cls, task_type: str, steps_count: int = 1, steps=None) -> int:
+        """تقدير كلفة المهمة قبل التنفيذ: نقطة واحدة لكل ~8 خطوات نصية.
+        إن مُرّرت steps (قائمة خطوات) فخطوات القراءة/عديمة الأثر المتطابقة تُحسب مرة واحدة (لا حشو لرفع الكلفة)."""
+        if steps is not None:
+            steps_count = cls.effective_step_count(steps)
         words = " ".join(t for t in task_type[:4000].lower().split() if not any(c in t for c in "./\\"))  # أسماء الملفات (screen.png) ليست طلب شاشة
         if re.search(r"\bscreen\b", words):
             return 5

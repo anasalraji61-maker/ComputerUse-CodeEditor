@@ -92,12 +92,13 @@ try:
         src = inspect.getsource(AssistantController.respond_approval)
         assert "with self._lock" in src
 
-        # 7. عدّاد الاستهلاك يفشل مغلقاً عند ملف تالف
+        # 7. عدّاد الاستهلاك: ملف تالف يُعزل ويبدأ من جديد (B35)
         m = UsageMeter(base / "u2.json", daily_cap_usd=1.0, today=today)
         assert not m.exceeded()
         m.add(0.1)
         (base / "u2.json").write_text("{ not json", encoding="utf-8")
-        assert m.exceeded(), "الملف التالف يجب ألا يفتح السقف"
+        # B35: الملف التالف لا يقفل الإنفاق للأبد: يُعزل إلى .corrupt.<ts> ويبدأ عدّ جديد مع تنبيه ظاهر
+        assert not m.exceeded() and m.reset_note and list(base.glob("u2.json.corrupt.*")), "الملف التالف يجب أن يُعزل لا أن يقفل للأبد"
 
         # 8. إعدادات تالفة
         os.environ["COS_DATA_DIR"] = str(base / "dd")

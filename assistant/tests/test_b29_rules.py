@@ -211,16 +211,16 @@ try:
             c8.start()
             rep = c8.wait_for("report", 10)
             assert rep and rep["success"], rep
-            assert "a.txt" in rep["text"] and "b.txt" in rep["text"] and "sub/" in rep["text"] and "3 عنصراً" in rep["text"], rep["text"]
+            assert "a.txt" in rep["text"] and "b.txt" in rep["text"] and "sub/" in rep["text"] and "3 عناصر" in rep["text"], rep["text"]
         c8.submit_request("ماذا يوجد في المجلد؟")
         assert c8.wait_for("plan", 5)
         c8.start()
         rep = c8.wait_for("report", 10)
-        assert "top.txt" in rep["text"] and "Docs/" in rep["text"] and "يحوي 2 عنصراً" in rep["text"], rep["text"]
+        assert "top.txt" in rep["text"] and "Docs/" in rep["text"] and "يحوي عنصرين" in rep["text"], rep["text"]
         big = mk_ws(tmp, "w8b", {f"f{i:03d}.txt": "x" for i in range(60)})
         from assistant.verifier import Verifier
         txt = Verifier(big)._listing(big)
-        assert "60 عنصراً" in txt and "و20 عنصراً آخر" in txt, txt
+        assert "60 عنصراً" in txt and "ومعها 20 عنصراً غير معروضة" in txt, txt
 
         # ================================================================== 9. المؤقتة / الفواتير / الإكسل / رسالة «لم أفهم»
         L9 = ["a.txt", "x.tmp", "old.bak", "dl.crdownload", "~$w.docx", "فاتورة_1.pdf", "invoice-2.pdf", "ايصال.pdf", "receipt3.pdf",
@@ -283,7 +283,7 @@ try:
         assert not rep.success
         msg = " ".join(rep.failures)
         assert "PermissionError" not in msg and str(ws10b) not in msg and "Errno" not in msg, msg
-        assert "نُفّذت 1 من 2" in msg and "ولم تُنفَّذ 1" in msg, msg
+        assert "اكتمل تنفيذ 1 من خطوتين" in msg and "والمتبقي بلا تنفيذ: خطوة واحدة" in msg, msg
 
         # ================================================================== 11. الوجهة موجودة ← اسم «(1)» بدل سؤال
         L11 = ["Projects/", "Projects/p.txt", "Backup/", "Backup/Projects/", "Backup/a.txt", "a.txt", "b.txt"]

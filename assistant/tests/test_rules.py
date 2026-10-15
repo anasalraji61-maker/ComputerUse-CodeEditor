@@ -69,15 +69,15 @@ try:
         except PlanParseError as exc:
             assert "لا توجد ملفات" in str(exc)
 
-    # 2. أكثر من 48 ملفاً: الخطة محدودة وتنجح، والباقي لمرة ثانية
+    # 2. أكثر من 200 ملف: الخطة محدودة وتنجح، والباقي لمرة ثانية
     with tempfile.TemporaryDirectory() as tmp:
-        root, ledger = env(tmp, {f"f{i:02d}.txt": str(i) for i in range(60)})
+        root, ledger = env(tmp, {f"f{i:02d}.txt": str(i) for i in range(260)})
         r = runner(root, ledger)
         plan = r.make_plan("رتب الملفات")
-        assert len(plan) <= 48
+        assert len(plan) <= 200
         assert r.run("big", "رتب الملفات").success
         left = [p for p in root.iterdir() if p.is_file() and not p.name.startswith(".")]
-        assert 0 < len(left) < 60
+        assert 0 < len(left) < 260
         assert r.run("big2", "رتب الملفات").success
         assert not [p for p in root.iterdir() if p.is_file() and not p.name.startswith(".")]
 

@@ -41,7 +41,7 @@ try:
     must_fail(json.dumps({"steps": [step(step_id="a")]}), "step_id نص")
     must_fail(json.dumps({"steps": [step(), step()]}), "step_id مكرر")
     must_fail(json.dumps({"steps": [step(action_type="run_command", params={"cmd": "whoami"})]}), "cmd نص")
-    many = [step(step_id=i, target=f"d{i}") for i in range(1, 60)]
+    many = [step(step_id=i, target=f"d{i}") for i in range(1, 260)]
     must_fail(json.dumps({"steps": many}), "أكثر من الحد الأقصى")
 
     # حالات صحيحة

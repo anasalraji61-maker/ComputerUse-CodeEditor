@@ -44,7 +44,7 @@ try:
         (ws3 / "x.txt").unlink()
         (ws3 / ".undo_journal.json").write_text(json.dumps([
             {"action": "move", "src": str(ws3 / "x.txt"), "dest": str(ws3 / "y" / "x.txt")}]), encoding="utf-8")
-        fm3 = FileManager(ws3)
+        fm3 = FileManager(ws3, allow_unverified=True)   # سجل بصيغة قديمة غير موقّع: يُنفَّذ بتأكيد
         assert fm3.undo_all() == 1 and (ws3 / "x.txt").exists()
 
         # مسار rel: خبيث (..) يُرفض عند التراجع ولا يخرج من المجلد
@@ -53,7 +53,7 @@ try:
         (ws4 / "z.txt").write_text("Z", encoding="utf-8")
         (ws4 / ".undo_journal.json").write_text(json.dumps([
             {"action": "move", "src": "rel:../victim2.txt", "dest": "rel:z.txt"}]), encoding="utf-8")
-        fm4 = FileManager(ws4)
+        fm4 = FileManager(ws4, allow_unverified=True)
         assert fm4.undo_all() == 0 and out.exists() and (ws4 / "z.txt").exists() and not (base / "victim2.txt").exists()
 
     print("PASS: test_b21 completed successfully")

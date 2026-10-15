@@ -1,6 +1,7 @@
 """اختبارات B18: نتائج تدقيق المواصفات — سير التوضيح، الإيقاف أثناء آخر خطوة، التراجع بعد إعادة التشغيل،
 تخطّي حذف مرفوض، مهلة الموافقة، تقدير الكلفة، تسعير screen، إصدار winget قبل/بعد."""
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -58,8 +59,16 @@ try:
         # عجز الرصيد يظهر في التقدير
         led2 = SQLiteLedger(base / "l2.db", initial_balance=0, spending_limit=500)
         c2 = AssistantController(RuleProvider(), root, led2)
-        c2.submit_request("رتّب الملفات حسب النوع")
-        p2 = c2.wait_for("plan")
+        _old_trial = os.environ.get("COS_TRIAL_TOPUP")
+        os.environ["COS_TRIAL_TOPUP"] = "0"   # الشحن التجريبي التلقائي يعطّل سيناريو العجز؛ نختبره معطَّلاً
+        try:
+            c2.submit_request("رتّب الملفات حسب النوع")
+            p2 = c2.wait_for("plan")
+        finally:
+            if _old_trial is None:
+                os.environ.pop("COS_TRIAL_TOPUP", None)
+            else:
+                os.environ["COS_TRIAL_TOPUP"] = _old_trial
         assert p2 and p2["estimate"]["affordable"] is False, p2
 
     # 3. الإيقاف أثناء آخر خطوة لا يُعلَن نجاحاً صامتاً

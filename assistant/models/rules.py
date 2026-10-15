@@ -19,10 +19,12 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from .base import ModelProvider, CONTEXT_MARKER
 from ..safety import EmergencyStopTriggered
-from ..tools.files import _bad_component, check_not_big_cloud_file, CloudFileNotLocalError, _is_link
+from ..tools.files import (_bad_component, check_not_big_cloud_file, CloudFileNotLocalError, _is_link, name_problem,
+                           name_len, MAX_NAME_UNITS, MAX_PATH_CHARS, IS_WINDOWS)
 
 _DUP_SKIP_DIRS = ("نسخة_احتياطية", "نسخ_احتياطية", "مكررات", "backup", "backups")   # مجلدات لا تدخل مقارنة المكررات (نسخ احتياطية متعمدة / ما نُقل سابقاً)
-MAX_AUTO_STEPS = 48  # أقل من حد الخطة (50) بهامش
+MAX_AUTO_STEPS = 200  # أقل من حد الخطة (MAX_PLAN_STEPS=200) بخطوة إنشاء المجلد؛ المجلدات الكبيرة تحتاج طلبات أقل
+MAX_AUTO_DELETE_STEPS = 48  # خطط الحذف تطلب موافقة لكل خطوة: سقفها يبقى صغيراً كي لا تغرق الواجهة بنوافذ الموافقة
 
 CATEGORIES: Dict[str, Tuple[str, ...]] = {
     "صور": ("jpg", "jpeg", "png", "gif", "bmp", "webp", "svg", "heic", "tiff", "ico"),
@@ -78,7 +80,7 @@ _FILLER = {"ملف", "ملفات", "الملف", "الملفات", "file", "file
            "فضلك", "الان", "please", "now", "هذا", "هذه", "على", "عن", "ممكن", "هل", "can", "you", "could", "would", "ابغي",
            "اريد", "ابي", "i", "want", "احذف", "حذف", "امسح", "مسح", "ازل", "ازاله", "شيل", "تخلص", "تحذف", "تمسح", "delete",
            "remove", "erase", "انقل", "نقل", "حرك", "تنقل", "تحرك", "move", "ضع", "حط", "اجمع", "جمع", "put", "انسخ", "نسخ",
-           "تنسخ", "copy", "backup", "نسخه", "احتياطيه", "اعمل", "اعملي", "سوي", "عمل", "كلها", "كله", "جميعها", "all", "انشئ", "create",
+           "تنسخ", "copy", "backup", "نسخه", "احتياطيه", "اعمل", "اعملي", "سوي", "عمل", "كلها", "كله", "جميعها", "all", "ملفاتي", "ملفاتك", "ملفاتنا", "انشئ", "create",
            "make", "خذ", "take", "نظف", "نظفها", "تنظيف", "clean"}
 _CREATE_GENERIC = {"جديد", "جديده", "جديدا", "باسم", "بإسم", "بأسم", "تجريبي", "تجريبيا", "new", "named", "called", "name", "a", "an", "the"}
 _CREATE_FILLER = {"انشئ", "انشاء", "اعمل", "جهز", "create", "make", "مجلد", "مجلدا", "مشروع", "مشروعا", "هيكل", "folder", "project",
@@ -125,10 +127,90 @@ def strip_format_chars(text: str) -> str:
     return "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
 
 
-_POLITE_RE = re.compile(r"(?<![\w.])(?:من\s+فضلك|لو\s+سمحت|لو\s+تكرمت|الرجاء|رجاء|يا\s+مساعد|هل\s+(?:يمكنك|تستطيع|بامكانك|بإمكانك)|"
-                        r"(?:can|could|would)\s+you|please|لي)(?!\w|\.\w)", re.I)
-_QAM_RE = re.compile(r"(?<![\w.])قم\s+ب(?=[\w])")
+_POLITE_RE = re.compile(r"\s*(?<![\w.])(?:من\s+فضلك|لو\s+سمحت|لو\s+تكرمت|الرجاء|رجاء|يا\s+مساعد|هل\s+(?:يمكنك|تستطيع|بامكانك|بإمكانك)|"
+                        r"(?:can|could|would)\s+you|please|لي|"
+                        r"هس[ةهاع]|الحين|دحين|هلق|هلأ|ود[يى]|اني|آني|بغيت|بد[يى]|عايز|عاوز|حابب|حاب|عيوني|حبيبي|اخوي|خوش|ان\s*شاء\s*الله|"   # لهجات: «الآن»، «أريد»، مجاملات
+                        r"يا\s+(?:غالي|طيب|حبيب|اخي|أخي|استاذ|أستاذ|باشا|بطل)|ويا[يه]|معاي)(?!\w|\.\w)\s*", re.I)
+_QAM_RE = re.compile(r"\s*(?<![\w.])قم\s+ب(?=[\w])")
 _VAV_FILE_RE = re.compile(r"(?<![\w.])و([A-Za-z0-9_][^\s«»\"“”'،,]*\.[A-Za-z0-9]{1,6})(?![\w])")
+
+
+# ---- لهجات عراقية/خليجية/شامية شائعة ← فصحى قبل التحليل (فتنتج الخطة نفسها، ويبقى مبدأ «اسأل لا تخمّن» كما هو) ----
+def _ar(p: str) -> str:
+    """نمط يتسامح مع بدائل الحروف العربية (همزة الألف، ي/ى، ه/ة)."""
+    m = {"ا": "[اأإآ]", "ي": "[يى]", "ى": "[يى]", "ه": "[هة]", "ة": "[هة]"}
+    return "".join(m.get(c, c) for c in p)
+
+
+_DLB, _DRB = r"(?<![\w.\\/\-])", r"(?![\w/\\\-]|\.\w)"
+_D_VERBS = {"احذف": "احذف", "امسح": "امسح", "انقل": "انقل", "انسخ": "انسخ", "رتب": "رتب", "ارتب": "رتب", "نظف": "نظف", "شيل": "شيل",
+            "حط": "حط", "ضع": "ضع", "غير": "غير", "ضيف": "ضيف", "اضف": "اضف", "اعرض": "اعرض", "افحص": "افحص",
+            "ابحث": "ابحث", "اعمل": "اعمل", "انشئ": "انشئ", "جهز": "جهز", "نظم": "نظم", "صنف": "صنف", "حرك": "حرك", "اجمع": "اجمع",
+            "شوف": "اعرض", "وري": "اعرض", "ورني": "اعرض"}
+_D_VERB_RE = re.compile(_DLB + r"(?P<p>[وف])?(?P<v>" + "|".join(sorted((_ar(v) for v in _D_VERBS), key=len, reverse=True)) + r")(?:لي|ي|ني|نى)?" + _DRB)
+_D_NOUN_RES = (
+    (re.compile(_DLB + r"(?P<p>(?:[وفبل]|وال|بال|فال|لل)?(?:ال)?)فا[يى]ل(?P<s>ات|ين|ان|اتي)?" + _DRB), lambda m: m.group("p") + "ملف" + (m.group("s") or "")),
+    (re.compile(_DLB + r"(?P<p>(?:[وفبل]|وال|بال|فال|لل)?(?:ال)?)ف[وؤ]?لدر(?P<s>ات|ين|ان)?" + _DRB), lambda m: m.group("p") + "مجلد" + (m.group("s") or "")),
+)
+_D_SIMPLE = (   # (نمط، بديل): كلمات أو عبارات لهجية بمعادل فصيح مباشر
+    (re.compile(_DLB + _ar(r"(?:[وف])?مالت(?:ي|نا|ك|ه|ها)|مالنا") + _DRB), " "),            # «الصور مالتي» = «الصور»
+    (re.compile(_DLB + r"(?P<p>[وف])?كل\s*ش[يى]" + _DRB), lambda m: (m.group("p") or "") + "كل شيء"),
+    (re.compile(_DLB + r"(?P<p>[وف])?(?:شنو|شو|ايش|إيش|وش|ويش|شكو)\s+(?:(?:ال)?(?:ملفات|مجلدات)\s+)?(?:ال)?(?:موجود\w*|عندي|هنا|يوجد|بالمجلد|بمجلد\w*|بالفولدر|فيه)" + _DRB),
+     lambda m: (m.group("p") or "") + "ماذا يوجد"),
+    (re.compile(_DLB + r"شكو(?:\s+(?:هنا|بالمجلد|بمجلد\w*|عندي))?" + _DRB), "ماذا يوجد"),
+    (re.compile(_DLB + r"(?P<p>[وف])?" + _ar("اكو") + r"\s+(?=\S)"), lambda m: (m.group("p") or "") + "هل يوجد "),
+    (re.compile(_DLB + r"(?P<p>[وف])?وين\s+(?=\S)"), lambda m: (m.group("p") or "") + "ابحث عن "),
+    (re.compile(_DLB + r"(?P<p>[وف])?دور(?:لي|ي)?\s+(?:على|عن|ع)\s+"), lambda m: (m.group("p") or "") + "ابحث عن "),
+    (re.compile(_DLB + r"(?:جوا|جوه|جوّا|بجوه|بداخل)(?=\s)"), "داخل"),
+    (re.compile(_DLB + r"(?P<p>[وف])?سم[يى]\s+(?:(?:ال)?ملف\s+)?(?P<x>[^\s«»\"]+)\s+(?:باسم|بإسم|الى|إلى|الي)(?:\s+|$)"), lambda m: (m.group("p") or "") + "غير اسم " + m.group("x") + " الى "),
+    (re.compile(_DLB + r"للمجلد(?=\s)"), "الى المجلد"),
+    (re.compile(_DLB + r"لمجلد(?=\s)"), "الى مجلد"),
+    (re.compile(_DLB + r"بدل(?:لي|ي)?\s+(?=" + _ar("اسم") + r")"), "غير "),
+    (re.compile(_DLB + r"زيد(?:لي|ي)?\s+(?=(?:ال)?" + _ar("بادئه") + r")"), "زد "),
+    (re.compile(_DLB + r"(?P<p>[وف])?(?:[اتن]سو[يى])(?:\s*لي)?\s+"), lambda m: (m.group("p") or "") + "اعمل "),
+    (re.compile(_DLB + r"(?P<p>[وف])?(?:ت[كگ]در(?:ون)?|تقدر(?:ون)?)(?=\s)"), lambda m: (m.group("p") or "") + "ممكن"),
+)
+_D_LEAD = re.compile(r"^(?P<pre>\s*(?:(?:اريد|أريد|ابي|ابغي|ابغى|ممكن|اني|آني|انا)\s+)*)(?P<w>س[ً-ْ]*و[ً-ْ]*[يى][ً-ْ]*|خ[ً-ْ]*ل[ً-ْ]*[يى][ً-ْ]*)(?P<l>\s*لي|لي)?(?P<sp>\s+)")
+_D_MAKE_OBJ = re.compile(r"(?:ال)?(?:مجلد|فولدر|فلدر|folder|نسخ|مشروع|backup|هيكل)", re.I)
+
+
+def _dialect_lead(prompt: str, names: set) -> str:
+    """«سوي مجلد X» / «خلي X في Y» في أول الطلب فقط (وسط الجملة «سوى» = ما عدا، فلا نمسّها): سوي ← اعمل، خلي ← ضع إن وُجدت وجهة."""
+    m = _D_LEAD.match(prompt)
+    if not m or norm(m.group("w")) in names:
+        return prompt
+    rest = prompt[m.end():]
+    w = norm(m.group("w"))
+    if w == "سوي":
+        if not _D_MAKE_OBJ.match(norm(rest)):
+            return prompt
+        new = "اعمل"
+    else:
+        masked = _QUOTE_RE.sub(lambda q: "§" * len(q.group(0)), rest)
+        if not (_DEST_TO.search(masked) or _DEST_IN.search(masked)):
+            return prompt   # «خلي X» بلا وجهة: قد تعني «أبقِ X» (استثناء) فتبقى كلمة نفي تُسأل
+        new = "ضع"
+    return m.group("pre") + new + m.group("sp") + rest
+
+
+def _dialect(seg: str, names: set) -> str:
+    """يبدّل كلمات اللهجة بمعادلها الفصيح في جزء غير مقتبس؛ ما كان اسماً موجوداً في مجلد العمل لا يُمسّ."""
+    def guard(fn):
+        def inner(m):
+            t = norm(m.group(0)).strip()
+            forms = {t, t[1:] if t[:1] in "وفبل" else t}
+            forms |= {f[2:] for f in forms if f.startswith("ال")}
+            return m.group(0) if forms & names else fn(m)
+        return inner
+
+    def verb(m):
+        return (m.group("p") or "") + _D_VERBS[norm(m.group("v"))]
+    seg = _D_VERB_RE.sub(guard(verb), seg)
+    for rx, rep in _D_NOUN_RES:
+        seg = rx.sub(guard(rep), seg)
+    for rx, rep in _D_SIMPLE:
+        seg = rx.sub(guard(rep if callable(rep) else (lambda m, r=rep: r)), seg)
+    return seg
 
 
 def _outside_quotes(text: str, fn) -> str:
@@ -160,8 +242,8 @@ def _clean_prompt(prompt: str, names: set) -> str:
         seg = _POLITE_RE.sub(polite, seg)
         seg = _QAM_RE.sub(" ", seg)
         seg = _VAV_FILE_RE.sub(vav, seg)
-        return re.sub(r"[ \t]{2,}", " ", seg)
-    return _outside_quotes(prompt, fix).strip()
+        return _dialect(seg, names)
+    return _outside_quotes(_dialect_lead(prompt, names), fix).strip()
 
 
 def _unq(tok: str) -> str:
@@ -256,7 +338,8 @@ _DUP_COPY_PHRASE = re.compile(r"(?<!\w)نسخ(?:ه|ات)?\s+(?:ال)?مكرر\w*
 W_THEN = _words("ثم", "بعدين", "بعدها", "بعد ذلك", "then", "afterwards", "and then")
 W_NEG = _words("عدا", "ماعدا", "الا", "غير", "ليس", "ليست", "ليسوا", "لا", "بدون", "دون", "باستثناء", "استثناء", "سوي", "خلا",
                "لكن", "ولكن", "احتفظ", "ابق", "ابقي", "اترك", "keep", "besides", "other than", "apart from", "except", "not",
-               "dont", "don't", "without", "excluding", "exclude", "but", "only", "just", prefix="[و]?")
+               "dont", "don't", "without", "excluding", "exclude", "but", "only", "just", "خلي", "خليه", "خليها", "خليهم", "مو", "مب", "موب", "مش", "بس",
+               prefix="[و]?")
 _QUAL_WORDS = ("قديم", "كبير", "صغير", "جديد", "اكبر", "اصغر", "اقدم", "احدث", "تنتهي", "ينتهي", "تبدا", "يبدا", "تحتوي",
                "يحتوي", "تتجاوز", "اكثر", "اقل", "فارغ", "قبل", "بعد", "older", "newer", "larger", "smaller", "bigger",
                "empty", "oldest", "newest", "biggest", "smallest")
@@ -278,6 +361,31 @@ _PREFIX_RES = (
     re.compile(r"(?:بادئه|بادئة|prefix)\s*[:：]?\s*([^\s«»\"'،,]+)"),
     re.compile(r"(?:بإضافة|باضافة|بإضافه|اضافة|إضافة)\s+[«\"']?([^\s«»\"'،,]+)[»\"']?\s+(?:في|الى|إلى|ل)?\s*(?:بداية|اول|أول)"),
 )
+
+
+_STRIP_AFFIX_RE = re.compile(
+    r"(?<!\w)(?:ب|و|ف)?(?:ال)?(?:احذف|حذف|ازاله|ازال|ازل|ازيل|شيل|امسح|مسح|نزع|انزع|remove|removing|delete|deleting|strip|drop)\s+"
+    r"(?:(?:the|ال)\s*)?(?:ال)?(بادئه|لاحقه|prefix|suffix)(?!\w)")
+_AFFIX_STOP = {"من", "في", "عن", "for", "from", "of", "the", "كل", "جميع", "الملفات", "ملفات", "اسماء", "الاسماء", "اسم", "files", "file",
+               "ملف", "all", "to", "الي", "الى", "داخل", "in", "ثم", "و", "ب", "ل", "مجلد", "المجلد", "folder"}
+
+
+def _strip_affix_parse(prompt: str):
+    """«احذف/أزل البادئة old_» / «بإزالة اللاحقة _bak»: يعيد (النوع prefix|suffix، النص أو None، بداية العبارة، نهايتها) أو None."""
+    n = norm(_QUOTE_RE.sub(lambda m: " " * len(m.group(0)), prompt))
+    sm = _STRIP_AFFIX_RE.search(n)
+    if not sm:
+        return None
+    kind = "suffix" if sm.group(1) in ("لاحقه", "suffix") else "prefix"
+    am = re.match(r"\s*[:：]?\s*(?:[«\"“'‘](.+?)[»\"”'’]|([^\s«»\"'،,]+))", prompt[sm.end():])
+    if not am:
+        return kind, None, sm.start(), sm.end()
+    if am.group(1) is not None:
+        return kind, am.group(1), sm.start(), sm.end() + am.end()
+    tok = re.sub(r"[!؟?]+$", "", am.group(2))
+    if not tok or norm(tok) in _AFFIX_STOP:
+        return kind, None, sm.start(), sm.end()
+    return kind, tok, sm.start(), sm.end() + am.end()
 
 
 def _prefix_match(prompt: str):
@@ -308,6 +416,7 @@ def _orig_word(tok: str, *texts: str) -> str:
     return tok
 
 
+_EN_FUNCTION_WORDS = {"a", "an", "the", "of", "to", "in", "on", "and", "or", "for", "my", "all", "me", "it", "is"}
 _TEMP_EXTS = {"tmp", "temp", "crdownload"}   # .bak/.part قد تكون نسخاً احتياطية يدوية أو تنزيلات ناقصة مهمة: لا تُعدّ مؤقتة
 
 
@@ -343,13 +452,65 @@ def _visible(rel: str) -> bool:
     return not base.startswith(".") and base.lower() not in SYSTEM_FILES
 
 
+_UNITS = {   # (واحد، مثنى، جمع 3-10، تمييز 11+)
+    "ملف": ("ملف واحد", "ملفان", "ملفات", "ملفاً"),
+    "عنصر": ("عنصر واحد", "عنصران", "عناصر", "عنصراً"),
+    "عملية": ("عملية واحدة", "عمليتان", "عمليات", "عملية"),
+    "مجموعة": ("مجموعة واحدة", "مجموعتان", "مجموعات", "مجموعة"),
+    "خطوة": ("خطوة واحدة", "خطوتان", "خطوات", "خطوة"),
+    "نسخة": ("نسخة واحدة", "نسختان", "نسخ", "نسخة"),
+    "مجلد": ("مجلد واحد", "مجلدان", "مجلدات", "مجلداً"),
+}
+
+
+def _n(n: int, kind: str) -> str:
+    """العدد مع المعدود بالإعراب الصحيح: 1 «عنصر واحد»، 2 «عنصران»، 3-10 «5 عناصر»، 11+ «12 عنصراً»."""
+    one, two, few, many = _UNITS[kind]
+    if n == 1:
+        return one
+    if n == 2:
+        return two
+    return f"{n} {few}" if n <= 10 else f"{n} {many}"
+
+
+_DATE_MIN, _DATE_MAX = datetime.date(1601, 1, 1), datetime.date(9999, 12, 31)
+
+
+def _mtime_date(ts: float) -> Tuple[datetime.date, bool]:
+    """تاريخ آخر تعديل من الطابع الزمني دون أن يفشل: قبل 1970 أو خارج النطاق (ويندوز يرمي OSError لـ fromtimestamp) يُحسب من
+    1970-01-01 + فرق، ويُقيَّد بين 1601 و9999؛ NaN/لانهاية ← 1970-01-01. الثاني في الناتج: هل قُيِّد/عُدِّل التاريخ (غير اعتيادي)؟"""
+    try:
+        if ts != ts or ts in (float("inf"), float("-inf")):
+            return datetime.date(1970, 1, 1), True
+        d = datetime.date.fromtimestamp(ts)
+        return d, d < datetime.date(1970, 1, 1)
+    except (OverflowError, OSError, ValueError):
+        pass
+    try:
+        d = (datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=ts)).date()
+    except (OverflowError, ValueError):
+        d = _DATE_MAX if ts > 0 else _DATE_MIN
+    return min(max(d, _DATE_MIN), _DATE_MAX), True
+
+
+_ALL_CAT_EXTS = {e for exts in CATEGORIES.values() for e in exts}
+
+
+def _not_found(tok: str, ents: "Ents", extra: str = "") -> str:
+    """«لم أجد X»؛ وإن كانت قائمة مجلد العمل نفسها مقتطعة (أكثر من حد المسح) نقول ذلك بدل أن يظن المستخدم أن الملف غير موجود."""
+    msg = f"لم أجد «{tok}» في مجلد العمل. اكتب اسمه كما يظهر{extra}."
+    if getattr(ents, "partial", False):
+        msg += " (قائمة مجلد العمل كبيرة ومقتطعة، فقد يكون موجوداً ولم يظهر لي.)"
+    return msg
+
+
 def _trunc_note(done: int, dropped: int, partial: bool = False):
     """تنبيه عند اقتطاع الخطة بسبب حد الخطوات، أو لأن قائمة مجلد العمل نفسها مقتطعة، حتى لا يظن المستخدم أن كل شيء شمله التنفيذ."""
     parts = []
     if dropped > 0:
-        parts.append(f"اقتُصرت هذه الخطة على {done} عنصراً بسبب حد الخطوات؛ بقي {dropped} عنصراً. أعد الطلب بعد التنفيذ لإكمال الباقي.")
+        parts.append(f"اقتُصرت هذه الخطة على {_n(done, 'عنصر')} بسبب حد الخطوات؛ بقي {_n(dropped, 'عنصر')}. أعد الطلب بعد التنفيذ لإكمال الباقي.")
     if partial:
-        parts.append(f"قائمة مجلد العمل مقتطعة، فشملت هذه الخطة الملفات الظاهرة لي فقط ({done} عنصراً). أعد الطلب بعد التنفيذ لإكمال ما لم يظهر.")
+        parts.append(f"قائمة مجلد العمل مقتطعة، فشملت هذه الخطة الملفات الظاهرة لي فقط ({_n(done, 'عنصر')}). أعد الطلب بعد التنفيذ لإكمال ما لم يظهر.")
     return " ".join(parts) or None
 
 
@@ -390,10 +551,17 @@ def _skip_notes(clash: List[str], locks: List[str]) -> Optional[str]:
     """ملاحظة بما تُخطي: ملفات اسمها موجود أصلاً في الوجهة، وملفات القفل ~$ (يفتحها برنامج آخر)."""
     parts = []
     if clash:
-        parts.append(f"تُخطي {len(clash)} ملفاً لأن في وجهته ملفاً بالاسم نفسه: " + "، ".join(clash[:8]) + (" …" if len(clash) > 8 else "") + ".")
+        parts.append(f"تُخطي {len(clash)} من الملفات لأن في وجهتها ملفاً بالاسم نفسه: " + "، ".join(clash[:8]) + (" …" if len(clash) > 8 else "") + ".")
     if locks:
-        parts.append(f"تُركت {len(locks)} من ملفات القفل المؤقتة (~$) كما هي لأن برنامجاً قد يفتحها: " + "، ".join(locks[:8]) + (" …" if len(locks) > 8 else "") + ".")
+        parts.append(f"تُركت ملفات القفل المؤقتة (~$) كما هي ({_n(len(locks), 'ملف')}) لأن برنامجاً قد يفتحها: " + "، ".join(locks[:8]) + (" …" if len(locks) > 8 else "") + ".")
     return " ".join(parts) or None
+
+
+def _skip_dup_note(names: List[str]) -> Optional[str]:
+    if not names:
+        return None
+    return (f"تُركت الملفات ذات اللاحقة «(رقم)» ({_n(len(names), 'ملف')}) لأنها قد تكون نسخاً لملفات تخصك: " + "، ".join(names[:8])
+            + (" …" if len(names) > 8 else "") + ". سمِّها بأسمائها إن أردتها.")
 
 
 INFO_PREFIX = "لا شيء للتنفيذ: "   # نتيجة عادية (لا خطة لأن لا شيء يلزم)، لا خطأ: يعرضها المتحكم كمعلومة
@@ -441,14 +609,56 @@ def _strip_slot_words(ans: str, slot: str) -> str:
     return out.strip()
 
 
+_ANS_LEAD = {"لا", "بل", "نعم", "اقصد", "قصدي", "اريد", "ابي", "ابغي", "ممكن", "ثم", "و", "اكتب", "قل", "يعني", "اذن", "طيب", "خلاص"}
+_ANS_VERB_RES = _ANSWER_VERBS + (W_UPDATE, W_ORGANIZE)
+
+
+def _flex(name: str) -> str:
+    """نمط لاسم يتسامح مع بدائل الحروف العربية (همزات، ي/ى، ه/ة) ويطابق حالة الأحرف بلا تمييز."""
+    cls = {"ا": "[اأإآ]", "أ": "[اأإآ]", "إ": "[اأإآ]", "آ": "[اأإآ]", "ي": "[يى]", "ى": "[يى]", "ه": "[هة]", "ة": "[هة]"}
+    return "".join(cls.get(c, re.escape(c)) for c in name)
+
+
+def _answer_is_request(ans: str) -> bool:
+    """جواب سؤال التوضيح الذي هو في الحقيقة طلب كامل جديد (يبدأ بفعل عملية ومعه ما يكمله): «رتّب الملفات حسب النوع»، «احذف a.txt»…"""
+    n = norm(_clean_prompt(strip_format_chars(ans), set()).strip("«»\"'“”"))
+    toks = [t for t in re.split(r"\s+", n) if t]
+    while toks and toks[0] in _ANS_LEAD:
+        toks.pop(0)
+    if len(toks) < 2:
+        return False
+    first = toks[0].strip("«»\"'“”،,:؛")
+    if "/" in first or "." in first:
+        return False   # «نقل.txt» اسم ملف لا فعل
+    return any(w.fullmatch(first) for w in _ANS_VERB_RES)
+
+
 def merge_clarification(request: str, slot: Optional[str], answer: str) -> Optional[str]:
     """يحوّل جواباً عارياً على سؤال توضيح (اسم مجلد، اسم جديد، معيار ترتيب…) إلى جملة صريحة تُعاد تحليلها بدل لصقه نصاً حراً.
-    يعيد None إن لم يكن الجواب عارياً (جملة كاملة بفعل/علامة وجهة) أو الخانة مجهولة، فيبقى السلوك القديم (لصق الجواب بالطلب)."""
+    جواب هو طلب كامل جديد (يبدأ بفعل: «احذف a.txt»، «رتّب الملفات حسب النوع») يُعاد كما هو فيُعامل طلباً جديداً لا توضيحاً (حتى بلا خانة).
+    يعيد None إن لم يكن الجواب عارياً (جملة فيها فعل/علامة وجهة) أو الخانة مجهولة، فيبقى السلوك القديم (لصق الجواب بالطلب)."""
     ans = re.sub(r"\s+", " ", strip_format_chars(answer or "")).strip()
     req = strip_format_chars(request or "").strip()
+    if ans and _answer_is_request(ans):
+        out = ans.strip("«»\"“”").strip()
+        while True:   # «بل احذف x» / «اقصد انقل y»: كلمات التمهيد لا تدخل الطلب الجديد
+            w = out.split(" ", 1)
+            if len(w) == 2 and norm(w[0]) in _ANS_LEAD:
+                out = w[1].strip()
+            else:
+                return out
     if not slot or not ans or not req:
         return None
     n = norm(ans)
+    if slot == "path":   # جواب «اكتب المسار الكامل»: يحلّ محل الاسم الملتبس في الطلب الأصلي
+        pth = re.sub(r"^\./", "", ans.replace("\\", "/").strip("«»\"'“” ")).strip("/")
+        if "/" not in pth or any(c in pth for c in '<>|?*:"') or ".." in pth.split("/"):
+            return None
+        rx = re.compile(r"(?<![\w./\\\-])" + _flex(pth.rsplit("/", 1)[-1]) + r"(?![\w/\\\-]|\.\w)", re.I)
+        m = rx.search(_QUOTE_RE.sub(lambda q: "§" * len(q.group(0)), req))
+        if not m:
+            return None
+        return f"{req[:m.start()]}{_quote_name(pth)}{req[m.end():]}"
     if _DEST_TO.search(_dest_mask(ans)) or any(w.search(n) for w in _ANSWER_VERBS):
         return None
     last_marker = None
@@ -465,6 +675,13 @@ def merge_clarification(request: str, slot: Optional[str], answer: str) -> Optio
         return f"{req} إلى {q}"
     if slot == "folder_name":
         return f"{req} باسم {_quote_name(ans, True)}"
+    if slot in ("strip_prefix", "strip_suffix"):
+        info = _strip_affix_parse(req)
+        if info and info[1] is None:
+            n = norm(req)
+            sm = _STRIP_AFFIX_RE.search(n)
+            return f"{req[:sm.end()]} {_quote_name(ans, True)}{req[sm.end():]}"
+        return None
     if slot == "prefix":
         pref = ans[len("بادئة"):].strip() if n.startswith(("بادئه ", "بادئة ")) else ans
         if re.search(r"(?:بادئه|بادئة|prefix)\s*$", norm(req)):
@@ -514,6 +731,8 @@ class Resolved:
 class Ents(dict):
     """عناصر مجلد العمل (المسار → هل هو مجلد). partial=True إذا كانت القائمة مقتطعة فلا يجوز التعميم على «كل الملفات»."""
     partial = False
+    skipped: tuple = ()          # [(مسار، سبب)] عناصر تجاوزها المسح لأن اسمها غير صالح للتعامل الآمن (محارف اتجاه/غير مرئية، طول زائد…)
+    skipped_line: str = ""       # سطر «… (N عنصراً باسم غير صالح … لم يُعرض: …)» من قائمة المنفّذ إن وُجد
 
 
 def _entries(context: List[str]) -> Ents:
@@ -521,6 +740,8 @@ def _entries(context: List[str]) -> Ents:
     for e in context:
         if e.startswith("…"):
             out.partial = True
+            if "باسم غير صالح" in e:
+                out.skipped_line = e
             continue
         rel = e.rstrip("/")
         if rel and "\n" not in rel:
@@ -563,6 +784,79 @@ def _function_name_clash(prompt: str, ents: "Ents") -> Optional[str]:
     return None
 
 
+_START_RE = re.compile(r"\s*(?:ابدا|ابدي|start|run|go|نفذ|نفذي|شغل|ok|okay|تمام|موافق|yes|نعم)\s*[.!؟?]*\s*$", re.I)
+_Q_START = re.compile(r"\s*(?:هل|ماذا\s+لو|ماذا\s+(?:يحدث|سيحدث)\s+(?:لو|اذا|إذا)|what\s+if|should\s+i|do\s+i|is\s+it|will\s+it)(?!\w)", re.I)
+_POLITE_OPEN = re.compile(r"\s*(?:ممكن|ت[كگ]در(?:ون)?|تقدر(?:ون)?|هل\s+(?:يمكنك|تستطيع|بامكانك|تقدر)|(?:can|could|would)\s+you|please|لو\s+(?:سمحت|تكرمت)|من\s+فضلك|رجاء|الرجاء)(?!\w)", re.I)   # طلب مهذب لا سؤال
+_CAN_YOU = re.compile(r"\s*هل\s+(?:يمكنك|تستطيع|بامكانك|تقدر)(?!\w)")
+
+
+def _is_question(prompt: str) -> bool:
+    """الطلب سؤال لا أمر: ينتهي بـ ؟/? أو يبدأ بـ هل/ماذا لو… («هل يمكنك حذف x» بلا علامة استفهام طلب مهذب لا سؤال)."""
+    head = re.split(r"\s*\n?توضيحات المستخدم:", strip_format_chars(prompt))[0].strip()
+    n = norm(head)
+    if _POLITE_OPEN.match(n):
+        return False
+    if head.endswith(("؟", "?")):
+        return True
+    return bool(_Q_START.match(n)) and not _CAN_YOU.match(n)
+
+
+_PAST_TO_IMP = {"حذفت": "احذف", "مسحت": "امسح", "نقلت": "انقل", "نسخت": "انسخ", "حذفنا": "احذف", "نقلنا": "انقل", "نسخنا": "انسخ", "ازلت": "ازل"}
+_PAST_VERBS = re.compile(r"(?<!\w)(" + "|".join(_PAST_TO_IMP) + r")(?!\w)")
+_Q_VERBS = {"delete": "سيُحذف", "move": "سيُنقل", "copy": "سيُنسخ", "rename": "ستُعاد تسمية", "create_dir": "سيُنشأ المجلد",
+            "winget_upgrade": "ستُحدَّث الحزمة"}
+
+
+def _question_reply(a: "Analysis") -> "Analysis":
+    """جواب قصير على سؤال صيغته أمر: ما الذي سيتأثر لو طُلب فعلاً، دون خطة تُنفَّذ."""
+    by: Dict[str, List[str]] = {}
+    for st in a.steps or []:
+        by.setdefault(st.get("action_type", ""), []).append(st.get("target", ""))
+    parts = []
+    for act, names in by.items():
+        if act not in _Q_VERBS:
+            continue
+        shown = "، ".join(names[:5]) + (f" و{_n(len(names) - 5, 'عنصر')} غيرها" if len(names) > 5 else "")
+        parts.append(f"{_Q_VERBS[act]} {shown}")
+    return _info("هذا سؤال لا أمر فلم أنفّذ شيئاً. لو نفّذتُه: " + "؛ ".join(parts) + ". اكتب الأمر صريحاً (مثل «احذف …») لتنفيذه.")
+
+
+# ---- طلبات خارج نطاق المساعد (كلمات المرور، المال، الأمان، تثبيت البرامج): جواب معلوماتي صريح لا «لم أفهم» ----
+_F_PW = re.compile(
+    r"(?<!\w)(?:و)?(?:غير|بدل|عدل|ضبط|اضبط|حدث|ارسل|اعطني|اعطيني|اكشف|reset|change|set|update|tell|reveal|show)\w*\s+(?:(?:my|the|your|our|me)\s+|لي\s+|لى\s+)?(?:ال)?"
+    r"(?:كلم[هات]+\s+(?:ال)?(?:مرور|سر)|باس\s*(?:ورد|وورد|وارد)|passwords?|passcode|رقم\s+(?:ال)?سري|رمز\s+(?:ال)?(?:مرور|دخول)|pin\s+code)(?!\w)")
+_F_MONEY_VERB = re.compile(r"(?<!\w)(?:و)?(?:ادفع|سدد|اشتر|اشتري|اشتريلي|اشترلي|ادفعلي|سددلي|pay|buy|purchase|checkout)(?!\w)")
+_F_SEND = re.compile(r"(?<!\w)(?:و)?(?:حول|حولي|حولل[يى]|ارسل|ابعث|ابعثلي|دز|دزل[يى]|transfer|send|wire)(?!\w)")
+_F_MONEY_OBJ = re.compile(
+    r"\d[\d.,]*\s*(?:\$|دولار\w*|ريال\w*|دينار\w*|درهم\w*|يورو|جنيه\w*|ليره|الف|usd|eur|dollars?|euros?)|\$\s*\d"
+    r"|(?<!\w)(?:ال)?(?:مبلغ|فلوس|نقود|رصيد|money|funds|cash|payment)(?!\w)|(?<!\w)(?:ال)?(?:دولار|دينار|ريال|usd)(?!\w)")
+_F_SECURITY = re.compile(
+    r"(?<!\w)(?:اعدادات|اعداد|settings?)\s+(?:ال)?(?:امان|حمايه|security|privacy|خصوصيه|جدار)|(?<!\w)(?:ال)?جدار\s+(?:ال)?ناري(?!\w)"
+    r"|(?<!\w)(?:firewall|antivirus|defender|bitlocker|uac|regedit|registry)(?!\w)|(?<!\w)(?:ال)?ف[اي]ير\s*و+ل(?!\w)|(?<!\w)(?:ال)?مضاد\s+(?:ال)?فيروسات(?!\w)"
+    r"|(?<!\w)(?:ال)?ريجستري(?!\w)|(?<!\w)(?:ال)?سجل\s+(?:ال)?نظام(?!\w)")
+_F_INSTALL = re.compile(r"(?<!\w)(?:و)?(?:ثبت|ثبتلي|نصب|نصبلي|install|installing)(?!\w)|(?<!\w)(?:نزل|نزلي|حمل|download)\s+(?:لي\s+)?(?:ال)?(?:برنامج|تطبيق|program|app|application|software)(?!\w)")
+_F_UNINSTALL = re.compile(
+    r"(?<!\w)(?:uninstall|الغ[اءي]*\s*تثبيت|ازاله\s+تثبيت|فك\s+تثبيت)(?!\w)"
+    r"|(?<!\w)(?:و)?(?:ازل|ازاله|ازيل|احذف|شيل|امسح|remove|delete|uninstall)(?:لي)?\s+(?:لي\s+)?(?:ال)?(?:برنامج|تطبيق|program|app|application|software)(?!\w)\s+[^\s§]")
+_F_MSG = "هذا النوع من العمليات لا أنفّذه؛ اعمله بنفسك ({})."
+_F_INSTALL_MSG = "تثبيت/إزالة البرامج غير مدعومة بعد؛ المدعوم تحديث برنامج (مثال: «حدّث برنامج Git.Git»). ثبّته أو أزله بنفسك من إعدادات ويندوز."
+
+
+def _forbidden(t: str) -> Optional["Analysis"]:
+    """t: الطلب مطبَّعاً وقد حُجب فيه المقتبس (¤) وأسماء العناصر الموجودة وما يشبه اسم ملف (§).
+    يعيد جواباً معلوماتياً (بلا خطة) لطلب من نوع لا ينفّذه المساعد، أو None."""
+    t = re.sub(r"(?<!\w)(?:ملف\w*|files?|مجلد\w*|folders?|باسم|named?|اسم|extension|امتداد)\s+(?:ثبت|نصب|install\w*)", " § ", t)   # «ملفات install» اسم لا فعل
+    if _F_PW.search(t):
+        return _info(_F_MSG.format("تغيير كلمات المرور يتم من إعدادات الحساب أو الخدمة نفسها، ولا يجوز أن تمرّ عبر مساعد ملفات"))
+    if _F_MONEY_VERB.search(t) or (_F_SEND.search(t) and _F_MONEY_OBJ.search(t)):
+        return _info(_F_MSG.format("الدفع والشراء والتحويلات المالية عبر تطبيق البنك أو المتجر"))
+    if _F_SECURITY.search(t):
+        return _info(_F_MSG.format("إعدادات الأمان والجدار الناري ومضاد الفيروسات من «أمن ويندوز» في الإعدادات"))
+    if _F_INSTALL.search(t) or _F_UNINSTALL.search(t):
+        return _info(_F_INSTALL_MSG)
+    return None
+
+
 class RuleProvider(ModelProvider):
     """يحوّل الطلب العربي إلى خطة JSON. الأنواع: ترتيب حسب النوع، إعادة تسمية بادئة، نسخ، نقل، حذف، إنشاء، فحص، winget، whoami."""
 
@@ -581,11 +875,22 @@ class RuleProvider(ModelProvider):
     # ---------- واجهة المزوّد ----------
     def generate(self, prompt: str, system_prompt: str = "") -> str:
         a = self.analyze(prompt, parse_context(system_prompt))
-        if "CLARIFY" in system_prompt:
+        if "CLARIFY" in (system_prompt or "").split(CONTEXT_MARKER, 1)[0]:   # الترويسة فقط: اسم ملف يحوي CLARIFY (بعد CONTEXT_MARKER) لا يقلب التخطيط إلى توضيح
             # «لم أفهم الطلب» ليست سؤال توضيح: يُعاد الطلب كاملاً من المستخدم (لا يُدمج مع الجديد)
             qs = [a.question] if a.question and a.question != HELP_QUESTION else []
             return json.dumps({"questions": qs, "slots": [a.slot] if qs else []}, ensure_ascii=False)
         if a.steps:
+            steps, dropped = [], 0
+            for stp in a.steps:   # اسم لن يقبله المخطط (محارف مخادعة…): تُتخطى الخطوة بملاحظة بدل خطة كلها مرفوضة
+                names = [stp.get("target", ""), (stp.get("params") or {}).get("dest", ""), (stp.get("params") or {}).get("new_name", "")]
+                if any(isinstance(n, str) and n and name_problem(n) for n in names):
+                    dropped += 1
+                else:
+                    steps.append(stp)
+            if dropped:
+                a = Analysis(steps or None, a.question, _join_notes(a.note, f"تخطّيتُ {dropped} من خطوات الخطة لأن اسماً فيها يحوي محارف غير مرئية أو مخادعة لا أستطيع التعامل معها بأمان."), a.slot)
+            if not a.steps:
+                return json.dumps({"steps": [], "note": a.note or HELP_QUESTION}, ensure_ascii=False)
             out = {"steps": a.steps}
             if a.note:
                 out["note"] = a.note   # مثل «اقتُصرت الخطة على 48 عنصراً»: تصل للمستخدم مع الخطة
@@ -605,10 +910,20 @@ class RuleProvider(ModelProvider):
         lines: List[str] = []
         truncated = False
 
+        skipped: List[Tuple[str, str]] = []
+
         def ok(entry: "os.DirEntry", rel: str) -> bool:
             if _is_link(Path(entry.path)):
                 return False
-            if rel != "".join(ch for ch in rel if ch.isprintable()) or len(rel) > 120 or rel != rel.strip() or "\n" in rel:
+            why = None
+            if any(name_len(part) > MAX_NAME_UNITS for part in rel.split("/")) or (IS_WINDOWS and len(str(root / rel)) > MAX_PATH_CHARS):
+                why = "اسمه أو مساره أطول من الحد الذي يقبله النظام"
+            elif rel != rel.strip():
+                why = "في اسمه فراغ في أوله أو آخره"
+            else:
+                why = name_problem(rel)
+            if why:
+                skipped.append((rel, why))   # الفحص نفسه الذي يطبّقه المخطط على الأسماء: لا نبني خطة على اسم سيرفضه، لكننا نبلّغ عنه
                 return False
             return True
 
@@ -641,12 +956,48 @@ class RuleProvider(ModelProvider):
                 break
         if truncated:
             lines.append("… (القائمة مقتطعة)")
-        return _entries(lines)
+        out = _entries(lines)
+        out.skipped = tuple(skipped)
+        return out
+
+    @staticmethod
+    def _skipped_note(ents: "Ents") -> Optional[str]:
+        """ملاحظة بالعناصر التي لم تدخل الخطة لأن أسماءها غير صالحة للتعامل الآمن: العدد وأول ثلاثة أسماء."""
+        def show(name: str) -> str:
+            return "".join(ch if unicodedata.category(ch) != "Cf" else f"‹U+{ord(ch):04X}›" for ch in name)[:60]
+        if ents.skipped:
+            names = [show(r) for r, _ in ents.skipped]
+            n = len(names)
+        elif ents.skipped_line:
+            m = re.search(r"\((\d+) عنصر\w* باسم غير صالح[^:]*:\s*(.*)\)\s*$", ents.skipped_line)
+            if not m:
+                return None
+            n, names = int(m.group(1)), [x for x in re.split(r"،\s*", m.group(2)) if x]
+        else:
+            return None
+        return (f"استُثني من هذه الخطة {_n(n, 'عنصر')} لأن الاسم غير صالح للتعامل الآمن (محارف ممنوعة أو غير مرئية أو اتجاه خفي أو طول زائد): "
+                + "، ".join(names[:3]) + (" …" if n > 3 else "") + ". أعد التسمية من مستكشف الملفات إن كان مقصوداً.")
+
+    @staticmethod
+    def _skipped_mention(prompt: str, ents: "Ents") -> Optional[str]:
+        """الطلب يسمّي صراحة ملفاً تجاوزه المسح لأن اسمه غير صالح (علامة اتجاه خفية…) ولا يوجد عنصر ظاهر بالاسم نفسه ← رسالة محددة بدل «لم أجد»."""
+        if not ents.skipped:
+            return None
+        t = norm(_QUOTE_CHARS.sub(" ", strip_format_chars(prompt)))
+        visible = {norm(r.split("/")[-1]) for r in ents} | {norm(r) for r in ents}
+        for rel, why in ents.skipped:
+            base = rel.split("/")[-1]
+            for cand in {norm(strip_format_chars(base)), norm(strip_format_chars(rel))}:
+                if cand and cand not in visible and _mention_re(cand).search(t):
+                    shown = "".join(ch if unicodedata.category(ch) != "Cf" else f"‹U+{ord(ch):04X}›" for ch in rel)[:80]
+                    return _info(f"«{shown}» موجود في مجلد العمل لكن اسمه غير صالح للتعامل الآمن ({why})، فلا أستطيع التعامل معه من هنا. "
+                                 f"أعد تسميته من مستكشف الملفات ثم أعد الطلب.")
+        return None
 
     # ---------- التحليل ----------
-    def _mask(self, prompt: str, ents: Ents, files_only: bool = False) -> str:
+    def _mask(self, prompt: str, ents: Ents, files_only: bool = False, quote_tok: str = " § ") -> str:
         """يحجب العبارات المقتبسة وأسماء العناصر الموجودة وكل ما يشبه اسم ملف/مسار، ليبقى نص الأفعال وحده."""
-        t = norm(_QUOTE_RE.sub(" § ", prompt))
+        t = norm(_QUOTE_RE.sub(quote_tok, prompt))
         names = set()
         for rel, is_dir in ents.items():
             if files_only and is_dir:
@@ -662,6 +1013,28 @@ class RuleProvider(ModelProvider):
         return t
 
     def analyze(self, prompt: str, context: List[str]) -> Analysis:
+        box: Dict[str, "Ents"] = {}
+        a = self._analyze(prompt, context, box)
+        if a.question and a.slot is None and "موجود في أكثر من مكان" in a.question and "اكتب المسار الكامل" in a.question:
+            a.slot = "path"   # الجواب مسار كامل يحلّ محل الاسم الملتبس في الطلب (انظر merge_clarification)
+        ents = box.get("ents")
+        if not a.steps and a.question and _is_question(prompt):   # «ماذا لو حذفت x»: نعيد القراءة بلا افتتاحية السؤال وبصيغة الأمر لنشرح الأثر
+            alt = _PAST_VERBS.sub(lambda m: _PAST_TO_IMP[norm(m.group(1))], prompt)
+            qm = _Q_START.match(norm(alt))
+            alt = alt[qm.end():] if qm else alt
+            if alt.strip() and alt != prompt:
+                b = self._analyze(alt, context, {})
+                if b.steps and any(s.get("action_type") not in ("inspect", "run_command") for s in b.steps):
+                    return _question_reply(b)
+        if a.steps and _is_question(prompt) and any(s.get("action_type") not in ("inspect", "run_command") for s in a.steps):
+            return _question_reply(a)   # «هل أحذف temp.tmp؟» سؤال لا أمر: نشرح ما سيتأثر ولا نخطّط حذفاً
+        if ents is not None and a.steps:
+            sk = self._skipped_note(ents)
+            if sk:
+                a = Analysis(a.steps, a.question, _join_notes(a.note, sk), a.slot)
+        return a
+
+    def _analyze(self, prompt: str, context: List[str], box: Dict[str, "Ents"]) -> Analysis:
         prompt = strip_format_chars(prompt)
         prompt = re.sub(r"\s*\n?توضيحات المستخدم:\s*", " ", prompt).replace(" | ", " ")  # إجابات أسئلة التوضيح تُدمج بالطلب
         if len(prompt) > 600:
@@ -670,10 +1043,17 @@ class RuleProvider(ModelProvider):
         ents = _entries(context)
         if ents.partial and self.workspace is not None:
             ents = self._full_ents() or ents   # قائمة النموذج مقتطعة؛ القواعد تمسح هيكل المجلد كاملاً (حد كبير) فلا تتعطل عند >60 عنصراً
+        box["ents"] = ents
+        hid = self._skipped_mention(prompt, ents)
+        if hid:
+            return hid
         raw_prompt = prompt
         prompt = _clean_prompt(prompt, {norm(r.split("/")[-1]) for r in ents} | {norm(r) for r in ents})
         top_files = [r for r, d in ents.items() if not d and "/" not in r]
         top_dirs = [r for r, d in ents.items() if d and "/" not in r]
+        forb = _forbidden(self._mask(prompt, ents, quote_tok=" ¤ "))
+        if forb:
+            return forb
         clash = _function_name_clash(prompt, ents)
         if clash:
             return Analysis(question=clash)
@@ -713,6 +1093,10 @@ class RuleProvider(ModelProvider):
 
         if "copy" in intents and W_CREATE.search(text) and re.search(r"(?<!\w)نسخه\s+احتياطيه(?!\w)", text):
             return Analysis(question=MULTI_QUESTION)   # «اعمل نسخة احتياطية من X وانسخ Y إلى Z»: عمليتان
+        strip_info = _strip_affix_parse(prompt)
+        if strip_info:   # «بحذف/إزالة البادئة old_»: إزالة لا إضافة (كان يُضيف البادئة)
+            intents -= {"delete", "rename", "rename1"}
+            intents.add("strip")
         if "dup" in intents:
             others = intents - {"dup", "delete", "move", "inspect"}
             if others or {"delete", "move"} <= intents or ("inspect" in intents and intents & {"delete", "move"}):
@@ -720,6 +1104,8 @@ class RuleProvider(ModelProvider):
         elif len(intents) > 1:
             return Analysis(question=MULTI_QUESTION)
         if not intents:
+            if _START_RE.match(norm(prompt)):
+                return _info("لا توجد خطة جاهزة للتنفيذ. اكتب طلبك أولاً (مثل «رتّب الملفات حسب النوع») ثم اضغط ابدأ.")
             return Analysis(question=HELP_QUESTION)
         if W_THEN.search(text):
             return Analysis(question=MULTI_QUESTION)
@@ -746,6 +1132,7 @@ class RuleProvider(ModelProvider):
 
         # العمليات التي تغيّر الملفات: لا نخمّن عند الاستثناء أو الشرط
         stripped = re.sub(r"(?<!\w)غير\s+اسم", " ", text)
+        stripped = re.sub(r"(?<!\w)(?:ال)?(?:مجلد|folder)\s+(?:ال)?(?:جديد|جديده|new)(?!\w)", " § ", stripped)   # «مجلد جديد» وجهة لا شرط
         if W_NEG.search(stripped):
             return Analysis(question=EXCEPT_QUESTION)
         if W_QUAL.search(stripped):
@@ -758,6 +1145,8 @@ class RuleProvider(ModelProvider):
             if ents.partial:
                 return Analysis(question=PARTIAL_QUESTION)
             return self._duplicates("delete" in intents, ents)
+        if "strip" in intents:
+            return self._strip_affix(prompt, ents, strip_info)
         if "rename" in intents:
             return self._rename(prompt, ents)
         if "rename1" in intents:
@@ -840,7 +1229,7 @@ class RuleProvider(ModelProvider):
                     norm(r.split("/")[-1]) == tok for r in ents):
                 pos = m.end()
                 continue
-            return Resolved(ask=f"لم أجد مجلداً باسم «{tok}» في مجلد العمل. اكتب اسمه كما يظهر.")
+            return Resolved(ask=_not_found(tok, ents).replace("لم أجد «", "لم أجد مجلداً باسم «", 1))
 
         # 2) الأسماء: المسار الكامل أولاً ثم الاسم المجرّد (الأضحل مساراً؛ داخل النطاق الأبناء المباشرون أولاً)
         names: List[str] = []
@@ -884,53 +1273,69 @@ class RuleProvider(ModelProvider):
         for nb in sorted(groups, key=len, reverse=True):
             if not nb or nb not in work:
                 continue
+            if nb in _EN_FUNCTION_WORDS and nb not in quoted and not re.search(r"[\u0600-\u06FF]", text):
+                if nb in ("a", "an", "the"):   # «create a backup»: أداة التنكير «a» ليست الملف a إلا إن نُصِّص صراحة
+                    work = re.sub(r"(?<![\w.\-])" + re.escape(nb) + r"(?![\w\-]|\.\w)", " § ", work)
+                continue
             rx = _mention_re(nb)
             mm = rx.search(work)
             if not mm:
                 continue
-            cands = groups[nb]
-            if scope:
-                cands = [c for c in cands if c.startswith(scope + "/")]
-                if not cands:
-                    return Resolved(ask=f"لم أجد «{nb}» داخل «{scope}».")
-                direct = [c for c in cands if c.count("/") == scope.count("/") + 1]
-                cands = direct or cands
-            else:
-                shallow = min(c.count("/") for c in cands)
-                deeper = sorted(c for c in cands if c.count("/") != shallow)
-                if deeper and strict_depth:   # حذف/إعادة تسمية باسم مجرد موجود على أكثر من عمق: لا نخمّن أيّها (التشغيل الثاني كان يصيب الآخر)
+            # أسماء تختلف بحرف عربي فقط (أحمد/احمد، ي/ى، ه/ة) أو بفراغ مزدوج: ما كُتب مطابقاً تماماً لاسم موجود يُفضَّل على المطبَّع؛
+            # كُتب أكثر من شكل ← يُحلّ كل شكل على حدة. لا مطابق تام ← الالتباس القديم (سؤال).
+            variants: Dict[str, List[str]] = {}
+            for c in groups[nb]:
+                variants.setdefault(c.split("/")[-1].casefold(), []).append(c)   # فروق الحالة وحدها ليست «شكلاً آخر» (ويندوز يعدّها اسماً واحداً)
+            pieces = [groups[nb]]
+            if len(variants) > 1:
+                exact = [v for v in variants if _mention_re(v).search(head.casefold())]
+                if exact:
+                    pieces = [variants[v] for v in exact]
+            for cands in pieces:
+                if scope:
+                    cands = [c for c in cands if c.startswith(scope + "/")]
+                    if not cands:
+                        return Resolved(ask=f"لم أجد «{nb}» داخل «{scope}».")
+                    direct = [c for c in cands if c.count("/") == scope.count("/") + 1]
+                    cands = direct or cands
+                else:
+                    shallow = min(c.count("/") for c in cands)
+                    deeper = sorted(c for c in cands if c.count("/") != shallow)
+                    if deeper and strict_depth:   # حذف/إعادة تسمية باسم مجرد موجود على أكثر من عمق: لا نخمّن أيّها (التشغيل الثاني كان يصيب الآخر)
+                        return Resolved(ask=f"الاسم «{nb}» موجود في أكثر من مكان ({'، '.join(sorted(cands)[:3])}). اكتب المسار الكامل.")
+                    cands = [c for c in cands if c.count("/") == shallow]
+                    if deeper:
+                        depth_notes.append(f"اسم «{nb}» موجود أيضاً في {'، '.join(deeper[:3])}؛ اخترت «{cands[0]}» (الأضحل مساراً). اكتب المسار الكامل لغيره.")
+                    if ents.partial and shallow > 0:
+                        return Resolved(ask=f"قائمة مجلد العمل مقتطعة ولم أجد «{nb}» في المستوى الأول منها (وجدته داخل «{sorted(cands)[0]}» فقط)، "
+                                            f"وقد يكون المقصود ملفاً في الجذر لم يظهر لي. اكتب المسار الكامل.")
+                if len(cands) > 1:
+                    if len({c.split("/")[-1].casefold() for c in cands}) > 1:
+                        return Resolved(ask=f"في مجلد العمل أسماء متشابهة ({'، '.join(sorted(cands)[:4])}). اكتب الاسم تماماً كما يظهر (بالهمزات والياء والتاء المربوطة نفسها).")
                     return Resolved(ask=f"الاسم «{nb}» موجود في أكثر من مكان ({'، '.join(sorted(cands)[:3])}). اكتب المسار الكامل.")
-                cands = [c for c in cands if c.count("/") == shallow]
-                if deeper:
-                    depth_notes.append(f"اسم «{nb}» موجود أيضاً في {'، '.join(deeper[:3])}؛ اخترت «{cands[0]}» (الأضحل مساراً). اكتب المسار الكامل لغيره.")
-                if ents.partial and shallow > 0:
-                    return Resolved(ask=f"قائمة مجلد العمل مقتطعة ولم أجد «{nb}» في المستوى الأول منها (وجدته داخل «{sorted(cands)[0]}» فقط)، "
-                                        f"وقد يكون المقصود ملفاً في الجذر لم يظهر لي. اكتب المسار الكامل.")
-            if len(cands) > 1:
-                return Resolved(ask=f"الاسم «{nb}» موجود في أكثر من مكان ({'، '.join(sorted(cands)[:3])}). اكتب المسار الكامل.")
-            q = dir_context_ask(cands[0], mm.start(), mm.end()) or kind_clash_ask(cands[0], nb, mm.start())
-            if q:
-                return Resolved(ask=q)
-            if not scope and not inspecting and not names_only and ents.get(cands[0]) and "/" in cands[0] and "/" not in nb:
-                # مجلد متداخل بالاسم المجرد (docs/صور): لا نحذفه/ننقله بتخمين، تُكتب مساره الكامل
-                return Resolved(ask=f"«{nb}» مجلد داخل «{cands[0]}» وليس في الجذر. اكتب المسار الكامل إن قصدته.")
-            names.append(cands[0])
+                q = dir_context_ask(cands[0], mm.start(), mm.end()) or kind_clash_ask(cands[0], nb, mm.start())
+                if q:
+                    return Resolved(ask=q)
+                if not scope and not inspecting and not names_only and ents.get(cands[0]) and "/" in cands[0] and "/" not in nb:
+                    # مجلد متداخل بالاسم المجرد (docs/صور): لا نحذفه/ننقله بتخمين، تُكتب مساره الكامل
+                    return Resolved(ask=f"«{nb}» مجلد داخل «{cands[0]}» وليس في الجذر. اكتب المسار الكامل إن قصدته.")
+                names.append(cands[0])
             work = rx.sub(" § ", work)
 
         # 3) كلمات تشبه اسم ملف/مسار ولم تُطابَق ← لا نخمّن
         tok = _unmatched_filelike(work)
         if tok:
-            return Resolved(ask=f"لم أجد «{tok}» في مجلد العمل. اكتب اسمه كما يظهر.")
+            return Resolved(ask=_not_found(tok, ents))
         if not names_only:
             for qn in sorted(quoted, key=len, reverse=True):   # اسم منصَّص لم يُطابق شيئاً ← حرفي غير موجود، لا يُفهم نوعاً (نظف «فيديو» كانت تحذف كل الفيديو)
                 if qn and not qn.isdigit() and _mention_re(qn).search(work):
-                    return Resolved(ask=f"لم أجد «{_orig_word(qn, head)}» في مجلد العمل. اكتب اسمه كما يظهر.")
+                    return Resolved(ask=_not_found(_orig_word(qn, head), ents))
         if not names_only:   # «مجلد X» بقي X بعد حجب المجلدات الموجودة ← لا مجلد بهذا الاسم؛ لا نُسقط كلمة «مجلد» ونفهم X نوعاً (حذف كل الصور!)
             fm = re.search(r"(?<!\w)(?:(?:ال)?مجلد|folder)\s+(?:(?:اسمه|باسم|named|called)\s+)?([^\s§]+)", work)
             if fm:
                 ftok = fm.group(1).strip("،,؛;:.!؟?")
                 if ftok and ftok not in _ROOT_TOKENS and ftok not in _STOP_AFTER_FROM and ftok not in ("و", "في", "من", "الى", "الي", "to", "in"):
-                    return Resolved(ask=f"لم أجد مجلداً باسم «{_orig_word(ftok, head)}» في مجلد العمل. اكتب اسمه كما يظهر.")
+                    return Resolved(ask=_not_found(_orig_word(ftok, head), ents).replace("لم أجد «", "لم أجد مجلداً باسم «", 1))
 
         pool = [r for r, d in ents.items() if not d and _visible(r) and
                 ((r.startswith(scope + "/") and r.count("/") == scope.count("/") + 1) if scope else "/" not in r)]
@@ -981,10 +1386,23 @@ class RuleProvider(ModelProvider):
                    or (r.rsplit(".", 1)[-1].lower() in exts and "." in r.split("/")[-1])
                    or any(pred(r.split("/")[-1]) for pred in groups)]
             # ملفات القفل ~$cv.docx يفتحها الأوفيس: لا تُختار ضمن نوع/امتداد (إلا حين تُطلب «المؤقتة» صراحة)
-            locks = [r for r in sel if r.split("/")[-1].startswith("~$") and _is_temp not in groups]
+            # ملف القفل ~$ لمستند ما زال موجوداً قد يكون مفتوحاً الآن، وملف «اسم (1).tmp» بجانب «اسم.*» قد يكون نسخة تخص المستخدم:
+            # لا يُختاران تلقائياً حتى مع «المؤقتة» (يُسمّيان صراحة). القفل اليتيم (بلا مستنده) يُحذف كالمعتاد.
+            base_of = lambda r: r.split("/")[-1]
+            others = [base_of(r).lower() for r in pool if not base_of(r).startswith("~$")]
+            def owner_present(r):
+                tail = base_of(r)[2:].lower()
+                return len(tail) >= 3 and any(o.endswith(tail) for o in others)
+            locks = [r for r in sel if base_of(r).startswith("~$") and (_is_temp not in groups or owner_present(r))]
             sel = [r for r in sel if r not in locks]
+            def dupish_of_real(r):
+                m = re.match(r"^(.*) \(\d+\)\.[^.]+$", base_of(r))
+                return bool(m) and _is_temp in groups and any(o.rsplit(".", 1)[0].lower() == m.group(1).lower()
+                                                           or o.startswith(m.group(1).lower() + " (") for o in others if o != base_of(r).lower())
+            dupish = [r for r in sel if dupish_of_real(r)]
+            sel = [r for r in sel if r not in dupish]
             return Resolved(sorted(dict.fromkeys(sel)), "cat" if (cats or groups) and not exts else "ext", kw=kw_names,
-                            note=_skip_notes([], sorted(locks)))
+                            note=_join_notes(_skip_notes([], sorted(locks)), _skip_dup_note(sorted(dupish))))
         return Resolved()
 
     # ---------- الوجهة ----------
@@ -1044,6 +1462,8 @@ class RuleProvider(ModelProvider):
         if not name:
             return None, "ما اسم المجلد الذي تريد الوجهة إليه؟ (اسم عادي بلا مسارات ولا رموز ممنوعة ولا نقطة في أوله أو آخره)", head
         nn = norm(name)
+        if nn in ("جديد", "جديده", "new") and not any(norm(d) == nn for d in top_dirs):
+            return None, "ما اسم المجلد الجديد الذي تريد إنشاءه؟ اكتب اسمه (مثل Reports، أو بين تنصيص إن كان من عدة كلمات).", head
         if nn in _GENERIC_DEST and not any(norm(d) == nn for d in top_dirs):
             return None, f"«{name}» ليس اسم مجلد. ما اسم المجلد الذي تريده؟ (إن كان من عدة كلمات فاكتبه بين تنصيص)", head
         for d in top_dirs:  # ويندوز لا يميّز حالة الأحرف، ونطابق بالتوحيد نفسه المستعمل للمصادر (أ/ا، ى/ي، ة/ه، الأرقام الهندية)
@@ -1144,7 +1564,7 @@ class RuleProvider(ModelProvider):
             return Analysis(question="إعادة التسمية بالبادئة تُطبَّق على كل ملفات المجلد فقط، لا على امتداد معيّن. اذكر مجلداً.")
         bad = _unmatched_filelike(rest)
         if bad:
-            return Analysis(question=f"لم أجد «{bad}» في مجلد العمل. اكتب اسمه كما يظهر.")
+            return Analysis(question=_not_found(bad, ents))
         if re.search(r"(?<!\w)(?:ال)?ملف\s+(?:ال)?(?:حالي|سابق|اول|اخير|تالي|ثاني)(?!\w)", rest):
             return Analysis(question="البادئة تُضاف لكل ملفات المجلد لا لملف بعينه («الملف الحالي/الأول…»). اذكر مجلداً، أو سمِّ الملف بالاسم لإعادة تسميته وحده.")
         tok = _unknown_token(rest, _RENAME_FILL, pre="وبل")
@@ -1172,6 +1592,90 @@ class RuleProvider(ModelProvider):
         steps = [_step(i, "rename", f, "الاسم الجديد موجود والمحتوى مطابق", new_name=prefix + f.split("/")[-1])
                  for i, f in enumerate(sorted(files), 1)]
         return Analysis(steps, note=_join_notes(_trunc_note(len(steps), dropped, ents.partial), _skip_notes([], locks)))
+
+    def _strip_affix(self, prompt: str, ents: Ents, info) -> Analysis:
+        """إزالة بادئة/لاحقة من أسماء ملفات مجلد (أو الجذر): تُعاد تسمية الملفات التي تحملها فقط؛ لا شيء منها ← لا شيء للتنفيذ."""
+        kind, affix, a0, a1 = info
+        word = "البادئة" if kind == "prefix" else "اللاحقة"
+        if not affix:
+            return Analysis(question=f"ما {word} التي تريد حذفها من أسماء الملفات؟ مثال: «احذف {word} old_»", slot=f"strip_{kind}")
+        if not _safe_name(affix):
+            return Analysis(question=f"{word} غير صالحة (بلا مسارات ولا رموز ممنوعة). اكتبها مثل «old_».")
+        rest = norm(_QUOTE_CHARS.sub(" ", prompt[:a0] + " § " + prompt[a1:]))
+        dirs = sorted((r for r, d in ents.items() if d), key=len, reverse=True)
+        folder = None
+        for d in dirs:
+            if _mention_re(norm(d)).search(rest):
+                folder = d
+                rest = _mention_re(norm(d)).sub(" § ", rest)
+                break
+        if folder is None:
+            by_base: Dict[str, List[str]] = {}
+            for d in dirs:
+                by_base.setdefault(norm(d.split("/")[-1]), []).append(d)
+            for b in sorted(by_base, key=len, reverse=True):
+                if _mention_re(b).search(rest):
+                    if len(by_base[b]) > 1:
+                        return Analysis(question=f"المجلد «{b}» موجود في أكثر من مكان. اكتب المسار الكامل.")
+                    folder = by_base[b][0]
+                    rest = _mention_re(b).sub(" § ", rest)
+                    break
+        for rel, is_dir in ents.items():
+            if not is_dir and _mention_re(norm(rel.split("/")[-1])).search(rest):
+                return Analysis(question=f"حذف {word} يُطبَّق على كل ملفات المجلد التي تحملها، لا على ملفات بعينها. اذكر مجلداً بدل اسم ملف.")
+        bad = _unmatched_filelike(rest)
+        if bad:
+            return Analysis(question=_not_found(bad, ents))
+        tok = _unknown_token(rest, _RENAME_FILL | {"نزع", "انزع", "ازل", "ازاله", "ازال", "شيل", "امسح", "مسح", "حذف", "بحذف", "remove", "strip"}, pre="وبل")
+        if tok:
+            return Analysis(question=(f"لم أفهم «{_orig_word(tok, prompt)}» في الطلب. اذكر اسم مجلد موجود كما يظهر، "
+                                      f"أو اكتب «احذف {word} {affix}» وحدها لملفات مجلد العمل."))
+        if folder:
+            files = [e for e, d in ents.items() if not d and e.rsplit("/", 1)[0] == folder and "/" in e]
+        else:
+            files = [e for e, d in ents.items() if "/" not in e and not d]
+        files = [f for f in files if _visible(f)]
+        locks = [f for f in files if f.split("/")[-1].startswith("~$")]
+        files = [f for f in files if f not in locks]
+        existing = {r.casefold() for r in ents}
+        planned, taken, skipped = [], set(), []
+        af = affix.casefold()
+        for f in sorted(files, key=str.lower):
+            parent, base = (f.rsplit("/", 1) if "/" in f else ("", f))
+            new = None
+            if kind == "prefix":
+                if base.casefold().startswith(af):
+                    new = base[len(affix):]
+            elif affix.startswith("."):
+                if base.casefold().endswith(af) and len(base) > len(affix):
+                    new = base[:-len(affix)]
+            else:
+                stem, ext = (base.rsplit(".", 1)[0], "." + base.rsplit(".", 1)[1]) if "." in base[1:] else (base, "")
+                if stem.casefold().endswith(af) and len(stem) > len(affix):
+                    new = stem[:-len(affix)] + ext
+            if new is None:
+                continue
+            safe = _safe_name(new)
+            full = (parent + "/" if parent else "") + (safe or "")
+            if not safe or (kind == "prefix" and new.startswith(".")) or full.casefold() in existing or full.casefold() in taken:
+                skipped.append(f)
+                continue
+            taken.add(full.casefold())
+            planned.append((f, safe))
+        if not planned:
+            if ents.partial:
+                return Analysis(question=PARTIAL_QUESTION)
+            where = f" داخل {folder}" if folder else ""
+            if skipped:
+                return _info(f"الملفات التي تحمل {word} «{affix}»{where} لا يمكن إزالتها لأن الاسم الناتج موجود أصلاً أو غير صالح: " + "، ".join(skipped[:5]) + ".")
+            return _info(f"لا توجد ملفات {'تبدأ بـ' if kind == 'prefix' else 'تنتهي بـ'}«{affix}»{where}.")
+        dropped = max(0, len(planned) - MAX_AUTO_STEPS)
+        planned = planned[:MAX_AUTO_STEPS]
+        steps = [_step(i, "rename", f, "الاسم الجديد موجود والمحتوى مطابق", new_name=n) for i, (f, n) in enumerate(planned, 1)]
+        extra = None
+        if skipped:
+            extra = f"تُرك {_n(len(skipped), 'ملف')} لأن الاسم بعد الإزالة موجود أصلاً أو غير صالح: " + "، ".join(skipped[:3]) + ("…" if len(skipped) > 3 else "") + "."
+        return Analysis(steps, note=_join_notes(_trunc_note(len(steps), dropped, ents.partial), extra, _skip_notes([], locks)))
 
     def _rename_one(self, prompt: str, ents: Ents) -> Analysis:
         """«غير اسم a.txt إلى b.txt»: إعادة تسمية عنصر واحد باسم صريح (يبقى في مجلده)."""
@@ -1206,7 +1710,7 @@ class RuleProvider(ModelProvider):
             return Analysis(question="الاسم الجديد غير صالح (بلا مسارات ولا رموز ممنوعة ولا أسماء ويندوز المحجوزة).")
         base = src.split("/")[-1]
         if name == base:
-            return Analysis(note="الاسم الجديد مطابق للاسم الحالي؛ لا شيء لتغييره.")
+            return _info("الاسم الجديد مطابق للاسم الحالي؛ لا شيء لتغييره.")
         if "." in base and not ents.get(src) and "." not in name:
             return Analysis(question=f"الاسم الجديد «{name}» بلا امتداد. هل تقصد «{name}.{base.rsplit('.', 1)[-1]}»؟ اكتبه كاملاً.")
         parent = src.rsplit("/", 1)[0] + "/" if "/" in src else ""
@@ -1214,10 +1718,30 @@ class RuleProvider(ModelProvider):
             return Analysis(question=f"يوجد «{name}» أصلاً في المكان نفسه. اختر اسماً آخر.")
         return Analysis([_step(1, "rename", src, "الاسم الجديد موجود والمحتوى مطابق", new_name=name)])
 
+    def _offer_files(self, head: str, ents: Ents) -> str:
+        """«الملفات الظاهرة في <النطاق>: …» لتلحق سؤال «ما الذي تريد…؟» فيختار المستخدم من القائمة (النطاق: مجلد «من/في X» في الطلب وإلا الجذر)."""
+        text = norm(_QUOTE_CHARS.sub(" ", head))
+        dirs = sorted((r for r, d in ents.items() if d), key=len, reverse=True)
+        scope = None
+        for m in _SCOPE_RE.finditer(text):
+            hit, ask, _ = self._dir_at(text[m.end():], dirs)
+            if hit:
+                scope = hit
+                break
+        pool = sorted((r for r, d in ents.items() if not d and _visible(r) and
+                       ((r.startswith(scope + "/") and r.count("/") == scope.count("/") + 1) if scope else "/" not in r)), key=lambda r: r.casefold())
+        if not pool:
+            return ""
+        names = [r.split("/")[-1] for r in pool]
+        shown = "، ".join(names[:10]) + (f" … و{_n(len(names) - 10, 'ملف')} أخرى" if len(names) > 10 else "")
+        where = f"«{scope}»" if scope else "مجلد العمل"
+        part = " (القائمة مقتطعة)" if ents.partial else ""
+        return f" الملفات الظاهرة في {where}{part}: {shown}."
+
     @staticmethod
     def _ask(question: str) -> Analysis:
         """سؤال القواعد مع نوع الخانة الناقصة إن عُرف (ليحوّل المتحكم الجواب العاري إلى جملة صريحة)."""
-        slot = "dest" if (question.startswith(("ما اسم المجلد الذي تريد الوجهة", "إلى أي مجلد", "اسم المجلد يبدو من أكثر"))
+        slot = "dest" if (question.startswith(("ما اسم المجلد الذي تريد الوجهة", "إلى أي مجلد", "اسم المجلد يبدو من أكثر", "ما اسم المجلد الجديد الذي"))
                           or any(k in question for k in ("ليس اسم مجلد", "يبدو اسم ملف لا مجلد", "فلا أستطيع إنشاء مجلد بالاسم"))) else None
         return Analysis(question=question, slot=slot)
 
@@ -1231,9 +1755,9 @@ class RuleProvider(ModelProvider):
         if ents.partial and res.kind in ("cat", "ext"):
             return Analysis(question=PARTIAL_QUESTION)
         if not res.items:
-            return Analysis(question="ما اسم الملف أو المجلد الذي تريد نسخه؟ اكتبه كما يظهر في مجلد العمل.", slot="source")
+            return Analysis(question="ما اسم الملف أو المجلد الذي تريد نسخه؟ اكتبه كما يظهر في مجلد العمل." + self._offer_files(head, ents), slot="source")
         if len(res.items) > MAX_AUTO_STEPS - 1:
-            return Analysis(question=f"عدد العناصر كبير ({len(res.items)}). حدّد مجموعة أصغر.")
+            return Analysis(question=f"عدد العناصر كبير ({_n(len(res.items), 'عنصر')}). حدّد مجموعة أصغر.")
         if not dest_dir:
             dest_dir = "نسخة_احتياطية"
             if any(f.casefold() == dest_dir.casefold() for f in top_files):
@@ -1258,9 +1782,9 @@ class RuleProvider(ModelProvider):
         if ents.partial and res.kind in ("cat", "ext"):
             return Analysis(question=PARTIAL_QUESTION)
         if not res.items:
-            return Analysis(question="ما الذي تريد نقله؟ اكتب اسم الملف/المجلد أو نوعه (مثل pdf أو الصور).", slot="source")
+            return Analysis(question="ما الذي تريد نقله؟ اكتب اسم الملف/المجلد أو نوعه (مثل pdf أو الصور)." + self._offer_files(head, ents), slot="source")
         if len(res.items) > MAX_AUTO_STEPS - 1:
-            return Analysis(question=f"عدد العناصر كبير ({len(res.items)}). حدّد مجموعة أصغر.")
+            return Analysis(question=f"عدد العناصر كبير ({_n(len(res.items), 'عنصر')}). حدّد مجموعة أصغر.")
         return self._with_note(self._transfer("move", res.items, dest_dir, ents, top_dirs, "المصدر اختفى والوجهة مطابقة"), res.note)
 
     @staticmethod
@@ -1430,7 +1954,7 @@ class RuleProvider(ModelProvider):
         if not res.items:
             return Analysis(question="نسخة احتياطية من ماذا؟ اكتب اسم الملف أو المجلد كما يظهر، مثل «اعمل نسخة احتياطية من Docs».", slot="source")
         if len(res.items) > MAX_AUTO_STEPS:
-            return Analysis(question=f"عدد العناصر كبير ({len(res.items)}). حدّد مجموعة أصغر.")
+            return Analysis(question=f"عدد العناصر كبير ({_n(len(res.items), 'عنصر')}). حدّد مجموعة أصغر.")
         dest_dir = "نسخة_احتياطية"
         if any(not d and "/" not in r and r.casefold() == dest_dir.casefold() for r, d in ents.items()):
             return Analysis(question="يوجد ملف باسم «نسخة_احتياطية» فلا أنشئ مجلداً بالاسم نفسه. اكتب مجلد الوجهة: «انسخ <اسم> إلى <مجلد>».")
@@ -1466,13 +1990,15 @@ class RuleProvider(ModelProvider):
         locks = [f for f in all_files if f.startswith("~$")]
         files = [f for f in all_files if f not in locks]
         existing = {r.casefold() for r in ents}
-        moves, folders, clash = [], [], []
+        moves, folders, clash, odd_dates = [], [], [], []
         names_cf = {x.casefold() for x in files}
         for f in sorted(files, key=str.lower):
             st = self._stat(f)
             if not st:
                 continue
-            d = datetime.date.fromtimestamp(st[1].st_mtime)
+            d, odd = _mtime_date(st[1].st_mtime)
+            if odd:
+                odd_dates.append(f)
             key = f"{d.year}" if by_year else f"{d.year}-{d.month:02d}"
             if key.casefold() in names_cf:
                 clash.append(f)
@@ -1487,7 +2013,9 @@ class RuleProvider(ModelProvider):
         moves = moves[: max(0, MAX_AUTO_STEPS - len(folders))]
         dropped = n_before - len(moves)
         folders = [k for k in folders if any(m[1] == k for m in moves)]
-        extra = _skip_notes(clash, locks)
+        extra = _join_notes(_skip_notes(clash, locks),
+                            (f"تاريخ تعديل {_n(len(odd_dates), 'ملف')} غير اعتيادي (قبل 1970 أو خارج النطاق) فصُنِّفت بأقرب تاريخ صالح: "
+                             + "، ".join(odd_dates[:3]) + (" …" if len(odd_dates) > 3 else "") + ".") if odd_dates else None)
         if not moves:
             if ents.partial:
                 return Analysis(question=PARTIAL_QUESTION)
@@ -1555,8 +2083,8 @@ class RuleProvider(ModelProvider):
         dups = sorted((d for g in groups for d in g[1:]), key=str.lower)
         if not dups:
             return _info("لم أجد ملفات مكررة المحتوى في مجلد العمل.")
-        if len(dups) > MAX_AUTO_STEPS - 1:
-            return Analysis(question=f"وجدت {len(dups)} ملفاً مكرراً وهذا أكثر من حد الخطة. نظّف جزءاً منها ثم أعد الطلب.")
+        if delete and len(dups) > MAX_AUTO_DELETE_STEPS - 1 or len(dups) > MAX_AUTO_STEPS - 1:
+            return Analysis(question=f"وجدت {_n(len(dups), 'ملف')} مكرراً وهذا أكثر من حد الخطة. نظّف جزءاً منها ثم أعد الطلب.")
         if delete:
             return Analysis([_step(i, "delete", d, "العنصر اختفى من مكانه وصار في السلة بنفس المحتوى") for i, d in enumerate(dups, 1)])
         flat = [d.replace("/", "_") for d in dups]
@@ -1580,9 +2108,9 @@ class RuleProvider(ModelProvider):
         shown = []
         for g in groups[:12]:
             shown.append(" = ".join(g[:4]) + (f" (+{len(g) - 4})" if len(g) > 4 else ""))
-        more = f" … و{len(groups) - 12} مجموعة أخرى" if len(groups) > 12 else ""
+        more = f" … و{_n(len(groups) - 12, 'مجموعة')} أخرى" if len(groups) > 12 else ""
         n_dup = sum(len(g) - 1 for g in groups)
-        note = f"وجدت {len(groups)} مجموعة مكررة ({n_dup} نسخة زائدة)؛ لم يُحذف أو يُنقل شيء: " + "؛ ".join(shown) + more
+        note = f"وجدت {_n(len(groups), 'مجموعة')} مكررة ({_n(n_dup, 'نسخة')} زائدة)؛ لم يُحذف أو يُنقل شيء: " + "؛ ".join(shown) + more
         if ents.partial:
             note += ". المسح جزئي لأن مجلد العمل كبير، فقد توجد مكررات أخرى لم أفحصها"
         members = [m for g in groups for m in g][:MAX_AUTO_STEPS]
@@ -1596,21 +2124,28 @@ class RuleProvider(ModelProvider):
         res = self._resolve(prompt, ents, strict_depth=True)
         if res.ask:
             return Analysis(question=res.ask)
+        if re.search(r"(?<!\w)(?:نظف|نظفها|تنظيف|clean|cleanup)(?!\w)", text) and res.kind == "name":
+            dirs_ = [t for t in res.items if ents.get(t)]
+            if dirs_:   # «نظف Docs» لا تعني حذف المجلد كله: نسأل عن المقصود
+                d0 = dirs_[0]
+                return Analysis(question=(f"«نظّف {d0}» تحتمل أكثر من معنى. اختر واحداً واكتبه صراحة: "
+                                          f"حذف المجلد كله («احذف مجلد {d0}»)، أو حذف الملفات المؤقتة داخله فقط («احذف الملفات المؤقتة من {d0}»)، "
+                                          f"أو ترتيب ملفات مجلد العمل («رتب الملفات حسب النوع»)."))
         if ents.partial and res.kind in ("cat", "ext"):
             return Analysis(question=PARTIAL_QUESTION)
         if W_ALL.search(text) and (not res.items or any(ents.get(t) for t in res.items)):
             return Analysis(question="الحذف الشامل غير مدعوم تلقائياً. سمِّ ما تريد حذفه بالاسم أو بالنوع (مثل «الصور»).")
         if not res.items:
-            return Analysis(question="ما الملف أو المجلد الذي تريد حذفه؟ اكتب اسمه كما يظهر في مجلد العمل.", slot="source")
-        if len(res.items) > MAX_AUTO_STEPS:
-            return Analysis(question=f"عدد العناصر كبير ({len(res.items)}). حدّد مجموعة أصغر للحذف.")
+            return Analysis(question="ما الملف أو المجلد الذي تريد حذفه؟ اكتب اسمه كما يظهر في مجلد العمل." + self._offer_files(prompt, ents), slot="source")
+        if len(res.items) > MAX_AUTO_DELETE_STEPS:
+            return Analysis(question=f"عدد العناصر كبير ({_n(len(res.items), 'عنصر')}). حدّد مجموعة أصغر للحذف.")
         steps = [_step(i, "delete", t, "العنصر اختفى من مكانه وصار في السلة بنفس المحتوى")
                  for i, t in enumerate(sorted(res.items), 1)]
         note = res.note
         if "المؤقتة" in res.kw:   # «المؤقتة» تقدير بالمعنى: تُعرض أسماء ما سيُحذف قبل الموافقة
             names = sorted(res.items)
             note = _join_notes("ستُحذف هذه الملفات المؤقتة (كل حذف يطلب موافقتك ويمكن التراجع عنه): " + "، ".join(names[:30])
-                               + (f" … و{len(names) - 30} أخرى" if len(names) > 30 else "") + ".", note)
+                               + (f" … و{_n(len(names) - 30, 'ملف')} أخرى" if len(names) > 30 else "") + ".", note)
         return Analysis(steps, note=note)
 
     def _create(self, prompt: str, ents: Ents) -> Analysis:
@@ -1659,6 +2194,17 @@ class RuleProvider(ModelProvider):
         return Analysis([_step(1, "create_dir", safe, "وجود المجلد")])
 
     def _inspect(self, prompt: str, ents: Ents) -> Analysis:
+        # «اعرض ملفات pdf» / «اعرض الصور [من Docs]»: عرض ملفات النوع بدل «لم أجد pdf»
+        full = self._resolve(W_INSPECT.sub(" ", norm(prompt)), ents, inspecting=True)
+        if not full.ask and full.kind in ("cat", "ext"):
+            if ents.partial:
+                return Analysis(question=PARTIAL_QUESTION)
+            if not full.items:
+                return _info("لا توجد ملفات من هذا النوع" + (" في المجلد المذكور." if _SCOPE_RE.search(norm(prompt)) else " في مجلد العمل."))
+            shown = full.items[:MAX_AUTO_STEPS]
+            return Analysis([_step(i, "inspect", t, "العنصر موجود فعلاً") for i, t in enumerate(shown, 1)],
+                            note=_join_notes(f"عدد الملفات المعروضة: {len(shown)}.",
+                                             _trunc_note(len(shown), max(0, len(full.items) - MAX_AUTO_STEPS)), full.note))
         res = self._resolve(prompt, ents, names_only=True, inspecting=True)
         if res.ask:
             return Analysis(question=res.ask)
@@ -1669,7 +2215,9 @@ class RuleProvider(ModelProvider):
                 t = _mention_re(nm).sub(" § ", t)
         tok = _unknown_token(W_INSPECT.sub(" ", t), _INSPECT_FILL)
         if tok:
-            return Analysis(question=f"لم أجد «{tok}» في مجلد العمل. اكتب اسمه كما يظهر، أو اطلب «افحص» وحدها لفحص مجلد العمل كله.")
+            if tok in _ALL_CAT_EXTS:   # امتداد معروف لا ملفات منه: لا شيء للعرض (لا «لم أجد»)
+                return _info(f"لا توجد ملفات {tok} في مجلد العمل.")
+            return Analysis(question=_not_found(tok, ents, "، أو اطلب «افحص» وحدها لفحص مجلد العمل كله"))
         if not res.items:
             return Analysis([_step(1, "inspect", ".", "العنصر موجود فعلاً")])
         return Analysis([_step(i, "inspect", t, "العنصر موجود فعلاً") for i, t in enumerate(res.items[:MAX_AUTO_STEPS], 1)],

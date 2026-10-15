@@ -119,7 +119,8 @@ try:
     with tempfile.TemporaryDirectory() as tmp:
         root, led = mk(tmp, {"invoice.pdf": "1", "invoice​.pdf": "2", "report.docx": "r", "a": "a", "a.tmp": "t"})
         lst = TaskRunner(root, rp, led).workspace_listing().splitlines()
-        assert "invoice.pdf" in lst and len(lst) == 4, lst
+        # الاسم بمحرف خفي لا يُعرض لكنه يُبلَّغ عنه (سطر «…») فلا يُسقَط بصمت
+        assert "invoice.pdf" in lst and len(lst) == 5 and lst[-1].startswith("…") and "1" in lst[-1], lst
     assert mentions("report.docx", norm("احذف report.docx")) and not mentions("report.docx", norm("احذف my_report.docx"))
     assert not mentions("a", norm("احذف a.tmp")) and mentions("a.tmp", norm("احذف a.tmp"))
 

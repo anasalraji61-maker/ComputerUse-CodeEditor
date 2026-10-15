@@ -42,5 +42,6 @@ def build_provider(env: Optional[Mapping[str, str]] = None, **provider_kw) -> Tu
     small._require_key()
     router = ModelRouter(small, large)
     return RuleFirstProvider(router), (
-        f"نموذج حقيقي: {kind} (صغير: {small_m}، كبير: {large_m}). الطلبات المعروفة تُخطَّط محلياً بلا كلفة."
+        f"نموذج حقيقي: {kind} (صغير: {small_m}، كبير: {large_m}). الطلبات المعروفة تُخطَّط محلياً بلا كلفة. "
+        f"تنبيه خصوصية: في الطلبات غير المعروفة تُرسل أسماء الملفات (حتى 60 اسماً) وطلبك إلى {'Anthropic' if kind == 'anthropic' else 'Google'}."
     )

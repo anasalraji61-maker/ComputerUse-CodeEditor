@@ -6,6 +6,7 @@
 import hashlib
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -52,6 +53,53 @@ def fingerprint():
     return h.hexdigest()
 
 
+# ---- أمان: لا مفاتيح في بيئة الاختبارات ولا في docs/TEST_RESULTS.md (يُرفع إلى GitHub آلياً) ----
+_SECRET_NAME = re.compile(r"(KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|COOKIE|SESSION)", re.I)     # أسماء تُستبعد من بيئة الأبناء
+_EXTRA_ENV = ("DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY", "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "PYTHONUTF8",
+              "TZ", "TCL_LIBRARY", "TK_LIBRARY", "LANG", "GIT_EXEC_PATH", "SSL_CERT_FILE")
+
+try:   # القائمة المشتركة (assistant/redact.py)؛ احتياط مبسّط إن تعذّر استيراد الحزمة (مثلاً أثناء سحب غير مكتمل)
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from assistant.redact import redact, secret_env_values as secret_values  # noqa: F401
+except Exception:  # pragma: no cover
+    _FALLBACK = [re.compile(p) for p in (
+        r"(?<![A-Za-z0-9_\-])sk-ant-[A-Za-z0-9_\-]{10,}", r"(?<![A-Za-z0-9_\-])sk-[A-Za-z0-9]{20,}",
+        r"(?<![A-Za-z0-9_\-])AIza[0-9A-Za-z_\-]{30,}", r"(?<![A-Za-z0-9_\-])gh[pousr]_[A-Za-z0-9]{30,}",
+        r"(?<![A-Za-z0-9_\-])github_pat_[A-Za-z0-9_]{20,}", r"(?<![A-Za-z0-9_\-])AKIA[0-9A-Z]{16}",
+        r"(?i)\bBearer\s+[A-Za-z0-9._~+/=\-]{20,}")]
+
+    def secret_values(environ=None):
+        env = os.environ if environ is None else environ
+        return sorted({v for k, v in env.items() if isinstance(v, str) and len(v) >= 12 and "/" not in v and "\\" not in v
+                       and re.search(r"(^|_)(API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)S?($|_)|_KEY$", k, re.I)}, key=len, reverse=True)
+
+    def redact(text, environ=None):
+        for v in secret_values(environ):
+            text = text.replace(v, "***")
+        for pat in _FALLBACK:
+            text = pat.sub("***", text)
+        return text
+
+
+def child_env(data_dir, environ=None):
+    """بيئة الاختبارات: قائمة بيضاء (minimal_env + متغيرات COS_* غير السرية + ما يلزم للعرض)، بلا أي مفتاح/توكن/سر."""
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from assistant.tools.shell import minimal_env
+    src = os.environ if environ is None else environ
+    env = minimal_env(src)
+    for k, v in src.items():
+        if not isinstance(v, str):
+            continue
+        if k in _EXTRA_ENV or k.startswith("LC_"):
+            env[k] = v
+        elif k.startswith("COS_") and not _SECRET_NAME.search(k):
+            env[k] = v
+    env.update(COS_TEST_MODE="1", PYTHONIOENCODING="utf-8", COS_DATA_DIR=data_dir)
+    return env
+
+
 def is_test(p):
     return p.name.startswith("test_") or p.name.endswith("_test.py")
 
@@ -62,11 +110,11 @@ def run(path):
     try:
         # بيانات التطبيق في مجلد مؤقت: الاختبارات لا تمس إعدادات المالك الحقيقية (~/.cos_assistant)
         with tempfile.TemporaryDirectory() as data:
-            env = dict(os.environ, COS_TEST_MODE="1", PYTHONIOENCODING="utf-8", COS_DATA_DIR=data)
+            env = child_env(data)
             r = subprocess.run([sys.executable, str(path)], cwd=ROOT, env=env,
                                capture_output=True, text=True, encoding="utf-8",
                                errors="replace", timeout=TIMEOUT)
-        out = (r.stdout + r.stderr).strip()
+        out = redact((r.stdout + r.stderr).strip())
         return r.returncode == 0, out, time.time() - t0
     except subprocess.TimeoutExpired:
         return False, f"TIMEOUT after {TIMEOUT}s", TIMEOUT

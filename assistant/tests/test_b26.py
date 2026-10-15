@@ -171,6 +171,7 @@ try:
         good = jp.read_text(encoding="utf-8")
         entries = json.loads(good)
         entries.append({"action": "create_dir", "path": "rel:newdir", "task": None})
+        entries[-1] = f10.sign_disk_entry(entries[-1])   # كاتب شرعي يوقّع إدخاله (إدخال غير موقّع في سجل موقّع يُرفض)
         (ws10 / "newdir").mkdir()
         tmpj = ws10 / ".undo_journal.json.tmp"
         tmpj.write_text(json.dumps(entries), encoding="utf-8")

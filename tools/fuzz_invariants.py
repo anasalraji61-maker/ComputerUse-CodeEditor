@@ -915,7 +915,7 @@ def run_scenario(seed, keep=None):
                 viol("I2j", f"journal unreadable on disk ({tag}): {type(e).__name__}")
                 return
             mem = [fm_._entry_to_disk(e) for e in fm_.journal]
-            disk = [e for e in disk if isinstance(e, dict)] if isinstance(disk, list) else disk
+            disk = [{k: v for k, v in e.items() if k != "mac"} for e in disk if isinstance(e, dict)] if isinstance(disk, list) else disk   # التوقيع لا يدخل المقارنة
             if disk != mem:
                 viol("I2j", f"on-disk journal != in-memory journal ({tag}): disk has {len(disk)} entries, memory {len(mem)}",
                      f"disk tail: {disk[-2:]}\nmem tail: {mem[-2:]}")

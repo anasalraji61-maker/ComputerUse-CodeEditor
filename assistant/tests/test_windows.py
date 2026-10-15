@@ -34,7 +34,7 @@ try:
         root = base / "ws"; root.mkdir()
         (root / "ok.txt").write_text("ok", encoding="utf-8")
         # junction لا يحتاج صلاحيات مدير
-        r = subprocess.run(["cmd", "/c", "mklink", "/J", str(root / "jn"), str(outside)], capture_output=True, text=True)
+        r = subprocess.run(["cmd", "/c", "mklink", "/J", str(root / "jn"), str(outside)], capture_output=True, text=True, encoding="utf-8", errors="replace")
         assert r.returncode == 0, r.stdout + r.stderr
         assert _is_link(root / "jn") and not _is_link(root / "ok.txt")
         fm = FileManager(root)
@@ -45,7 +45,7 @@ try:
         # نسخ مجلد يحوي junction مرفوض (لا ننسخ ما خارج الجذر إلى الداخل)
         (root / "dir").mkdir()
         (root / "dir" / "f.txt").write_text("f", encoding="utf-8")
-        r = subprocess.run(["cmd", "/c", "mklink", "/J", str(root / "dir" / "inner"), str(outside)], capture_output=True, text=True)
+        r = subprocess.run(["cmd", "/c", "mklink", "/J", str(root / "dir" / "inner"), str(outside)], capture_output=True, text=True, encoding="utf-8", errors="replace")
         assert r.returncode == 0, r.stdout + r.stderr
         assert raises(PathOutOfBoundsError, fm.copy, "dir", "dir_copy")
         assert not (root / "dir_copy" / "inner" / "secret.txt").exists()

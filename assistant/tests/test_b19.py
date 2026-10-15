@@ -49,10 +49,11 @@ try:
             raises(ProtectedPathError, FileManager, ws)
             assert not list(outside.iterdir())
             (ws / ".trash").unlink()
-        # .trash ملف عادي ← خطأ واضح لا FileExistsError
+        # .trash ملف عادي ← يُنقل جانباً مع ملاحظة وتُنشأ سلة جديدة (لا خطأ ولا FileExistsError)
         (ws / ".trash").write_text("x", encoding="utf-8")
-        raises(ProtectedPathError, FileManager, ws)
-        (ws / ".trash").unlink()
+        fm_t = FileManager(ws)
+        assert (ws / ".trash").is_dir() and (ws / ".trash.was_a_file").read_text(encoding="utf-8") == "x" and any(".trash" in n for n in fm_t.undo_notes)
+        (ws / ".trash.was_a_file").unlink()
         # ملف السجل مجلد ← خطأ واضح
         (ws / ".undo_journal.json").mkdir()
         raises(ProtectedPathError, FileManager, ws)
