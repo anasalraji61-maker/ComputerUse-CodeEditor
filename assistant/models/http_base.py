@@ -1,7 +1,9 @@
 """أساس مشترك لمزودي النماذج الحقيقيين: نقل HTTP قابل للاستبدال، أخطاء عربية، عدّاد استهلاك، وحجب المفاتيح."""
 import email.utils
+import ipaddress
 import json
 import os
+import re
 import socket
 import ssl
 import threading
@@ -19,7 +21,10 @@ Transport = Callable[[str, Dict[str, str], bytes, float], Tuple[int, bytes]]
 
 
 class ProviderError(Exception):
-    """فشل في استدعاء نموذج (شبكة / مصادقة / رد غير مفهوم)."""
+    """فشل في استدعاء نموذج (شبكة / مصادقة / رد غير مفهوم). status: رمز HTTP إن وُجد؛ refused: رُفض الاتصال؛ body_lc: جسم الرد صغيراً (للتشخيص الداخلي فقط)."""
+    status: Optional[int] = None
+    refused: bool = False
+    body_lc: str = ""
 
 
 class ProviderConfigError(ProviderError):
@@ -33,11 +38,11 @@ class Usage:
     output_tokens: int = 0
     usd: float = 0.0
 
-    def add(self, model: str, tin: int, tout: int):
+    def add(self, model: str, tin: int, tout: int, price=None):
         self.calls += 1
         self.input_tokens += tin
         self.output_tokens += tout
-        self.usd += cost_usd(model, tin, tout)
+        self.usd += cost_usd(model, tin, tout, price)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -48,6 +53,41 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 _OPENER = urllib.request.build_opener(_NoRedirect)
+_LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)   # العناوين المحلية لا تمر عبر HTTP(S)_PROXY
+
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024   # سقف حجم رد واحد
+
+
+_OCTET = r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
+_DOTTED_QUAD = re.compile(rf"^{_OCTET}(?:\.{_OCTET}){{3}}$")
+_LOCAL_V4 = [ipaddress.ip_network(n) for n in ("127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16")]
+_LOCAL_V6 = [ipaddress.ip_network(n) for n in ("::1/128", "fc00::/7", "fe80::/10")]
+
+
+def is_local_url(base_url: str) -> bool:
+    """عنوان محلي/شبكة داخلية: الاسم الحرفي localhost فقط، أو IP حرفي صارم (رباعي منقّط بلا أصفار بادئة ولا صيغ inet_aton)
+    ضمن loopback/RFC1918/link-local، أو IPv6 (::1، fc00::/7، fe80::/10). أسماء .local وغيرها ليست محلية (قد تُحلّ لأي عنوان)."""
+    try:
+        host = (urllib.parse.urlparse(str(base_url)).hostname or "")
+    except ValueError:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        if _DOTTED_QUAD.match(host):
+            ip = ipaddress.IPv4Address(host)
+            return any(ip in n for n in _LOCAL_V4)
+        if ":" in host:
+            ip6 = ipaddress.IPv6Address(host.split("%", 1)[0])
+            return any(ip6 in n for n in _LOCAL_V6)
+    except ValueError:
+        return False
+    return False
+
+
+def opener_for(url: str):
+    return _LOCAL_OPENER if is_local_url(url) else _OPENER
+
 
 
 MAX_RETRY_AFTER_SEC = 60.0
@@ -94,20 +134,81 @@ def describe_network_error(exc: BaseException) -> str:
     return f"تعذّر الاتصال بالخدمة (نوع الخطأ: {type(exc).__name__}). تحقق من الإنترنت."
 
 
-def default_transport(url: str, headers: Dict[str, str], body: bytes, timeout: float) -> Tuple[int, bytes]:
+def _stopped_error() -> ProviderError:
+    return ProviderError("أُوقف الطلب بزر الإيقاف.")
+
+
+def _do_request(url: str, headers: Dict[str, str], body: bytes, timeout: float, abort: threading.Event):
+    """الطلب الفعلي (يعمل في خيط عامل): قراءة بأجزاء مع سقف حجم، وتوقف سريع عند abort. يعيد (حالة، جسم، Retry-After)."""
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    _TLS.retry_after = None
+
+    def read_all(resp) -> bytes:
+        total = []
+        size = 0
+        try:
+            declared = int(resp.headers.get("Content-Length", "0") or 0)
+        except (ValueError, AttributeError):
+            declared = 0
+        if declared > MAX_RESPONSE_BYTES:
+            raise ProviderError(f"رد الخدمة أكبر من الحد المسموح ({MAX_RESPONSE_BYTES // (1024 * 1024)}MB).")
+        while True:
+            if abort.is_set():
+                raise _stopped_error()
+            chunk = resp.read1(65536)
+            if not chunk:
+                return b"".join(total)
+            size += len(chunk)
+            if size > MAX_RESPONSE_BYTES:
+                raise ProviderError(f"رد الخدمة أكبر من الحد المسموح ({MAX_RESPONSE_BYTES // (1024 * 1024)}MB).")
+            total.append(chunk)
+
     try:
-        with _OPENER.open(req, timeout=timeout) as resp:
-            return resp.status, resp.read()
+        with opener_for(url).open(req, timeout=timeout) as resp:
+            return resp.status, read_all(resp), None
     except urllib.error.HTTPError as exc:
         try:
-            _TLS.retry_after = parse_retry_after(exc.headers.get("Retry-After") if exc.headers else None)
+            ra = parse_retry_after(exc.headers.get("Retry-After") if exc.headers else None)
         except Exception:
-            _TLS.retry_after = None
-        return exc.code, exc.read()
-    except Exception as exc:  # شبكة/مهلة
-        raise ProviderError(describe_network_error(exc)) from None
+            ra = None
+        return exc.code, read_all(exc), ra
+
+
+def default_transport(url: str, headers: Dict[str, str], body: bytes, timeout: float) -> Tuple[int, bytes]:
+    """POST عبر urllib في خيط عامل: الخيط الرئيسي يفحص زر الإيقاف والمهلة الإجمالية كل 0.2ث فيقطع حتى لو الخادم صامت أو يقطّر بايتاً بايتاً.
+    العناوين المحلية لا تمر عبر البروكسي. سياق الإيقاف/المهلة يضعه HttpProvider.generate في _TLS.ctx."""
+    cancel_check, deadline = getattr(_TLS, "ctx", None) or (None, None)
+    _TLS.retry_after = None
+    abort = threading.Event()
+    box: Dict[str, object] = {}
+
+    def work():
+        try:
+            box["res"] = _do_request(url, headers, body, timeout, abort)
+        except BaseException as exc:   # noqa: BLE001
+            box["exc"] = exc
+
+    th = threading.Thread(target=work, daemon=True)
+    th.start()
+    while True:
+        th.join(0.2)
+        if not th.is_alive():
+            break
+        if cancel_check is not None and cancel_check():
+            abort.set()
+            raise _stopped_error()
+        if deadline is not None and time.monotonic() > deadline:
+            abort.set()
+            raise ProviderError("انتهت المهلة الإجمالية للطلب؛ الخدمة بطيئة جداً أو تقطّر الرد. أعد المحاولة لاحقاً.")
+    exc = box.get("exc")
+    if exc is not None:
+        if isinstance(exc, ProviderError):
+            raise exc
+        err = ProviderError(describe_network_error(exc))   # شبكة/مهلة
+        err.refused = isinstance(exc, ConnectionRefusedError) or isinstance(getattr(exc, "reason", None), ConnectionRefusedError)
+        raise err from None
+    status, raw, ra = box["res"]
+    _TLS.retry_after = ra
+    return status, raw
 
 
 _REAL_SLEEP = time.sleep
@@ -119,6 +220,7 @@ class HttpProvider(ModelProvider):
     """يطبّق إعادة المحاولة المحدودة وإخفاء المفتاح؛ الصنف الفرعي يبني الطلب ويحلل الرد."""
 
     PROVIDER_LABEL = "النموذج"
+    price_per_mtok = None   # (إدخال، إخراج) لكل مليون توكن يتجاوز جدول الأسعار؛ المزوّد المحلي (0, 0)
     ENV_KEYS: Tuple[str, ...] = ()
     RETRY_STATUS = (429, 500, 502, 503, 529)
 
@@ -133,6 +235,7 @@ class HttpProvider(ModelProvider):
         sleep: Callable[[float], None] = time.sleep,
         cancel_check: Optional[Callable[[], bool]] = None,
         thinking_budget=_AUTO,
+        total_timeout: Optional[float] = None,
     ):
         self.model = model
         # api_key=None => من البيئة؛ أي قيمة صريحة (حتى "") تُستعمل كما هي ولا تسقط إلى مفتاح البيئة المحيط (يمنع استعمال مفتاح غير مقصود)
@@ -148,6 +251,8 @@ class HttpProvider(ModelProvider):
         self.usage = Usage()
         self.last_usage = (0, 0)
         # ميزانية التفكير (Gemini فقط): _AUTO = من COS_THINKING_BUDGET أو الافتراضي حسب النموذج؛ None = لا يُرسل الحقل؛ رقم = يُقيَّد بمدى النموذج
+        # المهلة الإجمالية لنداء نقل واحد (تشمل قراءة الرد): الافتراضي 3 أضعاف مهلة المقبس؛ يمنع خادماً يقطّر الرد من تعليقنا
+        self.total_timeout = float(total_timeout) if total_timeout else 3.0 * float(timeout)
         self._thinking_arg = thinking_budget
         self._thinking_rejected = False  # ثبت أن الخدمة ترفض الحقل (400 يذكر thinking، أو نجح الطلب بدونه بعد 400): لا نرسله بعدها
 
@@ -170,6 +275,12 @@ class HttpProvider(ModelProvider):
             _REAL_SLEEP(min(0.2, left))
 
     def _status_error(self, status: int, raw: bytes) -> ProviderError:
+        err = self._status_error_msg(status, raw)
+        err.status = status
+        err.body_lc = self._redact(raw.decode("utf-8", "replace")).lower()[:2000]
+        return err
+
+    def _status_error_msg(self, status: int, raw: bytes) -> ProviderError:
         """رسالة عربية مميّزة لكل فئة خطأ HTTP؛ لا تحوي المفتاح ولا الرابط."""
         label = self.PROVIDER_LABEL
         if status == 401:
@@ -263,7 +374,11 @@ class HttpProvider(ModelProvider):
         for _round in range(2):
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             for attempt in range(self.max_retries + 1):
-                res = self.transport(url, headers, body, self.timeout)
+                _TLS.ctx = (self.cancel_check, time.monotonic() + self.total_timeout)
+                try:
+                    res = self.transport(url, headers, body, self.timeout)
+                finally:
+                    _TLS.ctx = None
                 status, raw = res[0], res[1]
                 retry_after = parse_retry_after((res[2] or {}).get("Retry-After")) if len(res) > 2 and isinstance(res[2], dict) \
                     else getattr(_TLS, "retry_after", None) if self.transport is default_transport else None
@@ -297,7 +412,7 @@ class HttpProvider(ModelProvider):
         except Exception:
             raise ProviderError(f"رد غير مفهوم من خدمة {self.PROVIDER_LABEL}.") from None
         self.last_usage = (tin, tout)
-        self.usage.add(self.model, tin, tout)  # الفوترة تحدث حتى لو فشل تحليل النص لاحقاً
+        self.usage.add(self.model, tin, tout, self.price_per_mtok)  # الفوترة تحدث حتى لو فشل تحليل النص لاحقاً
         try:
             text, _, _ = self._parse(data)
         except ProviderError:

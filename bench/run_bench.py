@@ -143,7 +143,9 @@ def estimate_cost(provider: str, runs: int, env: Optional[Dict[str, str]] = None
     from assistant.models.pricing import cost_usd
     env = env or {}
     small = env.get("COS_SMALL_MODEL") or DEFAULTS[provider][0]
-    large = env.get("COS_LARGE_MODEL") or DEFAULTS[provider][1]
+    large = env.get("COS_LARGE_MODEL") or DEFAULTS[provider][1] or small
+    if provider == "ollama":   # محلي: بلا كلفة؛ السقف رمزي (يُتجاهل فعلياً)
+        return {"per_task": 0.0, "total": 0.0, "cap": 1.0}
     per_task = cost_usd(small, *_EST_SMALL) + cost_usd(large, *_EST_LARGE)
     total = per_task * len(TASKS) * max(0, runs)
     cap = max(1.0, math.ceil(total * 2 * 2) / 2)   # ضعف التقدير مقرَّباً لأعلى نصف دولار، بحد أدنى 1$
@@ -253,7 +255,7 @@ def render_markdown(res: Dict[str, Any]) -> str:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="قياس المهام الخمس بمزوّد حقيقي")
-    ap.add_argument("--provider", choices=["anthropic", "gemini"], required=True)
+    ap.add_argument("--provider", choices=["anthropic", "gemini", "openai", "ollama"], required=True)
     ap.add_argument("--runs", type=int, default=DEFAULT_RUNS, help="دورات لكل مهمة (الافتراضي 20 = بوابة SPEC)")
     ap.add_argument("--max-usd", type=float, default=None, help="سقف الإنفاق؛ الافتراضي ضعف التقدير (حد أدنى 1$)")
     ap.add_argument("--yes", action="store_true", help="تأكيد صريح بإنفاق الرصيد بلا سؤال تفاعلي")
@@ -268,8 +270,8 @@ def main(argv=None) -> int:
     env = {**os.environ, "COS_PROVIDER": args.provider}
     if args.ask_key:
         import getpass
-        var = "ANTHROPIC_API_KEY" if args.provider == "anthropic" else "GEMINI_API_KEY"
-        key = getpass.getpass(f"Enter {args.provider} API key (hidden, never saved): ").strip()
+        var = {"anthropic": "ANTHROPIC_API_KEY", "gemini": "GEMINI_API_KEY", "openai": "OPENAI_API_KEY"}.get(args.provider)
+        key = getpass.getpass(f"Enter {args.provider} API key (hidden, never saved): ").strip() if var else ""   # ollama: بلا مفتاح
         if key:
             env[var] = key  # يبقى في ذاكرة هذه العملية فقط
     try:
@@ -284,8 +286,11 @@ def main(argv=None) -> int:
     est = estimate_cost(args.provider, args.runs, env)
     max_usd = args.max_usd if args.max_usd is not None else est["cap"]
     print(f"سيُشغَّل القياس: {args.runs} دورات × {len(TASKS)} مهام بنموذج حقيقي.")
-    print(f"التقدير: ~{est['per_task']:.4f}$ للمهمة الواحدة، ~{est['total']:.2f}$ للقياس كله؛ سقف الإنفاق {max_usd:.2f}$ (يتوقف عنده).")
-    print("هذا يستهلك رصيد API حقيقياً.")
+    if args.provider == "ollama":
+        print("التقدير: 0$ (نموذج محلي).")
+    else:
+        print(f"التقدير: ~{est['per_task']:.4f}$ للمهمة الواحدة، ~{est['total']:.2f}$ للقياس كله؛ سقف الإنفاق {max_usd:.2f}$ (يتوقف عنده).")
+    print("نموذج محلي: بلا كلفة، لكنه أبطأ بكثير (قد يستغرق القياس ساعات)." if args.provider == "ollama" else "هذا يستهلك رصيد API حقيقياً.")
     if not args.yes:
         if not sys.stdin or not sys.stdin.isatty():
             print("لم يُؤكَّد الإنفاق: أضف --yes للتشغيل بلا تفاعل.", file=sys.stderr)

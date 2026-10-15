@@ -26,6 +26,11 @@ def estimate_max_cost(provider: ModelProvider, prompt: str, system_prompt: str) 
     model = getattr(provider, "model", None)
     if not isinstance(model, str) or not model:
         return 0.0
+    attempts = getattr(provider, "max_attempts", 1)   # نداءات قد تُنفَّذ لطلب منطقي واحد (إعادات المزوّد)
+    attempts = attempts if isinstance(attempts, int) and 1 <= attempts <= 5 else 1
+    override = getattr(provider, "price_per_mtok", None)   # مزوّد محلي: سعر صفري صريح
+    if override is not None and not any(override):
+        return 0.0
     max_out = getattr(provider, "max_tokens", 2048)
     max_out = max_out if isinstance(max_out, int) and max_out > 0 else 2048
     headroom = getattr(provider, "thinking_headroom", None)   # توكنات تفكير قد تُفوتر كإخراج (Gemini)
@@ -35,12 +40,14 @@ def estimate_max_cost(provider: ModelProvider, prompt: str, system_prompt: str) 
         except Exception:
             pass
     tin = len(prompt or "") + len(system_prompt or "")
+    if override is not None:
+        return attempts * cost_usd(model, tin, max_out, price=override)
     if not is_priced(model):
         # نموذج غير مسعَّر: الحساب الفعلي بأعلى سعر احتياطي، أما الحجز فبأعلى سعر معروف حتى لا يحجب النداء بلا داعٍ
         pin = max(p[0] for p in PRICES_PER_MTOK.values())
         pout = max(p[1] for p in PRICES_PER_MTOK.values())
-        return (tin * pin + max_out * pout) / 1_000_000.0
-    return cost_usd(model, tin, max_out)
+        return attempts * (tin * pin + max_out * pout) / 1_000_000.0
+    return attempts * cost_usd(model, tin, max_out)
 
 
 class ModelRouter(ModelProvider):
@@ -123,14 +130,14 @@ class ModelRouter(ModelProvider):
             tin, tout = getattr(provider, "last_usage", (0, 0))
             if tin or tout:  # نداء فاشل لكنه مفوتَر (رد فارغ استهلك توكنات تفكير): يدخل في العدّاد وسقف الإنفاق
                 self.calls.append({"tier": tier, "cached": False, "model": getattr(provider, "model", provider.name()),
-                                   "input": tin, "output": tout, "usd": cost_usd(getattr(provider, "model", ""), tin, tout),
+                                   "input": tin, "output": tout, "usd": cost_usd(getattr(provider, "model", ""), tin, tout, getattr(provider, "price_per_mtok", None)),
                                    "failed": True})
             raise
         finally:
             if token is not None:
                 meter.release(token)
         tin, tout = getattr(provider, "last_usage", (0, 0))
-        usd = cost_usd(getattr(provider, "model", ""), tin, tout)
+        usd = cost_usd(getattr(provider, "model", ""), tin, tout, getattr(provider, "price_per_mtok", None))
         self.calls.append({"tier": tier, "cached": False, "model": getattr(provider, "model", provider.name()),
                            "input": tin, "output": tout, "usd": usd})
         if self.cache_size and self._is_cacheable(text):

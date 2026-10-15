@@ -17,7 +17,12 @@ PRICES_PER_MTOK: Dict[str, Tuple[float, float]] = {
     "gemini-3.5-flash-lite": (0.30, 2.50),
     "gemini-3.6-flash": (0.75, 3.75),   # سعر حتى 2026-12-31؛ يصبح 1.50/7.50 من 2027-01-01
     "gemini-3.1-pro-preview": (2.00, 12.00),
+    # OpenAI: أسعار قائمة تقريبية لم تُتحقق من صفحتها الرسمية في هذه الجلسة؛ تحقق منها وعدّلها هنا قبل الاعتماد عليها
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-4o": (2.50, 10.00),
 }
+
+LOCAL_PRICE = (0.0, 0.0)   # نماذج محلية (Ollama وخوادم LAN): بلا كلفة
 
 # كلفتنا الحالية لكل نقطة (دراسة الكلفة: ~3 سنت)؛ تُستبدل بالقياس الفعلي
 COST_USD_PER_POINT = 0.03
@@ -31,9 +36,11 @@ def is_priced(model: str) -> bool:
     return model in PRICES_PER_MTOK
 
 
-def cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
-    """كلفة استدعاء بالدولار؛ النموذج المجهول يُحسب بأعلى سعر معروف (تقدير متحفظ)."""
-    price = PRICES_PER_MTOK.get(model, FALLBACK_PRICE)
+def cost_usd(model: str, input_tokens: int, output_tokens: int, price=None) -> float:
+    """كلفة استدعاء بالدولار؛ النموذج المجهول يُحسب بأعلى سعر معروف (تقدير متحفظ).
+    price: تجاوز صريح (سعر الإدخال، سعر الإخراج) من المزوّد نفسه؛ المزوّد المحلي يمرّر LOCAL_PRICE فتكون الكلفة صفراً."""
+    if price is None:
+        price = PRICES_PER_MTOK.get(model, FALLBACK_PRICE)
     return (input_tokens * price[0] + output_tokens * price[1]) / 1_000_000.0
 
 
