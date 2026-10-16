@@ -60,7 +60,7 @@ try:
         ws = mkws(tmp, files=())
         for t in "XY":
             for i in range(15):
-                (ws / f"{t}{i}.txt").write_text("x")
+                (ws / f"{t}{i}.txt").write_text("x", encoding="utf-8")
         code = ("from assistant.tools.files import FileManager\nws, tag = sys.argv[1], sys.argv[2]\n"
                 "fm = FileManager(ws); fm.current_task = tag; bad = 0\n"
                 "for i in range(15):\n    try: fm.move(f'{tag}{i}.txt', f'out_{tag}/{tag}{i}.txt')\n    except Exception as e: bad += 1; print(repr(e))\n"
@@ -75,7 +75,7 @@ try:
     # قفل يتيم (عملية ميتة) يُكسر، وقفل حيّ يُنتظر ثم WorkspaceBusyError
     with tempfile.TemporaryDirectory() as tmp:
         ws = mkws(tmp)
-        (ws / LOCK_NAME).write_text(json.dumps({"pid": 2 ** 22 - 3, "token": "dead", "t": time.time()}))
+        (ws / LOCK_NAME).write_text(json.dumps({"pid": 2 ** 22 - 3, "token": "dead", "t": time.time()}), encoding="utf-8")
         fm = FileManager(ws)
         fm.move("a.txt", "x/a.txt")
         assert not (ws / LOCK_NAME).exists()
@@ -87,7 +87,7 @@ try:
         other._wslock.release()
         assert not (ws / LOCK_NAME).exists()
         # قفل قديم جداً حتى لو صاحبه «حيّ» (إعادة استعمال رقم عملية)
-        (ws / LOCK_NAME).write_text(json.dumps({"pid": os.getpid(), "token": "old", "t": time.time() - 99999}))
+        (ws / LOCK_NAME).write_text(json.dumps({"pid": os.getpid(), "token": "old", "t": time.time() - 99999}), encoding="utf-8")
         fm.move("b.txt", "y/b.txt")
         # فرع ويندوز لفحص حياة العملية قابل للاختبار بالاستبدال
         with mock.patch.object(ft, "IS_WINDOWS", True), mock.patch.object(ft, "_pid_alive_windows", lambda pid: pid == 4242):
@@ -131,13 +131,13 @@ try:
         ws = mkws(tmp, files=("a.txt",))
         intent = {"v": 1, "pid": 2 ** 22 - 5, "action": "rename", "src": "rel:a.txt", "dest": "rel:A.txt", "tmp": "rel:.cos_rename_tmp_a.txt", "task": "t"}
         (ws / "a.txt").rename(ws / ".cos_rename_tmp_a.txt")
-        (ws / INTENT_NAME).write_text(json.dumps(FileManager(ws).sign_disk_entry(intent)))   # كاتب شرعي يوقّع نيته
+        (ws / INTENT_NAME).write_text(json.dumps(FileManager(ws).sign_disk_entry(intent)), encoding="utf-8")   # كاتب شرعي يوقّع نيته
         fm = FileManager(ws)
         assert (ws / "a.txt").exists() and not (ws / ".cos_rename_tmp_a.txt").exists() and any("إعادة تسمية" in n for n in fm.undo_notes), fm.undo_notes
     # نية تالفة: تُبلَّغ ولا تُسقط التشغيل
     with tempfile.TemporaryDirectory() as tmp:
         ws = mkws(tmp, files=())
-        (ws / INTENT_NAME).write_text("{not json")
+        (ws / INTENT_NAME).write_text("{not json", encoding="utf-8")
         fm = FileManager(ws)
         assert not (ws / INTENT_NAME).exists() and any("تالف" in n for n in fm.undo_notes)
         assert list(ws.glob(".undo_journal.intent.rejected*.json"))
@@ -165,18 +165,18 @@ try:
         ws = mkws(tmp, files=("a.txt", "b.txt"))
         fm = FileManager(ws)
         fm.move("a.txt", "a2.txt")
-        cur = json.loads((ws / ".undo_journal.json").read_text())
+        cur = json.loads((ws / ".undo_journal.json").read_text(encoding="utf-8"))
         ext = cur + [{"task": None, "action": "move", "src": "rel:b.txt", "dest": "rel:b2.txt"}]
         ext[-1] = fm.sign_disk_entry(ext[-1])
         tmpj = ws / f".undo_journal.json.{2 ** 22 - 7}.deadbeef.tmp"
-        tmpj.write_text(json.dumps(ext))
+        tmpj.write_text(json.dumps(ext), encoding="utf-8")
         old = time.time() - 86400
         os.utime(tmpj, (old, old))                     # ساعة رجعت للوراء: التاريخ لا يهم
         (ws / "b.txt").rename(ws / "b2.txt")
         fm2 = FileManager(ws)
         assert [e["action"] for e in fm2.journal] == ["move", "move"] and not tmpj.exists()
         # غير متصل بالسجل الحالي: يُرفض لا يُتبنّى
-        tmpj.write_text(json.dumps([{"action": "move", "src": "x", "dest": "y"}]))
+        tmpj.write_text(json.dumps([{"action": "move", "src": "x", "dest": "y"}]), encoding="utf-8")
         fm3 = FileManager(ws)
         assert len(fm3.journal) == 2 and not tmpj.exists() and list(ws.glob(".undo_journal.rejected*.json"))
 
@@ -240,7 +240,7 @@ try:
     with tempfile.TemporaryDirectory() as tmp:
         ws = mkws(tmp, files=())
         r = TaskRunner(ws, FakeProvider(default_response="{}"), SQLiteLedger(db_path=pathlib.Path(tmp) / "l.db"))
-        cases = {32: "مستخدم من برنامج آخر", 5: "لا صلاحية", 3: "لم يعد موجوداً", 123: "غير صالح", 206: "أطول", 112: "ممتلئ"}
+        cases = {32: "مستخدم من برنامج آخر", 5: "لا صلاحية", 3: "لم يعد موجوداً", 123: "غير صالح", 206: "طويل جداً", 112: "مساحة كافية"}
         for w, word in cases.items():
             msg = r._short_error(oserr(win=w, no=13))
             assert word in msg and "bob" not in msg and "C:" not in msg, (w, msg)
@@ -288,7 +288,7 @@ try:
         longname = "N" * nlen + ".t"
         for odd in ("q?.txt", longname):          # قد يرفض نظام الملفات (محاكي ويندوز) إنشاء بعضها
             try:
-                (ws / odd).write_text("x")
+                (ws / odd).write_text("x", encoding="utf-8")
             except OSError:
                 pass
         made_q, made_n = (ws / "q?.txt").exists(), (ws / longname).exists()
@@ -338,9 +338,9 @@ try:
         Y = FileManager(ws)
         Y.current_task = "Y"
         (ws / "z").mkdir()
-        (ws / "z" / "a.txt").write_text("a")      # نُقل لكن لم يُسجَّل
+        (ws / "z" / "a.txt").write_text("a", encoding="utf-8")      # نُقل لكن لم يُسجَّل
         planted = {"v": 1, "pid": 2 ** 22 - 7, "action": "move", "src": "rel:a.txt", "dest": "rel:z/a.txt", "task": "X"}
-        (ws / INTENT_NAME).write_text(json.dumps(Y.sign_disk_entry(planted)))
+        (ws / INTENT_NAME).write_text(json.dumps(Y.sign_disk_entry(planted)), encoding="utf-8")
         Y.move("b.txt", "m/b.txt")
         assert [e.get("src") for e in Y.journal if e["action"] == "move"][0].endswith("a.txt"), Y.journal
         assert Y.undo_all() >= 2 and (ws / "a.txt").exists() and (ws / "b.txt").exists() and not (ws / INTENT_NAME).exists()
@@ -349,17 +349,17 @@ try:
     with tempfile.TemporaryDirectory() as tmp:
         ws = mkws(tmp, files=())
         L = ft._WorkspaceLock(ws / LOCK_NAME)
-        (ws / LOCK_NAME).write_text("LIVE-NEW")
-        assert L._remove_if_same(ws / LOCK_NAME, "OLD-STALE") is False and (ws / LOCK_NAME).read_text() == "LIVE-NEW"   # أُعيد كما كان
+        (ws / LOCK_NAME).write_text("LIVE-NEW", encoding="utf-8")
+        assert L._remove_if_same(ws / LOCK_NAME, "OLD-STALE") is False and (ws / LOCK_NAME).read_text(encoding="utf-8") == "LIVE-NEW"   # أُعيد كما كان
         assert L._remove_if_same(ws / LOCK_NAME, "LIVE-NEW") is True and not (ws / LOCK_NAME).exists()
         assert not list(ws.glob(".undo_journal.lock.stale.*"))
         # قفل يتيم + كاسر حيّ آخر يعمل: ننتظر ولا نكسر
-        (ws / LOCK_NAME).write_text(json.dumps({"pid": 2 ** 22 - 3, "token": "d", "t": time.time()}))
+        (ws / LOCK_NAME).write_text(json.dumps({"pid": 2 ** 22 - 3, "token": "d", "t": time.time()}), encoding="utf-8")
         hold = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         try:
-            (ws / (LOCK_NAME + ".brk")).write_text(json.dumps({"pid": hold.pid, "t": time.time()}))
+            (ws / (LOCK_NAME + ".brk")).write_text(json.dumps({"pid": hold.pid, "t": time.time()}), encoding="utf-8")
             assert L._break_stale() is False and (ws / LOCK_NAME).exists()
-            (ws / (LOCK_NAME + ".brk")).write_text(json.dumps({"pid": 2 ** 22 - 3, "t": time.time()}))   # كاسر ميت: يُزال ويُكسر
+            (ws / (LOCK_NAME + ".brk")).write_text(json.dumps({"pid": 2 ** 22 - 3, "t": time.time()}), encoding="utf-8")   # كاسر ميت: يُزال ويُكسر
             assert L._break_stale() is True and not (ws / LOCK_NAME).exists() and not (ws / (LOCK_NAME + ".brk")).exists()
         finally:
             hold.kill()
@@ -374,7 +374,7 @@ try:
     for it in range(14):
         with tempfile.TemporaryDirectory() as tmp:
             ws = mkws(tmp, files=())
-            (ws / LOCK_NAME).write_text(json.dumps({"pid": 2 ** 22 - 3, "token": "dead", "t": time.time()}))
+            (ws / LOCK_NAME).write_text(json.dumps({"pid": 2 ** 22 - 3, "token": "dead", "t": time.time()}), encoding="utf-8")
             go = time.time() + 0.5
             ps = [subprocess.Popen([sys.executable, "-I", "-c", "import sys; sys.path.insert(0, %r)\n" % str(ROOT) + race, str(ws), str(go)],
                                    stdout=subprocess.PIPE, text=True, encoding="utf-8", errors="replace") for _ in range(6)]
@@ -430,7 +430,7 @@ try:
             st = ft.proc_start(holder.pid)
             if st:
                 rec["st"] = st[0]
-            (ws / LOCK_NAME).write_text(json.dumps(rec))
+            (ws / LOCK_NAME).write_text(json.dumps(rec), encoding="utf-8")
             assert FileManager.undo_step.__defaults__ == (ft.UNDO_LOCK_TIMEOUT_SECONDS, 0) and ft.UNDO_LOCK_TIMEOUT_SECONDS <= 5 < ft.LOCK_TIMEOUT_SECONDS
             n = len(fm.journal)
             t0 = time.time()
@@ -473,35 +473,35 @@ try:
             ws = mkws(tmp)
             now = time.time()
             # قفل قديم (بلا بصمة بداية) كتبته عملية أخرى؛ الرقم الآن لعملية حيّة بدأت بعده: يتيم
-            (ws / LOCK_NAME).write_text(json.dumps({"pid": ps_live.pid, "token": "pre", "t": now - 600}))
+            (ws / LOCK_NAME).write_text(json.dumps({"pid": ps_live.pid, "token": "pre", "t": now - 600}), encoding="utf-8")
             t0 = time.time()
             fm = FileManager(ws)
             assert time.time() - t0 < 5 and not fm.undo_notes, fm.undo_notes
             fm._wslock.timeout = 2
             fm.move("a.txt", "x/a.txt")
             # بصمة بداية لا تطابق عملية الرقم الحالية
-            (ws / LOCK_NAME).write_text(json.dumps({"pid": ps_live.pid, "token": "pre", "t": now, "st": "lx:other-boot:123"}))
+            (ws / LOCK_NAME).write_text(json.dumps({"pid": ps_live.pid, "token": "pre", "t": now, "st": "lx:other-boot:123"}), encoding="utf-8")
             fm.move("b.txt", "x/b.txt")
             # بصمة مطابقة وعملية حيّة وقفل حديث: قفل حقيقي لا يُكسر
             st = ft.proc_start(ps_live.pid)
             assert st is not None and st[1] <= time.time() + 1
-            (ws / LOCK_NAME).write_text(json.dumps({"pid": ps_live.pid, "token": "real", "t": now, "st": st[0]}))
+            (ws / LOCK_NAME).write_text(json.dumps({"pid": ps_live.pid, "token": "real", "t": now, "st": st[0]}), encoding="utf-8")
             fm._wslock.timeout = 0.3
             raises(WorkspaceBusyError, fm.move, "c.txt", "x/c.txt")
             (ws / LOCK_NAME).unlink()
             assert ft.proc_start(os.getpid())[0] == ft.proc_start(os.getpid())[0] and ft._own_start_id() == ft.proc_start(os.getpid())[0]
             # قفل أقدم من إقلاع النظام (حين تتعذر بصمة العملية)
             with mock.patch.object(ft, "proc_start", lambda pid: None), mock.patch.object(ft, "_boot_time", lambda: time.time() - 100):
-                (ws / LOCK_NAME).write_text(json.dumps({"pid": ps_live.pid, "token": "x", "t": time.time() - 1000}))
+                (ws / LOCK_NAME).write_text(json.dumps({"pid": ps_live.pid, "token": "x", "t": time.time() - 1000}), encoding="utf-8")
                 fm.move("c.txt", "x/c.txt")
-                (ws / LOCK_NAME).write_text(json.dumps({"pid": ps_live.pid, "token": "x", "t": time.time() - 10}))
+                (ws / LOCK_NAME).write_text(json.dumps({"pid": ps_live.pid, "token": "x", "t": time.time() - 10}), encoding="utf-8")
                 raises(WorkspaceBusyError, fm.move, "d.txt", "x/d.txt")     # كُتب بعد الإقلاع وصاحبه حيّ: يُنتظر
                 (ws / LOCK_NAME).unlink()
             # فرع ويندوز (GetProcessTimes) بالمحاكاة
             with mock.patch.object(ft, "IS_WINDOWS", True), mock.patch.object(ft, "_pid_alive_windows", lambda pid: True), \
                     mock.patch.object(ft, "_proc_start_windows", lambda pid: ("win:777", time.time() - 5)):
                 assert ft.proc_start(ps_live.pid)[0] == "win:777"
-                (ws / LOCK_NAME).write_text(json.dumps({"pid": ps_live.pid, "token": "w", "t": time.time() - 3, "st": "win:111"}))
+                (ws / LOCK_NAME).write_text(json.dumps({"pid": ps_live.pid, "token": "w", "t": time.time() - 3, "st": "win:111"}), encoding="utf-8")
                 fm.move("d.txt", "x/d.txt")
             with mock.patch.object(ft, "IS_WINDOWS", True):
                 import ctypes

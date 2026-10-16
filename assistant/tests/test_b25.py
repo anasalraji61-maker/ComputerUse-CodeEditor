@@ -23,7 +23,7 @@ try:
     with tempfile.TemporaryDirectory() as tmp:
         base = pathlib.Path(tmp).resolve()
         ws = base / "ws"; ws.mkdir()
-        for i in range(260):
+        for i in range(460):   # أكثر من سقف الخطة (400)
             (ws / f"f{i:02d}.txt").write_text("x", encoding="utf-8")
         c = AssistantController(RuleProvider(), ws, SQLiteLedger(base / "l.db", initial_balance=500, spending_limit=500))
         c.submit_request("رتب الملفات حسب النوع")

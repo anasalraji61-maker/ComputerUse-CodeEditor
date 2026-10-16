@@ -115,7 +115,7 @@ try:
         files = {f"doc_{i:03d}.pdf": "p" for i in range(40)}
         files.update({f"img_{i:03d}.tmp": "t" for i in range(30)})
         files.update({f"pic_{i:03d}.jpg": "j" for i in range(30)})
-        files.update({f"note_{i:03d}.txt": "n" for i in range(130)})
+        files.update({f"note_{i:03d}.txt": "n" for i in range(330)})   # المجموع > سقف الخطة (400)
         ws2 = mk_ws(tmp, "w2", files)
         c2 = controller(tmp, ws2, "c2")
         listing = c2.runner.workspace_listing()
@@ -127,7 +127,7 @@ try:
         a = analyze("احذف ملفات tmp", ctx, prov)
         assert a.steps and len(a.steps) == 30, a.question
         a = analyze("رتب الملفات حسب النوع", ctx, prov)
-        assert a.steps and a.note and "بقي" in a.note, a.note  # الحد 48 مع ملاحظة الاقتطاع
+        assert a.steps and a.note and "بقي" in a.note, a.note  # السقف مع ملاحظة الاقتطاع
         # لا تقول «لا شيء» زوراً: كل المتبقي في الجذر يظل يُرتَّب في التشغيل التالي
         c2.submit_request("رتب الملفات حسب النوع")
         assert c2.wait_for("plan", 5)
@@ -305,10 +305,10 @@ try:
             c11.start()
             rep = c11.wait_for("report", 10)
             assert rep and rep["success"], rep
-        assert (ws11 / "Backup" / "a.txt").read_text() == "OLD" and (ws11 / "Backup" / "a (1).txt").read_text() == "NEW"
+        assert (ws11 / "Backup" / "a.txt").read_text(encoding="utf-8") == "OLD" and (ws11 / "Backup" / "a (1).txt").read_text(encoding="utf-8") == "NEW"
         assert (ws11 / "Backup" / "Projects" / "old.txt").exists() and (ws11 / "Backup" / "Projects (1)" / "p.txt").exists()
         c11.undo_last(); c11.undo_last()
-        assert (ws11 / "a.txt").read_text() == "NEW" and not (ws11 / "Backup" / "Projects (1)").exists()
+        assert (ws11 / "a.txt").read_text(encoding="utf-8") == "NEW" and not (ws11 / "Backup" / "Projects (1)").exists()
 
         # ================================================================== 12. اسم مجلد متعدد الكلمات بلا تنصيص
         assert steps_of("أنشئ مجلد فواتير 2025", []) == [("create_dir", "فواتير 2025", None)]

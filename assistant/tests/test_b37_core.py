@@ -85,7 +85,7 @@ try:
         ft._KEY_CACHE.clear()
         with mock.patch.object(ft, "load_journal_key", lambda kdir=None: (None, "warn", None)):     # (ج) جلسة بلا مفتاح
             fk = FileManager(ws, key_dir=kd)
-            (ws / "c.txt").write_text("c")
+            (ws / "c.txt").write_text("c", encoding="utf-8")
             fk.move("c.txt", "c2.txt")
         d = disk(ws)
         assert d[:2] == first and "mac" not in d[2] and len(d) == 3                 # لا تجريد لتوقيع موجود
@@ -101,20 +101,20 @@ try:
         try:
             ws, kd, fm = setup(tmp)
             before = disk(ws)
-            mig_before = (kd / MIGRATED_NAME).read_text()
+            mig_before = (kd / MIGRATED_NAME).read_text(encoding="utf-8")
             blocker = pathlib.Path(tmp) / "blocker"
-            blocker.write_text("x")
+            blocker.write_text("x", encoding="utf-8")
             fe = FileManager(ws, key_dir=fresh(blocker / "sub"))
             assert fe.key_ephemeral and fe._key_dir.name == "cos_assistant_keys" and any("مؤقت" in n for n in fe.undo_notes)
             assert len(fe.journal) == 2 and all(e.get("unverified") for e in fe.journal) and int(fe.undo_all()) == 0
-            (ws / "c.txt").write_text("c")
+            (ws / "c.txt").write_text("c", encoding="utf-8")
             fe.move("c.txt", "c2.txt")
             d = disk(ws)
             assert d[:2] == before                                  # الموجود كما هو
             assert not (blocker / "sub").exists()
             fe_map = fe._migrated_map()
             fe._mark_migrated()
-            assert (kd / MIGRATED_NAME).read_text() == mig_before   # المؤقت لا يسجّل المجلد
+            assert (kd / MIGRATED_NAME).read_text(encoding="utf-8") == mig_before   # المؤقت لا يسجّل المجلد
             ft._KEY_CACHE.clear()
             fb = FileManager(ws, key_dir=fresh(kd))                  # الأصلي يعود: الأصلي موثوق، الجديد (بمفتاح مؤقت) غير موثَّق
             assert [bool(e.get("unverified")) for e in fb.journal] == [False, False, True]
@@ -134,7 +134,7 @@ try:
         # إعادة تثبيت: مفتاح جديد. مهمة الدفتر تُتراجع بلا تأكيد؛ ما يُزرع بمعرّف غير معروف أو بلا معرّف يحتاج تأكيداً
         planted = [{"action": "move", "src": "rel:Elsewhere.docx", "dest": "rel:Report.docx", "task": "task_unknown"},
                    {"action": "move", "src": "rel:Else2.docx", "dest": "rel:Report.docx"}]
-        (ws / ".undo_journal.json").write_text(json.dumps(disk(ws) + planted))
+        (ws / ".undo_journal.json").write_text(json.dumps(disk(ws) + planted), encoding="utf-8")
         with mock.patch.dict(os.environ, {"COS_DATA_DIR": str(base / "data2")}):
             ft._KEY_CACHE.clear()
             r2 = TaskRunner(ws, FakeProvider(default_response="{}"), led, approver=lambda s: True)
@@ -160,10 +160,10 @@ try:
         base = pathlib.Path(tmp).resolve()
         ws = mk(base, files=("Report.docx", "decoy"))
         (ws / "Important").mkdir()
-        (ws / "Important" / "taxes.xlsx").write_text("data")
+        (ws / "Important" / "taxes.xlsx").write_text("data", encoding="utf-8")
         (ws / ".undo_journal.json").write_text(json.dumps([
             {"action": "copy", "src": "rel:decoy", "dest": "rel:Important"},
-            {"action": "move", "src": "rel:Elsewhere.docx", "dest": "rel:Report.docx"}]))
+            {"action": "move", "src": "rel:Elsewhere.docx", "dest": "rel:Report.docx"}]), encoding="utf-8")
         fm = FileManager(ws, key_dir=fresh(base / "k"))
         r = fm.undo_all()
         assert int(r) == 0 and r.unverified == 2 and (ws / "Report.docx").exists() and (ws / "Important" / "taxes.xlsx").exists()
@@ -176,11 +176,11 @@ try:
         wsA, wsB = mk(base, "A", files=("a.txt",)), mk(base, "B", files=())
         fa = FileManager(wsA, key_dir=K)
         fa.move("a.txt", "a2.txt")
-        (wsB / "a2.txt").write_text("B's precious file")
-        (wsB / ".undo_journal.json").write_text((wsA / ".undo_journal.json").read_text())      # نسخ سجل موقّع إلى مجلد آخر
+        (wsB / "a2.txt").write_text("B's precious file", encoding="utf-8")
+        (wsB / ".undo_journal.json").write_text((wsA / ".undo_journal.json").read_text(encoding="utf-8"), encoding="utf-8")      # نسخ سجل موقّع إلى مجلد آخر
         fb = FileManager(wsB, key_dir=K)
         assert fb.journal and all(e.get("unverified") for e in fb.journal)
-        assert int(fb.undo_all()) == 0 and (wsB / "a2.txt").read_text() == "B's precious file"
+        assert int(fb.undo_all()) == 0 and (wsB / "a2.txt").read_text(encoding="utf-8") == "B's precious file"
         assert fa._ws_id != fb._ws_id
         # نقل/إعادة تسمية مجلد العمل نفسه: المعرّف يبقى (ملف .undo_journal.wsid) فيبقى السجل موثوقاً
         wsA2 = wsA.with_name("A_renamed")
@@ -198,20 +198,20 @@ try:
         wsD = mk(base, "D", files=("a.txt",))
         fd = FileManager(wsD, key_dir=K)
         fd.move("a.txt", "a2.txt")
-        saved = (wsD / ".undo_journal.json").read_text()
+        saved = (wsD / ".undo_journal.json").read_text(encoding="utf-8")
         fd.undo_all()
-        (wsD / "a2.txt").write_text("NEW unrelated file the user created later")
-        (wsD / ".undo_journal.json").write_text(saved)
+        (wsD / "a2.txt").write_text("NEW unrelated file the user created later", encoding="utf-8")
+        (wsD / ".undo_journal.json").write_text(saved, encoding="utf-8")
         fd2 = FileManager(wsD, key_dir=K)
         r = fd2.undo_all()
-        assert (wsD / "a2.txt").read_text() == "NEW unrelated file the user created later" and (wsD / "a.txt").exists() and r.skipped >= 1
+        assert (wsD / "a2.txt").read_text(encoding="utf-8") == "NEW unrelated file the user created later" and (wsD / "a.txt").exists() and r.skipped >= 1
         # وسلوك الاستعادة باسم بديل لعنصر آخر يشغل الاسم الأصلي يبقى للإدخال الأصلي نفسه (البصمة تطابق)
         wsE = mk(base, "E", files=("f.txt",))
         fe = FileManager(wsE, key_dir=K)
         fe.move("f.txt", "g.txt")
-        (wsE / "f.txt").write_text("user made another f")
+        (wsE / "f.txt").write_text("user made another f", encoding="utf-8")
         r = fe.undo_all()
-        assert int(r) == 1 and (wsE / "f.txt").read_text() == "user made another f" and (wsE / "f (1).txt").read_text() == "f.txt", sorted(p.name for p in wsE.iterdir())
+        assert int(r) == 1 and (wsE / "f.txt").read_text(encoding="utf-8") == "user made another f" and (wsE / "f (1).txt").read_text(encoding="utf-8") == "f.txt", sorted(p.name for p in wsE.iterdir())
 
     # ---------- 4. توقيع بمحارف غير ASCII أو من نوع آخر: إدخال واحد فقط يتأثر ----------
     with tempfile.TemporaryDirectory() as tmp:
@@ -223,7 +223,7 @@ try:
         fm.move("a2.txt", "a3.txt")
         d = disk(ws)
         for bad_mac in ("éé", 12345, ["x"], None, {"a": 1}, "\ud800x".encode("utf-8", "surrogatepass").decode("utf-8", "replace")):
-            (ws / ".undo_journal.json").write_text(json.dumps(d + [{"action": "create_dir", "path": "rel:zz", "mac": bad_mac}]))
+            (ws / ".undo_journal.json").write_text(json.dumps(d + [{"action": "create_dir", "path": "rel:zz", "mac": bad_mac}]), encoding="utf-8")
             f2 = FileManager(ws, key_dir=K)
             assert len(f2.journal) == len(d) + 1 and [bool(e.get("unverified")) for e in f2.journal] == [False] * len(d) + [True], bad_mac
             assert not (ws / "zz").exists() and not f2.journal[0].get("unverified")
@@ -235,12 +235,12 @@ try:
             K = fresh(base / "k")
             ws = mk(base, files=("a.txt",))
             victim = base / "victim.txt"
-            victim.write_text("ORIGINAL\n")
+            victim.write_text("ORIGINAL\n", encoding="utf-8")
             for name in (".undo_journal.rejected.jsonl", ".undo_journal.skipped.jsonl", ".undo_journal.intent.rejected.json"):
                 os.symlink(str(victim), str(ws / name))
-            (ws / ".undo_journal.json").write_text(json.dumps([{"action": "move", "src": "rel:../x", "dest": "rel:../y"}]))
+            (ws / ".undo_journal.json").write_text(json.dumps([{"action": "move", "src": "rel:../x", "dest": "rel:../y"}]), encoding="utf-8")
             fm = FileManager(ws, key_dir=K)
-            assert victim.read_text() == "ORIGINAL\n" and not (ws / ".undo_journal.rejected.jsonl").is_symlink()
+            assert victim.read_text(encoding="utf-8") == "ORIGINAL\n" and not (ws / ".undo_journal.rejected.jsonl").is_symlink()
             assert sum("رابطاً" in n for n in fm.undo_notes) == 3 and len(list(ws.glob("*.was_a_link"))) == 3
             assert (ws / ".undo_journal.rejected.jsonl").exists()      # حُجر الإدخال الفاسد في ملف عادي جديد
             # رابط يُزرع بعد البدء: الإلحاق عبر _safe_append يرفض، والمسارات تنقله جانباً
@@ -251,20 +251,20 @@ try:
                 raise AssertionError("يجب رفض الإلحاق عبر رابط")
             except OSError:
                 pass
-            assert victim.read_text() == "ORIGINAL\n"
+            assert victim.read_text(encoding="utf-8") == "ORIGINAL\n"
             fm._quarantine([{"action": "x"}], "t")
-            assert victim.read_text() == "ORIGINAL\n" and (ws / ".undo_journal.rejected.jsonl").read_text().count("\n") == 1
+            assert victim.read_text(encoding="utf-8") == "ORIGINAL\n" and (ws / ".undo_journal.rejected.jsonl").read_text(encoding="utf-8").count("\n") == 1
             os.symlink(str(victim), str(ws / ".undo_journal.skipped.jsonl.2"))
             os.unlink(str(ws / ".undo_journal.skipped.jsonl")) if (ws / ".undo_journal.skipped.jsonl").exists() else None
             os.symlink(str(victim), str(ws / ".undo_journal.skipped.jsonl"))
             fm.journal.append({"action": "bogus", "task": None})
-            assert fm.undo_step() == "skipped" and victim.read_text() == "ORIGINAL\n"
+            assert fm.undo_step() == "skipped" and victim.read_text(encoding="utf-8") == "ORIGINAL\n"
     # الإلحاق العادي يعمل
     with tempfile.TemporaryDirectory() as tmp:
         p = pathlib.Path(tmp) / "side.jsonl"
         ft._safe_append(p, "a\n")
         ft._safe_append(p, "b\n")
-        assert p.read_text() == "a\nb\n"
+        assert p.read_text(encoding="utf-8") == "a\nb\n"
 
     # ---------- 6. سباق إنشاء المفتاح: مفتاح واحد ----------
     child = ("import sys, time, os, hashlib\nsys.path.insert(0, %r)\n" % str(ROOT) +

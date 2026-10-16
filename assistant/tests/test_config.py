@@ -5,13 +5,14 @@ import tempfile
 import time
 import pathlib
 import traceback
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 try:
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ):   # كل تعديل لـ os.environ هنا يُستعاد عند الخروج
         base = pathlib.Path(tmp).resolve()
         os.environ["COS_DATA_DIR"] = str(base / "data")
         os.environ["COS_WORKSPACE"] = str(base / "defws")
@@ -33,7 +34,7 @@ try:
         assert validate_workspace(good) == good
         rejects("", "فارغ")
         rejects(base / "nope", "غير موجود")
-        f = base / "file.txt"; f.write_text("x")
+        f = base / "file.txt"; f.write_text("x", encoding="utf-8")
         rejects(f, "ملف لا مجلد")
         rejects(pathlib.Path(good.anchor), "جذر القرص")
         rejects(pathlib.Path.home(), "جذر المستخدم")
@@ -47,10 +48,9 @@ try:
         rejects(base / "u" / ".ssh", "حساس")
         gitrepo = base / "proj" / ".git"; gitrepo.mkdir(parents=True)
         rejects(gitrepo)
-        os.environ["ProgramFiles"] = str(base / "PF")
-        (base / "PF" / "App").mkdir(parents=True)
-        rejects(base / "PF" / "App", "برامج")
-        del os.environ["ProgramFiles"]
+        with mock.patch.dict(os.environ, {"ProgramFiles": str(base / "PF")}):   # يُستعاد القديم (على ويندوز يوجد أصلاً) حتى لو فشل التأكيد
+            (base / "PF" / "App").mkdir(parents=True)
+            rejects(base / "PF" / "App", "برامج")
 
         # AppData مرفوض إلا Temp (حيث تعمل الاختبارات)
         fake_home = base / "fakehome"
@@ -98,7 +98,7 @@ try:
         assert rep and rep["success"]
         assert (ws2 / "مستندات" / "a.txt").exists() and not (ws1 / "مستندات").exists()
         # أثناء خطة جاهزة (غير خامل) يُرفض التغيير
-        (ws2 / "b.txt").write_text("b")
+        (ws2 / "b.txt").write_text("b", encoding="utf-8")
         time.sleep(0.2)
         c.submit_request("رتب الملفات")
         assert c.wait_for("plan")

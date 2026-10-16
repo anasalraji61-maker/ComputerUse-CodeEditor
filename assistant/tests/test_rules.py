@@ -69,15 +69,15 @@ try:
         except PlanParseError as exc:
             assert "لا توجد ملفات" in str(exc)
 
-    # 2. أكثر من 200 ملف: الخطة محدودة وتنجح، والباقي لمرة ثانية
+    # 2. أكثر من 400 ملف: الخطة محدودة وتنجح، والباقي لمرة ثانية
     with tempfile.TemporaryDirectory() as tmp:
-        root, ledger = env(tmp, {f"f{i:02d}.txt": str(i) for i in range(260)})
+        root, ledger = env(tmp, {f"f{i:02d}.txt": str(i) for i in range(460)})
         r = runner(root, ledger)
         plan = r.make_plan("رتب الملفات")
-        assert len(plan) <= 200
+        assert len(plan) <= 400
         assert r.run("big", "رتب الملفات").success
         left = [p for p in root.iterdir() if p.is_file() and not p.name.startswith(".")]
-        assert 0 < len(left) < 260
+        assert 0 < len(left) < 460
         assert r.run("big2", "رتب الملفات").success
         assert not [p for p in root.iterdir() if p.is_file() and not p.name.startswith(".")]
 
@@ -101,8 +101,8 @@ try:
         assert sha(root / "Backup" / "project.txt") == sha(root / "project.txt")
         assert r.run("cp2", "انسخ المجلد Docs إلى Archive").success
         assert (root / "Archive" / "Docs" / "a.txt").read_text(encoding="utf-8") == "A" and (root / "Docs" / "a.txt").exists()
-        assert r.run("cp3", "انسخ project.txt").success  # وجهة افتراضية
-        assert (root / "نسخة_احتياطية" / "project.txt").exists()
+        assert not r.run("cp3", "انسخ project.txt").success  # بلا وجهة: يُسأل المستخدم ولا يُخمَّن مجلد نسخ احتياطي (B41)
+        assert not (root / "نسخة_احتياطية").exists()
         # مصدر غير موجود → سؤال
         q = json.loads(rp.generate("انسخ ghost.txt إلى X", "CLARIFY\n" + CONTEXT_MARKER + "\nproject.txt"))
         assert q["questions"]

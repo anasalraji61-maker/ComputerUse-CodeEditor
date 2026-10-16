@@ -6,12 +6,14 @@
 - شبكة بـ urllib فقط (بلا shell)."""
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Callable, Dict, List, Optional, Tuple
 
-from .http_base import (HttpProvider, ProviderConfigError, ProviderError, is_local_url, opener_for, MAX_RESPONSE_BYTES)  # noqa: F401
+from .http_base import (HttpProvider, ProviderConfigError, ProviderError, is_local_url, is_loopback_url, is_blocked_host, opener_for,  # noqa: F401
+                        default_get, _DOTTED_QUAD, _TLS, GET_TOTAL_TIMEOUT, MAX_RESPONSE_BYTES)
 from .pricing import LOCAL_PRICE
 
 OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -25,26 +27,61 @@ _FENCE_RE = re.compile(r"^\s*```[A-Za-z0-9_-]*\s*\n?(.*?)\n?```\s*$", re.S)
 GetTransport = Callable[[str, Dict[str, str], float], Tuple[int, bytes]]
 
 
+_HOST_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?)*\.?$")
+_NUMERICISH = re.compile(r"^(?:0x[0-9a-f]+|\d+)$")
+_BAD_CHARS = re.compile(r"[\s\x00-\x1f\x7f\\]")
+MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,79}$")
+MAX_MODELS_LISTED = 12
+MAX_MODELS_SCANNED = 200
+
+
 def normalize_base_url(base_url: str) -> str:
-    """يتحقق من العنوان (http/https فقط، بلا بيانات اعتماد مضمّنة) ويزيل الشرطة الأخيرة."""
-    url = (base_url or "").strip()
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise ProviderConfigError(f"عنوان الخادم غير صالح: يجب أن يبدأ بـ http:// أو https:// (COS_OPENAI_BASE_URL).")
-    if parsed.username or parsed.password:
-        raise ProviderConfigError("لا تضع اسم مستخدم/كلمة مرور داخل عنوان الخادم؛ استعمل مفتاح API.")
-    return url.rstrip("/")
+    """يتحقق من العنوان ويعيده موحّداً (مخطط ومضيف بأحرف صغيرة، بلا شرطة أخيرة). يرفع ProviderConfigError دائماً (لا ValueError) برسالة عربية:
+    http/https فقط؛ بلا بيانات اعتماد مضمّنة؛ بلا فراغات/محارف تحكم/شرطة مائلة عكسية؛ بلا استعلام (?) أو جزء (#)؛ منفذ صالح 1..65535؛
+    مضيف ASCII سليم (لا تلاعب unicode ولا صيغ رقمية inet_aton)؛ وجهات link-local وغير المحدد (0.0.0.0) مرفوضة."""
+    raw = str(base_url or "")
+    url = raw.strip()
+    bad_msg = "عنوان الخادم غير صالح؛ يجب أن يبدأ بـ http:// أو https:// ويكون سطراً واحداً بلا مسافات."
+    if not url or _BAD_CHARS.search(url):
+        raise ProviderConfigError(bad_msg)
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        raise ProviderConfigError("عنوان الخادم غير صالح: المنفذ أو صيغة العنوان خاطئة (مثال صحيح: http://127.0.0.1:11434/v1).") from None
+    if parsed.scheme.lower() not in ("http", "https") or not host:
+        raise ProviderConfigError(bad_msg)
+    if parsed.username or parsed.password or "@" in parsed.netloc:
+        raise ProviderConfigError("لا تضع اسم مستخدم أو كلمة مرور داخل عنوان الخادم؛ استعمل مفتاح الخدمة.")
+    if parsed.query or parsed.fragment or "?" in url or "#" in url:
+        raise ProviderConfigError("عنوان الخادم لا يقبل علامة ? أو #؛ اكتب العنوان مباشرة مثل http://127.0.0.1:11434/v1")
+    if port is not None and not (1 <= port <= 65535):
+        raise ProviderConfigError("منفذ عنوان الخادم يجب أن يكون بين 1 و65535.")
+    host = host.lower()
+    if ":" in host:    # IPv6 حرفي
+        try:
+            import ipaddress
+            ipaddress.IPv6Address(host.split("%", 1)[0])
+        except ValueError:
+            raise ProviderConfigError(bad_msg) from None
+    else:
+        labels = host.rstrip(".").split(".")
+        if not _HOST_RE.match(host) or any("%" in x for x in labels):
+            raise ProviderConfigError("اسم الخادم في العنوان غير صالح (حروف إنجليزية وأرقام وشرطات ونقاط فقط).")
+        if all(_NUMERICISH.match(x) for x in labels) and not _DOTTED_QUAD.match(host):
+            raise ProviderConfigError("اكتب عنوان IP بصيغته الكاملة (أربعة أجزاء مثل 127.0.0.1) لا صيغة مختصرة.")
+    if is_blocked_host(host):
+        raise ProviderConfigError("هذا العنوان غير مسموح كوجهة للخدمة الذكية (عنوان محلي خاص بالشبكة أو غير محدد).")
+    netloc = f"[{host}]" if ":" in host else host
+    if port is not None:
+        netloc += f":{port}"
+    return f"{parsed.scheme.lower()}://{netloc}{parsed.path}".rstrip("/")
 
 
 def _default_get(url: str, headers: Dict[str, str], timeout: float) -> Tuple[int, bytes]:
-    req = urllib.request.Request(url, headers=headers, method="GET")
-    try:
-        with opener_for(url).open(req, timeout=timeout) as resp:
-            return resp.status, resp.read(1_000_000)
-    except urllib.error.HTTPError as exc:
-        return exc.code, b""
-    except Exception:
-        return 0, b""
+    """GET /models بآلية النقل نفسها (مهلة إجمالية + الإيقاف)؛ تُعاد في http_base.default_get."""
+    return default_get(url, headers, timeout)
 
 
 MAX_REPLY_CHARS = 1_000_000
@@ -147,7 +184,9 @@ class OpenAICompatProvider(HttpProvider):
                  key_required: Optional[bool] = None, json_mode: bool = True, get_transport: Optional[GetTransport] = None,
                  **kw):
         self.base_url = normalize_base_url(base_url)
-        self.local = is_local_url(self.base_url) if local is None else bool(local)
+        loopback = is_loopback_url(self.base_url)
+        # «محلي» (سعر صفري، مفتاح اختياري، مهلة طويلة) يلزم أن يكون العنوان loopback فعلاً: لا يكفي ادعاء local=True لخادم LAN/بعيد
+        self.local = loopback and (True if local is None else bool(local))
         self.ollama = bool(ollama)
         self.key_required = (not self.local) if key_required is None else bool(key_required)
         if ollama:
@@ -170,7 +209,7 @@ class OpenAICompatProvider(HttpProvider):
     def _require_key(self) -> str:
         if not self._api_key:
             if self.key_required:
-                raise ProviderConfigError(f"مفتاح {self.PROVIDER_LABEL} غير موجود. عيّن متغير البيئة {self.ENV_KEYS[0]} ثم أعد التشغيل.")
+                raise ProviderConfigError(f"مفتاح {self.PROVIDER_LABEL} غير موجود. افتح «الإعدادات» والصق مفتاح الخدمة (يُحفظ لهذه الجلسة فقط)، أو عيّن متغير البيئة {self.ENV_KEYS[0]} ثم أعد التشغيل.")
             return ""
         return super()._require_key()
 
@@ -208,14 +247,14 @@ class OpenAICompatProvider(HttpProvider):
     def _parse(self, data: dict) -> Tuple[str, int, int]:
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices:
-            raise ProviderError(f"رد {self.PROVIDER_LABEL} بلا اختيارات.")
+            raise ProviderError("لم تُرجِع الخدمة أي رد. أعد المحاولة أو صُغ الطلب بشكل مختلف.")
         msg = (choices[0] or {}).get("message") or {}
         content = msg.get("content")
         if isinstance(content, list):   # أجزاء نصية
             content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
         text = _strip_reply(content if isinstance(content, str) else "")
         if not text:
-            raise ProviderError(f"رد {self.PROVIDER_LABEL} فارغ.")
+            raise ProviderError("جاء رد الخدمة فارغاً بلا أي نص. أعد المحاولة أو صُغ الطلب بشكل مختلف.")
         pt, ct = self._usage(data)
         return text, pt, ct
 
@@ -223,30 +262,45 @@ class OpenAICompatProvider(HttpProvider):
     def _available_models(self) -> List[str]:
         """أسماء النماذج المتاحة من GET {base}/models (يعمل على Ollama وOpenAI)؛ فشل => قائمة فارغة. أفضل جهد وبمهلة قصيرة."""
         headers = {"authorization": f"Bearer {self._api_key}"} if self._api_key else {}
+        if self.cancel_check is not None and self.cancel_check():
+            return []
+        _TLS.ctx = (self.cancel_check, time.monotonic() + min(self.total_timeout, GET_TOTAL_TIMEOUT))
         try:
             status, raw = self._get(f"{self.base_url}/models", headers, 4.0)
             if status != 200:
                 return []
             data = json.loads(raw.decode("utf-8", "replace"))
             items = data.get("data") if isinstance(data, dict) else None
-            return [str(m.get("id")) for m in (items or []) if isinstance(m, dict) and m.get("id")][:12]
+            out: List[str] = []
+            for m in (items or [])[:MAX_MODELS_SCANNED]:
+                mid = m.get("id") if isinstance(m, dict) else None
+                # بيانات خادم غير موثوقة: تُعرض فقط أسماء آمنة الشكل ولا تحوي مفتاحاً بأي صيغة (يُسقَط الاسم كاملاً لا يُحجب جزئياً)
+                if not isinstance(mid, str) or not MODEL_ID_RE.match(mid) or self._redact(mid) != mid:
+                    continue
+                out.append(mid)
+                if len(out) >= MAX_MODELS_LISTED:
+                    break
+            return out
         except Exception:
             return []
+        finally:
+            _TLS.ctx = None
 
     def _status_error_msg(self, status: int, raw: bytes) -> ProviderError:
         if status == 404 and (self.ollama or self.local):
             have = self._available_models()
             tail = f" المتاح لديك: {'، '.join(have)}." if have else ""
+            model = self._redact(str(self.model))
             if self.ollama:
-                return ProviderError(f"النموذج {self.model} غير منزّل — نفّذ: ollama pull {self.model}.{tail}")
-            return ProviderError(f"النموذج {self.model} غير موجود على الخادم المحلي ({self.host_label}). غيّره بـ COS_SMALL_MODEL أو COS_LARGE_MODEL.{tail}")
+                return ProviderError(f"النموذج {model} غير منزَّل بعد. أنزِله من برنامج Ollama ثم أعد المحاولة.{tail}")
+            return ProviderError(f"النموذج {model} غير موجود على الخادم المحلي ({self.host_label}). غيّر اسم النموذج من «الإعدادات».{tail}")
         return super()._status_error_msg(status, raw)
 
     def _refused_error(self) -> ProviderError:
         if self.ollama:
-            err = ProviderError(f"Ollama لا يعمل أو لا يستمع على {self.host_label} — شغّله (ollama serve أو افتح تطبيق Ollama) أو غيّر COS_PROVIDER.")
+            err = ProviderError("برنامج Ollama غير مفتوح على جهازك. افتحه من قائمة ابدأ ثم أعد المحاولة، أو غيّر الخدمة من «الإعدادات».")
         elif self.local:
-            err = ProviderError(f"الخادم المحلي لا يعمل على {self.host_label} — شغّله أو غيّر COS_OPENAI_BASE_URL/COS_PROVIDER.")
+            err = ProviderError(f"الخادم المحلي لا يعمل على {self.host_label}. شغّله ثم أعد المحاولة، أو غيّر الخدمة من «الإعدادات».")
         else:
             err = ProviderError(f"رفض الخادم {self.host_label} الاتصال؛ قد يكون الوصول محجوباً من شبكتك.")
         err.refused = True
@@ -287,7 +341,7 @@ class OpenAICompatProvider(HttpProvider):
                     continue
                 raise self._refused_error() from None
             raise err
-        raise ProviderError(f"رفض {self.PROVIDER_LABEL} معاملات الطلب مراراً.")
+        raise ProviderError(f"رفضت خدمة {self.PROVIDER_LABEL} إعدادات الطلب بعد عدة محاولات؛ جرّب نموذجاً آخر من «الإعدادات».")
 
     def _estimate_if_unreported(self, prompt: str, system_prompt: str, text: str) -> None:
         """خادم غير محلي لم يُرجع usage: نقدّر بتحفظ (توكن لكل محرف) كي لا تُحسب الكلفة صفراً."""

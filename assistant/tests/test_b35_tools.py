@@ -49,34 +49,33 @@ try:
         assert m.exceeded()
         day[0] = TODAY + datetime.timedelta(days=1)                       # الأمام: يوم جديد
         assert not m.exceeded() and m.spent_today() == 0.0
-        data = json.loads((pathlib.Path(tmp) / "u.json").read_text())
+        data = json.loads((pathlib.Path(tmp) / "u.json").read_text(encoding="utf-8"))
         assert TODAY.isoformat() in data, data                              # الأيام السابقة محفوظة
         for i in range(10):
             day[0] = TODAY + datetime.timedelta(days=2 + i)
             m.add(0.01)
-        assert len(json.loads((pathlib.Path(tmp) / "u.json").read_text())) <= 7
+        assert len([k for k in json.loads((pathlib.Path(tmp) / "u.json").read_text(encoding="utf-8")) if k[:1].isdigit()]) <= 7
 
-    # ---- 1ب) ساعة قفزت للمستقبل مرة واحدة لا تثبّت السقف عليه ----
+    # ---- 1ب) خانة مستقبلية قديمة (ملف قبل التصميم الجديد/ساعة خاطئة): تُحتسب احتياطاً ثم تنتهي نافذتها دون دمج مدمّر ----
     with tempfile.TemporaryDirectory() as tmp:
         f = pathlib.Path(tmp) / "usage.json"
         D = datetime.date
         UsageMeter(f, daily_cap_usd=1.0, today=lambda: D(2030, 1, 1)).add(0.6)
         m = UsageMeter(f, daily_cap_usd=1.0, today=lambda: D(2026, 10, 14))
-        assert abs(m.spent_today() - 0.6) < 1e-9          # طُوي في اليوم الحالي (متحفظ) مرة واحدة
+        assert abs(m.spent_today() - 0.6) < 1e-9          # الأعلى من (اليوم، أحدث يوم) خلال النافذة
         m.add(0.3)
-        assert abs(m.spent_today() - 0.9) < 1e-9
-        assert "2030-01-01" not in json.loads(f.read_text())
-        for day, expect in ((D(2026, 10, 15), 0.3), (D(2026, 10, 20), 0.3), (D(2027, 3, 1), 0.3)):
-            m = UsageMeter(f, daily_cap_usd=1.0, today=lambda d=day: d)
-            m.add(0.3)
-            assert abs(m.spent_today() - expect) < 1e-9 and not m.exceeded(), (day, m.spent_today())
-        # غداً (حدود منتصف الليل/المناطق الزمنية) يبقى؛ بعد غد فما فوق يُطوى
+        assert abs(m.spent_today() - 0.9) < 1e-9 and m.clock_regress
+        assert abs(json.loads(f.read_text(encoding="utf-8"))["2030-01-01"] - 0.9) < 1e-9      # لا طيّ: الخانة محفوظة كما هي
+        m = UsageMeter(f, daily_cap_usd=1.0, today=lambda: D(2026, 10, 20))   # خارج نافذة الـ3 أيام: مرجع جديد
+        assert m.spent_today() == 0.0 and not m.exceeded()
+        m.add(0.3)
+        assert abs(m.spent_today() - 0.3) < 1e-9
+        assert "2030-01-01" not in json.loads(f.read_text(encoding="utf-8"))       # خانة المستقبل المنتهية تُهمل (لا تُدمج)
+        # غداً (حدود منتصف الليل/المناطق الزمنية) يبقى كأحدث يوم دون علم تراجع
         f2 = pathlib.Path(tmp) / "u2.json"
         UsageMeter(f2, daily_cap_usd=1.0, today=lambda: D(2026, 10, 15)).add(0.2)
         m = UsageMeter(f2, daily_cap_usd=1.0, today=lambda: D(2026, 10, 14))
-        assert abs(m.spent_today() - 0.2) < 1e-9          # غداً محفوظ كيوم معتمد
-        m = UsageMeter(f2, daily_cap_usd=1.0, today=lambda: D(2026, 10, 13))
-        assert abs(m.spent_today() - 0.2) < 1e-9          # بعد غد: طُوي في اليوم الحالي
+        assert abs(m.spent_today() - 0.2) < 1e-9 and not m.clock_regress
         # الحماية من الساعة الراجعة للوراء ما زالت تعمل
         f3 = pathlib.Path(tmp) / "u3.json"
         UsageMeter(f3, daily_cap_usd=1.0, today=lambda: D(2026, 10, 14)).add(0.9)
@@ -129,7 +128,7 @@ try:
         a = UsageMeter(f, daily_cap_usd=1.0, today=lambda: TODAY)
         tok = a.reserve(0.6)
         assert tok is not None and a.pending_path.exists()
-        data = json.loads(a.pending_path.read_text())
+        data = json.loads(a.pending_path.read_text(encoding="utf-8"))
         assert list(data.values())[0]["pid"] == os.getpid()
         b = UsageMeter(f, daily_cap_usd=1.0, today=lambda: TODAY)           # «إعادة تشغيل» بعد انهيار a (لا release)
         assert abs(b.inflight_usd() - 0.6) < 1e-9
@@ -137,14 +136,14 @@ try:
         a.release(tok)                                                      # فكّ الحجز الفعلي يحذف المدخل
         assert b.inflight_usd() < 0.31
         # انتهاء بعد 10 دقائق
-        ent = json.loads(b.pending_path.read_text())
+        ent = json.loads(b.pending_path.read_text(encoding="utf-8"))
         for v in ent.values():
             v["ts"] = time.time() - PENDING_TTL_SEC - 5
-        b.pending_path.write_text(json.dumps(ent))
+        b.pending_path.write_text(json.dumps(ent), encoding="utf-8")
         c = UsageMeter(f, daily_cap_usd=1.0, today=lambda: TODAY)
         assert c.inflight_usd() == 0.0
         # تلف ملف الحجوزات لا يكسر شيئاً
-        c.pending_path.write_text("{ not json")
+        c.pending_path.write_text("{ not json", encoding="utf-8")
         assert c.inflight_usd() == 0.0 and c.reserve(0.1) is not None
 
     # ---- 2) ledger: تلف/فراغ/تعافٍ ----
@@ -217,7 +216,7 @@ try:
             assert not ok and "لا يوجد تحديث متاح" in msg and "عدم نجاح" not in msg, (code, msg)
             assert " " not in msg and "ناتج winget" in msg
         ok, ev, msg = v.verify_step(step, {"step_id": 1, "success": False, "exit_code": 1, "stdout": "No installed package found matching input criteria.", "stderr": ""}, before)
-        assert not ok and "لا يوجد تحديث متاح" in msg
+        assert not ok and "غير مثبّتة" in msg and "لا يوجد تحديث متاح" not in msg
         long_out = "x" * 500 + " END-OF-OUTPUT"
         ok, ev, msg = v.verify_step(step, {"step_id": 1, "success": False, "exit_code": 0x80070005, "stdout": long_out, "stderr": ""}, before)
         assert not ok and "0x80070005" in msg and "END-OF-OUTPUT" in msg and len(msg) < 400, msg

@@ -1,6 +1,8 @@
 """حارس الميزانية (Budget Guard) — متابعة سقوف الخطوات والتوكنات والمحاولات لكل مهمة."""
 from typing import Dict, Any
 
+from assistant.arabic import n_units
+
 
 class BudgetExceededError(Exception):
     """استثناء عند تجاوز أي سقف من سقوف الميزانية المحددة."""
@@ -14,7 +16,7 @@ class InvalidChargeError(BudgetExceededError, ValueError):
 def _check_amount(name: str, value) -> None:
     import math
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
-        raise InvalidChargeError(f"قيمة {name} غير صالحة ({value!r}): يجب أن تكون عدداً محدوداً غير سالب.")
+        raise InvalidChargeError(f"قيمة {name} غير صالحة: يجب أن تكون عدداً محدوداً غير سالب.")
 
 
 class BudgetTracker:
@@ -43,19 +45,19 @@ class BudgetTracker:
             _check_amount(name, v)
         if self.current_steps + steps > self.max_steps:
             raise BudgetExceededError(
-                f"تم تجاوز سقف الخطوات ({self.current_steps + steps} > {self.max_steps})."
+                f"تجاوزت المهمة سقف الخطوات: المطلوب {n_units(int(self.current_steps + steps), 'خطوة')} والمسموح {n_units(int(self.max_steps), 'خطوة')}."
             )
         if self.current_tokens + tokens > self.max_tokens:
             raise BudgetExceededError(
-                f"تم تجاوز سقف التوكنات ({self.current_tokens + tokens} > {self.max_tokens})."
+                f"تجاوزت المهمة سقف حجم النص المسموح ({self.current_tokens + tokens} من {self.max_tokens})."
             )
         if self.current_retries + retries > self.max_retries:
             raise BudgetExceededError(
-                f"تم تجاوز سقف المحاولات ({self.current_retries + retries} > {self.max_retries})."
+                f"تجاوزت المهمة سقف المحاولات: {int(self.current_retries + retries)} والمسموح {int(self.max_retries)}."
             )
         if self.current_points + points > self.max_points:
             raise BudgetExceededError(
-                f"تم تجاوز سقف النقاط ({self.current_points + points} > {self.max_points})."
+                f"تجاوزت المهمة سقف النقاط: المطلوب {n_units(int(self.current_points + points), 'نقطة')} والمسموح {n_units(int(self.max_points), 'نقطة')}."
             )
 
         self.current_steps += steps

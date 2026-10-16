@@ -109,7 +109,15 @@ try:
                 ]
             })
         )
-        rep5 = run_benchmark_pipeline("fail_consent", "ترقية دون موافقة", root, p_danger, ledger, user_approved=False)
+        # winget وهمي: لقطة ما قبل الخطوة (version_probe) تستدعي «winget list» فعلاً؛ على جهاز فيه winget حقيقي كان هذا يشغّل البرنامج الحقيقي
+        # (مصادر/شبكة/مهلة 900ث) فيتجاوز الاختبار مهلة التشغيل. الاختبار هنا عن الموافقة لا عن winget.
+        winget_calls = []
+
+        def fake_winget(cmd):
+            winget_calls.append(list(cmd))
+            return 0, "", ""
+        rep5 = run_benchmark_pipeline("fail_consent", "ترقية دون موافقة", root, p_danger, ledger, user_approved=False, mock_winget_runner=fake_winget)
+        assert not any("upgrade" in c for c in winget_calls), winget_calls    # لا ترقية فعلية دون موافقة
         text5 = rep5.render_arabic_text()
         assert rep5.success is False, "المهمة عُدّت ناجحة رغم غياب الموافقة للإجراء الخطر!"
         assert "تقرير المهمة: فشل" in text5

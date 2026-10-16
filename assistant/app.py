@@ -17,12 +17,15 @@ def build_controller(provider=None):
     from assistant.models.http_base import ProviderConfigError
     from assistant.ui.controller import AssistantController
 
+    from assistant import config as _config
+    from assistant.ui import settings as _settings
+    cfg = _config.load_config()
     notice = ""
     if provider is None:
         try:
-            provider, notice = build_provider()
+            provider, notice = build_provider(_settings.startup_env(os.environ, cfg))   # متغيرات البيئة الصريحة تتقدم على config.json (بلا مفاتيح)
         except ProviderConfigError as exc:
-            provider, notice = DemoProvider(), f"تنبيه: {exc} — يعمل الآن بالوضع التجريبي."
+            provider, notice = DemoProvider(), f"تنبيه: {str(exc).rstrip('.')}. أعمل الآن بالوضع المحلي (بلا إنترنت). لاستعمال النموذج الذكي افتح «الإعدادات» والصق مفتاح الخدمة."
 
     workspace, data_dir = default_paths()
     workspace.mkdir(parents=True, exist_ok=True)
@@ -34,7 +37,9 @@ def build_controller(provider=None):
     elif ledger.get_balance() < 20:
         ledger.top_up(100, "شحن تجريبي تلقائي")
     from assistant.usage import UsageMeter
-    meter = UsageMeter(data_dir / "usage.json")
+    meter = UsageMeter(data_dir / "usage.json", daily_cap_usd=_settings.saved_cap(os.environ, cfg))
+    line = _settings.describe_provider(provider, meter.cap)["line"]   # أي مزوّد نشط ومجاني/مدفوع، في أول رسالة
+    notice = line + ("\n" + notice if notice else "")
     rec = str(getattr(ledger, "recovery_message", "") or "").strip()
     if rec:   # دفتر نقاط تالف/فارغ أُعيد إنشاؤه: يجب أن يعرف المستخدم
         notice = (notice + "\n" if notice else "") + "تنبيه: " + rec
@@ -47,6 +52,22 @@ MB_ICONWARNING = 0x30
 MB_RTL = 0x180000   # MB_RIGHT | MB_RTLREADING: نص عربي يُقرأ من اليمين في مربع رسالة ويندوز
 
 
+def _redact_for_log(msg: str) -> str:
+    """مفاتيح الخدمة لا تدخل السجلات: المسجّلة في الذاكرة + قيم البيئة السرية + أنماط المفاتيح المعروفة (assistant.redact)."""
+    try:
+        from assistant.ui.settings import redact_known, seed_env_secrets
+        seed_env_secrets()
+        msg = redact_known(msg)
+    except Exception:
+        pass
+    try:
+        from assistant.redact import redact
+        msg = redact(msg, os.environ)
+    except Exception:
+        pass
+    return msg
+
+
 def write_crash_log(msg: str) -> None:
     """يلحق سطراً بـ crash.log في مجلد البيانات؛ لا يرفع أبداً (قد لا يتوفر القرص أو المجلد)."""
     try:
@@ -55,6 +76,7 @@ def write_crash_log(msg: str) -> None:
         d.mkdir(parents=True, exist_ok=True)
         import time
         msg = "".join(ch for ch in str(msg) if ch not in "\u2066\u2067\u2068\u2069")   # عوازل العرض لا تدخل السجلات
+        msg = _redact_for_log(msg)
         with open(d / "crash.log", "a", encoding="utf-8") as f:
             f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
     except Exception:
@@ -67,7 +89,11 @@ def show_message(msg: str, flags: int = MB_ICONERROR) -> None:
         if os.environ.get("COS_NO_DIALOG"):   # الاختبارات الآلية تعطّل النافذة المنبثقة
             return
         import ctypes
-        ctypes.windll.user32.MessageBoxW(0, msg, "مساعد المهام", flags | MB_RTL)
+        from ctypes import wintypes as wt
+        u32 = ctypes.WinDLL("user32", use_last_error=True)
+        u32.MessageBoxW.argtypes = [ctypes.c_void_p, wt.LPCWSTR, wt.LPCWSTR, wt.UINT]
+        u32.MessageBoxW.restype = ctypes.c_int
+        u32.MessageBoxW(None, msg, "مساعد المهام", flags | MB_RTL)
     except Exception:
         pass
 
@@ -135,8 +161,13 @@ def _read_lock(path):
     """(pid، بصمة) من ملف القفل؛ غير مقروء/فارغ/ضخم/غير موجب = (0، "") أي قفل قديم يُتجاوز."""
     try:
         with open(path, "rb") as f:
-            f.seek(_LOCK_DATA_OFFSET)
-            raw = f.read(200).decode("ascii", "ignore").strip().strip("\x00")
+            try:
+                data = f.read(200)
+            except OSError:
+                # ويندوز: البايت 0 مقفل (msvcrt.locking) بمقبض صاحب القفل فيرفض النظام قراءته لغيره؛ البيانات تبدأ من البايت 1
+                f.seek(_LOCK_DATA_OFFSET_MSVCRT)
+                data = f.read(200)
+            raw = data.decode("ascii", "ignore").strip().strip("\x00").strip()
         head, _, fp = raw.partition(":")
         pid = int(head)
         return (pid, fp.strip()) if 0 < pid < 2 ** 31 else (0, "")
@@ -161,7 +192,7 @@ def _lock_is_live(pid: int, fp: str) -> bool:
     return True
 
 
-_LOCK_DATA_OFFSET = 0
+_LOCK_DATA_OFFSET_MSVCRT = 1   # مسار msvcrt: البايت 0 للقفل والبيانات بعده (البايت 0 فارغ NUL في الملف)
 _held_paths = set()   # مسارات أقفال ملفية تحملها هذه العملية (يمنع التشغيل المزدوج داخل العملية الواحدة أيضاً)
 
 
@@ -196,7 +227,35 @@ def _lock_payload() -> bytes:
     return f"{os.getpid()}:{_proc_fingerprint(os.getpid())}".encode("ascii", "ignore").ljust(64, b" ")
 
 
-def acquire_instance_lock(key: str, lock_dir, *, use_mutex=None) -> bool:
+ERROR_ALREADY_EXISTS = 183
+
+
+class _WinMutexApi:
+    """واجهة ctypes لـ mutex ويندوز بأنواع صريحة: مقبض 64 بت لا يُبتر (restype=c_void_p)، وget_last_error آمن للخيوط (use_last_error)."""
+
+    def __init__(self, ct=None):
+        if ct is None:
+            import ctypes as ct
+        from ctypes import wintypes as wt
+        self.ct = ct
+        k32 = ct.WinDLL("kernel32", use_last_error=True)
+        k32.CreateMutexW.argtypes = [ct.c_void_p, wt.BOOL, wt.LPCWSTR]
+        k32.CreateMutexW.restype = ct.c_void_p
+        k32.CloseHandle.argtypes = [ct.c_void_p]
+        k32.CloseHandle.restype = wt.BOOL
+        self.k32 = k32
+
+    def create(self, name: str):
+        """(مقبض أو 0، رمز الخطأ بعد النداء مباشرة)."""
+        self.ct.set_last_error(0)
+        handle = self.k32.CreateMutexW(None, False, name)
+        return (handle or 0), self.ct.get_last_error()
+
+    def close(self, handle) -> None:
+        self.k32.CloseHandle(handle)
+
+
+def acquire_instance_lock(key: str, lock_dir, *, use_mutex=None, mutex_api=None) -> bool:
     """True = نحن النسخة الوحيدة (القفل محجوز لعمر العملية)، False = نسخة أخرى تعمل (في هذه العملية أو غيرها).
     ويندوز: mutex مسمّى (Local\\COS_Assistant_<key>) عبر ctypes. غيره/عند الفشل: ملف قفل. الأولوية: flock (يونكس)، ثم
     msvcrt.locking على أول بايت (قفل نظام حقيقي على ويندوز)، ثم ملف يحوي «pid:بصمة بداية العملية» (حيّ فقط إن كان الرقم حيّاً
@@ -205,15 +264,16 @@ def acquire_instance_lock(key: str, lock_dir, *, use_mutex=None) -> bool:
         use_mutex = os.name == "nt"
     if use_mutex:
         try:
-            import ctypes
-            k32 = ctypes.windll.kernel32
-            k32.SetLastError(0)
-            handle = k32.CreateMutexW(None, False, f"Local\\COS_Assistant_{key}")
+            api = mutex_api or _WinMutexApi()
+            handle, err = api.create(f"Local\\COS_Assistant_{key}")
             if handle:
-                if k32.GetLastError() == 183:   # ERROR_ALREADY_EXISTS
-                    k32.CloseHandle(handle)
+                if err == ERROR_ALREADY_EXISTS:
+                    try:
+                        api.close(handle)   # نسخة أخرى تملكه: لا نبقي مقبضاً ثانياً
+                    except Exception:
+                        pass
                     return False
-                _held_locks.append(handle)
+                _held_locks.append(handle)   # يبقى مفتوحاً طوال عمر العملية؛ يغلقه النظام عند الخروج
                 return True
         except Exception:
             pass   # نرجع لملف القفل
@@ -230,7 +290,7 @@ def acquire_instance_lock(key: str, lock_dir, *, use_mutex=None) -> bool:
             fcntl = None
         if fcntl is not None:
             import errno
-            f = open(path, "a+")
+            f = open(path, "a+", encoding="utf-8")
             try:
                 fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError as exc:
@@ -299,10 +359,11 @@ def _install_crash_hooks() -> None:
     prev = sys.excepthook
 
     def hook(et, ev, tb):
-        write_crash_log("".join(traceback.format_exception(et, ev, tb)))
+        text = "".join(traceback.format_exception(et, ev, tb))
+        write_crash_log(text)
         try:
             if sys.stderr is not None:
-                prev(et, ev, tb)
+                sys.stderr.write(_redact_for_log(text))   # الكونسول أيضاً بلا مفاتيح (الافتراضي prev يطبع النص الخام)
         except Exception:
             pass
     sys.excepthook = hook
@@ -311,10 +372,11 @@ def _install_crash_hooks() -> None:
         prev_t = threading.excepthook
 
         def thook(args):
-            write_crash_log("".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+            text = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
+            write_crash_log(text)
             try:
                 if sys.stderr is not None:
-                    prev_t(args)
+                    sys.stderr.write("Exception in thread " + str(getattr(args.thread, "name", "?")) + ":\n" + _redact_for_log(text))
             except Exception:
                 pass
         threading.excepthook = thook
@@ -342,7 +404,7 @@ def main(lock_fn=None) -> int:
     try:
         import tkinter as tk
     except ImportError:
-        report_fatal("tkinter غير متوفر في هذا البايثون. ثبّت بايثون الرسمي من python.org (يتضمن tkinter).")
+        report_fatal("تعذّر تشغيل المساعد: برنامج tkinter غير متوفر في هذا البايثون. ثبّت بايثون الرسمي من موقع python.org (يتضمن tkinter).")
         return 1
     from assistant.ui.widget import AssistantWidget
 
@@ -373,7 +435,8 @@ def main(lock_fn=None) -> int:
         widget = AssistantWidget(root, controller)
     except Exception as exc:   # exe بلا كونسول: وإلا يختفي الخطأ بصمت
         import traceback
-        report_fatal(f"تعذّر فتح النافذة: {type(exc).__name__}: {exc}\n{traceback.format_exc()[-600:]}")
+        write_crash_log(f"فتح النافذة: {type(exc).__name__}: {exc}\n{traceback.format_exc()[-1200:]}")
+        report_fatal("تعذّر فتح نافذة المساعد. سُجّلت التفاصيل في ملف crash.log؛ أرسله إلى المطوّر.")
         return 1
     if notice:
         widget.add_message(notice, "assistant")

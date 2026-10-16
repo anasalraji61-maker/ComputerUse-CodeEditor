@@ -46,7 +46,7 @@ try:
         ws = tmp / "ws"
         ws.mkdir(exist_ok=True)
         for f in files:
-            (ws / f).write_text(f)
+            (ws / f).write_text(f, encoding="utf-8")
         led = SQLiteLedger(tmp / "l.db", initial_balance=100, spending_limit=100)
         c = AssistantController(Prov(script), ws, led, approval_timeout=timeout)
         c.threads = []

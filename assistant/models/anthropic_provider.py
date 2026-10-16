@@ -37,9 +37,9 @@ class AnthropicProvider(HttpProvider):
     def _parse(self, data: dict) -> Tuple[str, int, int]:
         blocks = data.get("content")
         if not isinstance(blocks, list):
-            raise ProviderError("رد Claude بلا محتوى.")
+            raise ProviderError("لم تُرجِع الخدمة أي رد. أعد المحاولة أو صُغ الطلب بشكل مختلف.")
         text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
         if not text:
-            raise ProviderError("رد Claude فارغ.")
+            raise ProviderError("جاء رد الخدمة فارغاً بلا أي نص. أعد المحاولة أو صُغ الطلب بشكل مختلف.")
         u = data.get("usage") or {}
         return text, int(u.get("input_tokens", 0)), int(u.get("output_tokens", 0))

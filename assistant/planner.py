@@ -3,10 +3,14 @@ import json
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 from assistant.models.base import ModelProvider, CONTEXT_MARKER
-from assistant.safety import ACTION_LEVELS
+from assistant.safety import ACTION_LEVELS, SafetyLevel
 from assistant.tools.files import is_unc_like, name_problem, name_len, MAX_NAME_UNITS
 
-MAX_PLAN_STEPS = 200
+MAX_PLAN_STEPS = 400   # خطط النقل/النسخ/التسمية القابلة للتراجع وبلا موافقات فردية
+MAX_DANGEROUS_PLAN_STEPS = 200   # أي خطة فيها خطوة خطرة (حذف/تشغيل أمر…) تطلب موافقات: سقفها أصغر
+MAX_GUARD_HASH_CHARS = 80
+_GUARD_INT_KEYS = ("size", "mtime_ns", "keep_size")
+_GUARD_STR_KEYS = ("hash", "keep", "keep_hash")
 MAX_RESPONSE_CHARS = 1_000_000  # رد النموذج الخام الأكبر من ~1MB يُرفض قبل أي تحليل (حماية الذاكرة/المعالج)
 MAX_TARGET_CHARS = 260
 MAX_DEST_CHARS = 260
@@ -33,6 +37,8 @@ class PlanStep:
     params: Dict[str, Any] = field(default_factory=dict)
     acceptance_criteria: str = "تحقق وجود الملف ومطابقة البصمة"
     status: str = "PENDING"
+    # بصمة العنصر المستهدف لحظة وضع الخطة (يضعها المنسّق لا النموذج): تُقارَن قبل التنفيذ فيُتخطّى ما تغيّر بعد التخطيط. خارج المقارنة والعرض.
+    sig: Optional[Dict[str, Any]] = field(default=None, compare=False, repr=False)
 
     def __post_init__(self):
         if isinstance(self.action_type, str):
@@ -117,6 +123,35 @@ def _check_path_segments(value: str, label: str, step_id: Any, allow_lone_dot: b
             raise PlanParseError(f"الخطوة {step_id}: {label} يحوي مقطع '{seg.strip()}' غير مسموح؛ استخدم مساراً صريحاً داخل مجلد العمل.")
 
 
+def _validate_guard(guard: Any, step_id: int) -> Dict[str, Any]:
+    """params.guard (تضعه القواعد لخطوات المكررات): حراسة تُفحص قبل التنفيذ فتُتخطّى الخطوة إن تغيّر العنصر.
+    المفاتيح: size, mtime_ns, hash لمحتوى الهدف؛ keep (المسار النسبي للنسخة المُبقاة), keep_size, keep_hash. مفاتيح غريبة تُسقَط؛ نوع خاطئ يُرفض."""
+    if not isinstance(guard, dict):
+        raise PlanParseError(f"الخطوة {step_id}: params.guard يجب أن يكون كائناً.")
+    out: Dict[str, Any] = {}
+    for k in _GUARD_INT_KEYS:
+        if k in guard:
+            v = guard[k]
+            if isinstance(v, bool) or not isinstance(v, int) or v < 0 or v > 2 ** 63:
+                raise PlanParseError(f"الخطوة {step_id}: params.guard.{k} يجب أن يكون عدداً صحيحاً غير سالب.")
+            out[k] = v
+    for k in _GUARD_STR_KEYS:
+        if k in guard:
+            v = guard[k]
+            if not isinstance(v, str) or not v or len(v) > (MAX_TARGET_CHARS if k == "keep" else MAX_GUARD_HASH_CHARS):
+                raise PlanParseError(f"الخطوة {step_id}: params.guard.{k} نص غير صالح.")
+            if k == "keep":
+                _clean_text(v, "target", step_id)
+                _check_path_segments(v, "params.guard.keep", step_id)
+                import pathlib as _pl
+                if is_unc_like(v) or _pl.PurePosixPath(v).is_absolute() or _pl.PureWindowsPath(v).anchor or v.startswith(("/", "\\")):
+                    raise PlanParseError(f"الخطوة {step_id}: params.guard.keep يجب أن يكون مساراً نسبياً داخل مجلد العمل.")
+            elif not all(c.isalnum() or c in ":-_" for c in v):
+                raise PlanParseError(f"الخطوة {step_id}: params.guard.{k} يحوي محارف غير مقبولة.")
+            out[k] = v
+    return out
+
+
 def validate_step(item: Any, index: int) -> PlanStep:
     if not isinstance(item, dict):
         raise PlanParseError(f"الخطوة رقم {index} ليست كائناً.")
@@ -162,7 +197,11 @@ def validate_step(item: Any, index: int) -> PlanStep:
     allowed = {"move": ("dest", "expected_hash"), "copy": ("dest", "expected_hash"),
                "rename": ("new_name",), "run_command": ("cmd",)}.get(action, ())
     clean_params = {k: params[k] for k in allowed if k in params}  # بارامترات الإجراء فقط؛ لا شيء غريب يمر
-    for k in ("dest", "new_name", "expected_hash"):
+    if action in ("move", "copy", "rename", "delete", "trash") and "guard" in params:
+        g = _validate_guard(params["guard"], raw_id)
+        if g:
+            clean_params["guard"] = g
+    for k in ("dest", "new_name", "expected_hash"):   # (guard يُفحص أعلاه)
         if k in clean_params:
             if not isinstance(clean_params[k], str):
                 raise PlanParseError(f"الخطوة {raw_id}: params.{k} يجب أن يكون نصاً.")
@@ -250,6 +289,8 @@ class Planner:
         if len(raw_steps) > self.max_steps:
             raise PlanParseError(f"عدد الخطوات {len(raw_steps)} يتجاوز الحد الأقصى {self.max_steps}.")
         steps = [validate_step(item, i) for i, item in enumerate(raw_steps, 1)]
+        if len(steps) > MAX_DANGEROUS_PLAN_STEPS and any(ACTION_LEVELS.get(s.action_type) == SafetyLevel.DANGEROUS for s in steps):
+            raise PlanParseError(f"عدد الخطوات {len(steps)} يتجاوز الحد الأقصى {MAX_DANGEROUS_PLAN_STEPS} للخطط التي فيها خطوات خطرة (حذف/تشغيل أمر…).")
         note = data.get("note") if isinstance(data, dict) else None
         clean_note = sanitize_display(note, 300) if isinstance(note, str) and note.strip() else None
         ids = [s.step_id for s in steps]

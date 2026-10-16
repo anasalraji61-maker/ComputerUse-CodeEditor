@@ -128,13 +128,13 @@ try:
         raise AssertionError
     except ProviderError as exc:
         m = str(exc)
-        assert "qwen2.5:7b غير منزّل" in m and "ollama pull qwen2.5:7b" in m and "llama3.2:3b" in m, m
+        assert "qwen2.5:7b غير منزَّل" in m and "Ollama" in m and "llama3.2:3b" in m, m
     assert gets[0][0] == "http://127.0.0.1:11434/v1/models"
     p = ollama(Net((404, b"{}")), get_transport=lambda *a: (0, b""), max_retries=0)       # القائمة غير متاحة: الرسالة الأساسية تكفي
     try:
         p.generate("x")
     except ProviderError as exc:
-        assert "ollama pull qwen2.5:7b" in str(exc)
+        assert "qwen2.5:7b غير منزَّل" in str(exc) and "Ollama" in str(exc)
 
     # ---- رفض الاتصال ----
     for boom in (ConnectionRefusedError(111, "refused"),):
@@ -143,14 +143,14 @@ try:
             p.generate("x")
             raise AssertionError
         except ProviderError as exc:
-            assert "Ollama لا يعمل" in str(exc) and "COS_PROVIDER" in str(exc) and "127.0.0.1:11434" in str(exc)
+            assert "Ollama غير مفتوح" in str(exc) and "«الإعدادات»" in str(exc)
     err = ProviderError("x")
     err.refused = True
     try:
         ollama(Net(err)).generate("x")
         raise AssertionError
     except ProviderError as exc:
-        assert "Ollama لا يعمل" in str(exc)
+        assert "Ollama غير مفتوح" in str(exc)
     # عبر النقل الافتراضي الحقيقي (urllib) يُترجَم الرفض إلى الرسالة نفسها
     import urllib.error
     import urllib.request
@@ -160,7 +160,7 @@ try:
             p.generate("x")
             raise AssertionError
         except ProviderError as exc:
-            assert "Ollama لا يعمل" in str(exc)
+            assert "Ollama غير مفتوح" in str(exc)
 
     # ---- Retry-After والإيقاف ----
     sleeps = []
@@ -193,7 +193,7 @@ try:
     assert isinstance(prov, RuleFirstProvider) and isinstance(prov.fallback, ModelRouter)
     s = prov.fallback.providers["small"]
     assert s.model == "qwen2.5:7b" and s.base_url == "http://127.0.0.1:11434/v1" and s.price_per_mtok == LOCAL_PRICE
-    assert "ollama pull" in note and "لا تغادر" in note and "تنبيه خصوصية" not in note
+    assert "برنامج Ollama" in note and "لا تغادر" in note and "تنبيه خصوصية" not in note
     prov, note = build_provider({"COS_PROVIDER": "ollama", "COS_SMALL_MODEL": "llama3.2:3b", "COS_LARGE_MODEL": "qwen2.5:14b",
                                  "COS_OPENAI_BASE_URL": "http://localhost:11500/v1/"})
     assert prov.fallback.providers["small"].model == "llama3.2:3b" and prov.fallback.providers["large"].model == "qwen2.5:14b"
@@ -207,6 +207,8 @@ try:
     s = prov.fallback.providers["small"]
     assert s.price_per_mtok is None and "تنبيه خصوصية" in note and "llm.example.com" in note   # بعيد: مسعَّر بتحفظ لا مجاني
     prov, note = build_provider({"COS_PROVIDER": "openai-compat", "COS_OPENAI_BASE_URL": "http://192.168.1.20:1234/v1", "COS_SMALL_MODEL": "m1"})
+    assert prov.fallback.providers["small"].price_per_mtok is None and "تنبيه خصوصية" in note     # LAN ليس جهازك: مسعَّر لا مجاني
+    prov, note = build_provider({"COS_PROVIDER": "openai-compat", "COS_OPENAI_BASE_URL": "http://127.0.0.1:1234/v1", "COS_SMALL_MODEL": "m1"})
     assert prov.fallback.providers["small"].price_per_mtok == LOCAL_PRICE and "تنبيه خصوصية" not in note
     for env in ({"COS_PROVIDER": "openai"}, {"COS_PROVIDER": "openai_compat"}, {"COS_PROVIDER": "openai_compat", "COS_OPENAI_BASE_URL": "http://h/v1"},
                 {"COS_PROVIDER": "ollama", "COS_OPENAI_BASE_URL": "ftp://x"}, {"COS_PROVIDER": "ollama", "COS_OPENAI_BASE_URL": "http://u:p@h/v1"},

@@ -75,7 +75,11 @@ try:
                     ("انشئ مجلد بإسم Test", "Test"), ("انشئ مجلد باسم: Test", "Test"), ("أنشئ مجلد Reports", "Reports")):
         steps, _ = plan(t)
         assert steps == [("create_dir", want, None)], (t, steps)
-    for t in ("انشئ مجلد Test/sub", "انشئ مجلد b.txt", "انشئ مجلد جديد", "انشئ مجلد Test وضع a.txt فيه", "create folder AUX",
+    # B42: مجلد متداخل «a/b» يُنشأ بأمان داخل مجلد العمل (الأب ثم الابن)، لا يُسأل عنه
+    assert plan("انشئ مجلد Test/sub")[0] == [("create_dir", "Test", None), ("create_dir", "Test/sub", None)]
+    for t in ("انشئ مجلد ../x", "انشئ مجلد C:/x", "انشئ مجلد /x", "انشئ مجلد a/b.txt"):
+        asks(t)
+    for t in ("انشئ مجلد b.txt", "انشئ مجلد جديد", "انشئ مجلد Test وضع a.txt فيه", "create folder AUX",
               "انشئ مجلد readme"):
         asks(t)
     assert plan("أنشئ مشروع my_app")[0][0][1] == "my_app/src"

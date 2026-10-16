@@ -140,10 +140,10 @@ try:
     assert [R._n(i, "مجموعة") for i in (1, 2, 4, 20)] == ["مجموعة واحدة", "مجموعتان", "4 مجموعات", "20 مجموعة"]
     assert [R._n(i, "خطوة") for i in (1, 2, 3, 11)] == ["خطوة واحدة", "خطوتان", "3 خطوات", "11 خطوة"]
     assert [R._n(i, "عملية") for i in (1, 2, 3, 11)] == ["عملية واحدة", "عمليتان", "3 عمليات", "11 عملية"]
-    big = [f"f{i}.txt" for i in range(260)]
+    big = [f"f{i}.txt" for i in range(460)]   # أكثر من سقف الخطة (400)
     a = analyze("رتب الملفات حسب النوع", big)
     assert "بقي" in (a.note or "") and "عنصر" in a.note
-    assert "11 عنصراً" in R._trunc_note(200, 11) and "عنصر واحد" in R._trunc_note(200, 1) and "عنصران" in R._trunc_note(200, 2)
+    assert "11 عنصراً" in R._trunc_note(400, 11) and "عنصر واحد" in R._trunc_note(400, 1) and "عنصران" in R._trunc_note(400, 2)
     q = asks("انقل الملفات إلى مجلد جديد", ["a.txt", "b.pdf"])                                    # «جديد» ليس شرطاً
     assert "شرط" not in q and "المجلد الجديد" in q, q
     assert steps_of("انقل a.txt إلى «مجلد جديد»", ["a.txt"])[-1][2] == "مجلد جديد/a.txt"

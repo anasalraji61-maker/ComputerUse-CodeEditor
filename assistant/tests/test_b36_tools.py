@@ -74,7 +74,7 @@ try:
     # تشغيل حقيقي لاختبار فرعي: يطبع مفتاحاً من بيئته الموروثة؛ لا يراه ولو طبعه لأُخفي
     with tempfile.TemporaryDirectory() as tmp:
         script = pathlib.Path(tmp) / "test_probe.py"
-        script.write_text("import os\nprint('SEEN=' + os.environ.get('GEMINI_API_KEY', 'none'))\nprint('LEAK=' + 'AI' + 'zaCANARYinline12345678901234567890')\n")
+        script.write_text("import os\nprint('SEEN=' + os.environ.get('GEMINI_API_KEY', 'none'))\nprint('LEAK=' + 'AI' + 'zaCANARYinline12345678901234567890')\n", encoding="utf-8")
         with mock.patch.dict(os.environ, {"GEMINI_API_KEY": canary}):
             ok, out, _ = rt.run(script)
         assert ok and "SEEN=none" in out and canary not in out and "CANARYinline" not in out, out
@@ -123,15 +123,15 @@ try:
             return str(e)
         raise AssertionError(status)
     m401, m403, m404, m429, m503 = (err_for(c, b"bad " + KEY.encode()) for c in (401, 403, 404, 429, 503))
-    assert "401" in m401 and "غير صالح" in m401
-    assert "403" in m403 and "البلد" in m403 and "الفوترة" in m403
-    assert "404" in m404 and "COS_SMALL_MODEL" in m404 and "claude-haiku-5-5" in m404
-    assert "429" in m429 and "الحصة" in m429
+    assert "401" in m401 and "«الإعدادات»" in m401
+    assert "403" in m403 and "بلدك" in m403 and "الفوترة" in m403
+    assert "404" in m404 and "«الإعدادات»" in m404 and "claude-haiku-5-5" in m404
+    assert "429" in m429 and "الاستعمال" in m429
     assert "503" in m503 and "مؤقتاً" in m503
     assert len({m401, m403, m404, m429, m503}) == 5
     assert all(KEY not in m and "http" not in m.lower() for m in (m401, m403, m404, m429, m503))
     # أخطاء الشبكة بالعربية دون نص الاستثناء/الرابط
-    assert "DNS" in describe_network_error(urllib.error.URLError(socket.gaierror(-2, "Name or service not known: https://x?key=SECRET")))
+    assert "الإنترنت" in describe_network_error(urllib.error.URLError(socket.gaierror(-2, "Name or service not known: https://x?key=SECRET")))
     assert "مهلة" in describe_network_error(urllib.error.URLError(socket.timeout("timed out")))
     assert "مهلة" in describe_network_error(TimeoutError())
     assert "شهادة" in describe_network_error(urllib.error.URLError(ssl.SSLCertVerificationError("bad cert https://x?key=SECRET")))
@@ -143,7 +143,7 @@ try:
             default_transport("https://example.invalid/?key=SECRET", {}, b"", 1)
             raise AssertionError
         except ProviderError as e:
-            assert "DNS" in str(e) and "SECRET" not in str(e) and "example.invalid" not in str(e)
+            assert "الإنترنت" in str(e) and "SECRET" not in str(e) and "example.invalid" not in str(e)
 
     # ---- 5) Retry-After + الإيقاف أثناء الانتظار ----
     assert parse_retry_after("5") == 5.0 and parse_retry_after("9999") == 60.0 and parse_retry_after("-3") == 0.0
@@ -254,19 +254,19 @@ try:
         (root / "e").mkdir()
         assert "يحوي عنصرين:" in v._listing(root)
         for i in range(5):
-            (root / f"f{i}").write_text("x")
+            (root / f"f{i}").write_text("x", encoding="utf-8")
         assert "يحوي 7 عناصر:" in v._listing(root)
         big = root / "big"
         big.mkdir()
         for i in range(42):
-            (big / f"f{i:02d}").write_text("x")
+            (big / f"f{i:02d}").write_text("x", encoding="utf-8")
         assert "يحوي 42 عنصراً:" in v._listing(big) and "ومعها عنصران غير معروضة" in v._listing(big)
         for jn, want in ((1, "عملية واحدة"), (2, "عمليتين"), (4, "4 عمليات"), (13, "13 عملية")):
-            (root / ".undo_journal.json").write_text(json.dumps([{"action": "create_dir", "path": f"rel:d{i}"} for i in range(jn)]))
+            (root / ".undo_journal.json").write_text(json.dumps([{"action": "create_dir", "path": f"rel:d{i}"} for i in range(jn)]), encoding="utf-8")
             steps = [PlanStep(i + 1, "create_dir", f"d{i}") for i in range(jn)]
             ok, ev, msg = v.verify_journal(steps, {})
             assert ok and ev["value"] == f"صالح ويحوي {want} لهذه المهمة", ev
-        (root / ".undo_journal.json").write_text("[]")
+        (root / ".undo_journal.json").write_text("[]", encoding="utf-8")
         ok, ev, msg = v.verify_journal([PlanStep(1, "create_dir", "x1"), PlanStep(2, "create_dir", "x2")], {})
         assert not ok and "المطلوب عمليتان" in msg, msg
 

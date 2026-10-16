@@ -1,5 +1,7 @@
 """أساس مشترك لمزودي النماذج الحقيقيين: نقل HTTP قابل للاستبدال، أخطاء عربية، عدّاد استهلاك، وحجب المفاتيح."""
+import base64
 import email.utils
+import html
 import ipaddress
 import json
 import os
@@ -64,9 +66,45 @@ _LOCAL_V4 = [ipaddress.ip_network(n) for n in ("127.0.0.0/8", "10.0.0.0/8", "172
 _LOCAL_V6 = [ipaddress.ip_network(n) for n in ("::1/128", "fc00::/7", "fe80::/10")]
 
 
+def _host_of(base_url: str) -> str:
+    try:
+        return (urllib.parse.urlparse(str(base_url)).hostname or "")
+    except ValueError:
+        return ""
+
+
+def _ip_of(host: str):
+    """IPv4/IPv6 حرفي صارم أو None (IPv6 المُعيَّن من IPv4 ::ffff:a.b.c.d يُحلَّل كعنوان IPv4 نفسه)."""
+    try:
+        if _DOTTED_QUAD.match(host):
+            return ipaddress.IPv4Address(host)
+        if ":" in host:
+            ip6 = ipaddress.IPv6Address(host.split("%", 1)[0])
+            return ip6.ipv4_mapped or ip6
+    except ValueError:
+        return None
+    return None
+
+
+def is_loopback_url(base_url: str) -> bool:
+    """جهازك نفسه فقط: الاسم الحرفي localhost أو IP حرفي صارم ضمن 127.0.0.0/8 أو ::1. وحدها تستحق السعر المجاني وسماحية «بلا مفتاح عبر http»."""
+    host = _host_of(base_url)
+    if host == "localhost":
+        return True
+    ip = _ip_of(host)
+    return bool(ip is not None and ip.is_loopback)
+
+
+def is_blocked_host(host: str) -> bool:
+    """عناوين لا تصلح وجهةً للمزوّد أبداً: link-local (169.254.x.x / fe80::/10 — بيانات وصف السحابة)، غير المحدّد (0.0.0.0 / ::)، والبثّ المتعدد."""
+    ip = _ip_of(host)
+    return bool(ip is not None and (ip.is_link_local or ip.is_unspecified or ip.is_multicast))
+
+
 def is_local_url(base_url: str) -> bool:
-    """عنوان محلي/شبكة داخلية: الاسم الحرفي localhost فقط، أو IP حرفي صارم (رباعي منقّط بلا أصفار بادئة ولا صيغ inet_aton)
-    ضمن loopback/RFC1918/link-local، أو IPv6 (::1، fc00::/7، fe80::/10). أسماء .local وغيرها ليست محلية (قد تُحلّ لأي عنوان)."""
+    """شبكة داخلية (لتجاوز البروكسي فقط، وليست «مجانية»): localhost أو IP حرفي صارم (رباعي منقّط بلا أصفار بادئة ولا صيغ inet_aton)
+    ضمن loopback/RFC1918/link-local، أو IPv6 (::1، fc00::/7، fe80::/10). أسماء .local وغيرها ليست محلية.
+    link-local مرفوض كوجهة للمزوّد (is_blocked_host). السعر المجاني وسماحية المفتاح عبر http للـ loopback فقط (is_loopback_url)."""
     try:
         host = (urllib.parse.urlparse(str(base_url)).hostname or "")
     except ValueError:
@@ -120,18 +158,18 @@ def describe_network_error(exc: BaseException) -> str:
     chain = [reason, exc]
     for e in chain:
         if isinstance(e, ssl.SSLCertVerificationError) or (isinstance(e, ssl.SSLError) and "CERTIFICATE" in str(e).upper()):
-            return "فشل التحقق من شهادة الخادم (شهادة غير موثوقة؛ قد يعترض برنامج حماية أو وسيط/بروكسي على الاتصال)."
+            return "تعذّر الاتصال الآمن بالخدمة: شهادة الخادم غير موثوقة. قد يعترضه برنامج الحماية أو الشبكة؛ جرّب شبكة أخرى."
         if isinstance(e, ssl.SSLError):
-            return "فشل إنشاء اتصال مشفّر (TLS) بالخدمة؛ تحقق من الإنترنت أو من برنامج الحماية."
+            return "تعذّر الاتصال الآمن بالخدمة. قد يعترضه برنامج الحماية أو الشبكة؛ جرّب شبكة أخرى."
         if isinstance(e, socket.gaierror):
-            return "تعذّر تحليل اسم الخادم (DNS): تحقق من اتصال الإنترنت أو إعدادات DNS/البروكسي."
+            return "تعذّر الوصول إلى الخدمة. تحقق من اتصال الإنترنت ثم أعد المحاولة."
         if isinstance(e, (socket.timeout, TimeoutError)):
             return "انتهت مهلة الاتصال بالخدمة؛ الشبكة بطيئة أو محجوبة. أعد المحاولة."
         if isinstance(e, ConnectionRefusedError):
             return "رفض الخادم الاتصال؛ قد يكون الوصول محجوباً من شبكتك."
         if isinstance(e, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
             return "قُطع الاتصال بالخدمة أثناء الطلب؛ أعد المحاولة."
-    return f"تعذّر الاتصال بالخدمة (نوع الخطأ: {type(exc).__name__}). تحقق من الإنترنت."
+    return "تعذّر الاتصال بالخدمة. تحقق من اتصال الإنترنت ثم أعد المحاولة."
 
 
 def _stopped_error() -> ProviderError:
@@ -211,6 +249,64 @@ def default_transport(url: str, headers: Dict[str, str], body: bytes, timeout: f
     return status, raw
 
 
+MAX_GET_BYTES = 1_000_000
+GET_TOTAL_TIMEOUT = 6.0
+
+
+def _do_get(url: str, headers: Dict[str, str], timeout: float, abort: threading.Event):
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with opener_for(url).open(req, timeout=timeout) as resp:
+            total, size = [], 0
+            while True:
+                if abort.is_set():
+                    raise _stopped_error()
+                chunk = resp.read1(65536)
+                if not chunk:
+                    return resp.status, b"".join(total)
+                size += len(chunk)
+                total.append(chunk[: max(0, MAX_GET_BYTES - (size - len(chunk)))])
+                if size >= MAX_GET_BYTES:
+                    return resp.status, b"".join(total)
+    except urllib.error.HTTPError as exc:
+        return exc.code, b""
+
+
+def default_get(url: str, headers: Dict[str, str], timeout: float) -> Tuple[int, bytes]:
+    """GET بالآلية نفسها لـ POST: خيط عامل، مهلة إجمالية (تشمل القراءة) وفحص زر الإيقاف كل 0.2ث، وحجم محدود، بلا تحويلات.
+    السياق (الإيقاف، الموعد النهائي) من _TLS.ctx. أي فشل => (0, b"")؛ الإيقاف يرفع ProviderError."""
+    cancel_check, deadline = getattr(_TLS, "ctx", None) or (None, None)
+    if deadline is None:
+        deadline = time.monotonic() + GET_TOTAL_TIMEOUT
+    abort = threading.Event()
+    box: Dict[str, object] = {}
+
+    def work():
+        try:
+            box["res"] = _do_get(url, headers, timeout, abort)
+        except BaseException as exc:   # noqa: BLE001
+            box["exc"] = exc
+
+    th = threading.Thread(target=work, daemon=True)
+    th.start()
+    while True:
+        th.join(0.2)
+        if not th.is_alive():
+            break
+        if cancel_check is not None and cancel_check():
+            abort.set()
+            raise _stopped_error()
+        if time.monotonic() > deadline:
+            abort.set()
+            return 0, b""
+    exc = box.get("exc")
+    if isinstance(exc, ProviderError):
+        raise exc
+    if exc is not None:
+        return 0, b""
+    return box["res"]
+
+
 _REAL_SLEEP = time.sleep
 _AUTO = object()
 _OFF_WORDS = ("off", "none", "omit", "default", "null")
@@ -284,34 +380,45 @@ class HttpProvider(ModelProvider):
         """رسالة عربية مميّزة لكل فئة خطأ HTTP؛ لا تحوي المفتاح ولا الرابط."""
         label = self.PROVIDER_LABEL
         if status == 401:
-            return ProviderError(f"رُفض المفتاح من خدمة {label} (رمز 401): المفتاح غير صالح أو منتهٍ أو منسوخ ناقصاً. أنشئ مفتاحاً جديداً وأعد المحاولة.")
+            return ProviderError(f"لم تقبل خدمة {label} المفتاح (رمز 401): قد يكون خاطئاً أو منتهياً أو منسوخاً ناقصاً. أنشئ مفتاحاً جديداً والصقه في «الإعدادات».")
         if status == 403:
-            return ProviderError(f"ممنوع من خدمة {label} (رمز 403): صلاحيات المفتاح لا تسمح بهذا الطلب، أو قد يكون البلد أو الفوترة غير مدعوم من الخدمة "
-                                 f"(فعّل الفوترة وتحقق من أن بلدك مدعوم).")
+            return ProviderError(f"رفضت خدمة {label} الطلب (رمز 403): صلاحيات المفتاح لا تسمح به، أو الفوترة غير مفعّلة، أو الخدمة غير متاحة في بلدك. "
+                                 f"إن كانت غير متاحة في بلدك فاختر «Ollama (محلي)» من «الإعدادات».")
         if status == 404:
             return ProviderError(f"النموذج '{self._redact(str(self.model))}' غير موجود أو غير متاح لحسابك لدى {label} (رمز 404). "
-                                 f"غيّره بمتغير البيئة COS_SMALL_MODEL أو COS_LARGE_MODEL.")
+                                 f"غيّر اسم النموذج من «الإعدادات».")
         if status == 429:
-            return ProviderError(f"تجاوزتَ حد الطلبات أو الحصة لدى {label} (رمز 429) حتى بعد إعادة المحاولة. انتظر قليلاً أو راجع حصتك وفوترتك.")
+            return ProviderError(f"وصلت إلى حد الاستعمال المسموح لدى {label} (رمز 429) حتى بعد إعادة المحاولة. انتظر دقائق أو راجع حصة حسابك.")
         snippet = self._redact(raw.decode("utf-8", "replace"))[:200]
         if status >= 500:
-            return ProviderError(f"خدمة {label} مشغولة أو معطّلة مؤقتاً (رمز {status}) بعد إعادة المحاولة؛ جرّب لاحقاً. {snippet}".strip())
-        return ProviderError(f"خطأ من خدمة {label} (رمز {status}): {snippet}")
+            return ProviderError(f"خدمة {label} مشغولة أو معطّلة مؤقتاً (رمز {status}) بعد إعادة المحاولة؛ جرّب لاحقاً.")
+        return ProviderError(f"تعذّر إتمام الطلب لدى خدمة {label} (رمز {status}). {snippet}".strip())
 
     def _require_key(self) -> str:
         if not self._api_key:
             raise ProviderConfigError(
-                f"مفتاح {self.PROVIDER_LABEL} غير موجود. عيّن متغير البيئة {self.ENV_KEYS[0]} ثم أعد التشغيل."
+                f"مفتاح {self.PROVIDER_LABEL} غير موجود. افتح «الإعدادات» والصق مفتاح الخدمة (يُحفظ لهذه الجلسة فقط)، أو عيّن متغير البيئة {self.ENV_KEYS[0]} ثم أعد التشغيل."
             )
         if any(ch.isspace() or ord(ch) < 32 or ord(ch) > 126 for ch in self._api_key):
-            raise ProviderConfigError(f"مفتاح {self.PROVIDER_LABEL} يحوي فراغات أو محارف غير صالحة؛ انسخه من جديد بلا مسافات.")
+            raise ProviderConfigError(f"مفتاح {self.PROVIDER_LABEL} فيه مسافات أو رموز غير مقبولة. انسخه من جديد كما هو.")
         return self._api_key
 
+    def _key_variants(self) -> list:
+        """كل صيغ المفتاح المتوقع أن يعكسها خادم في رد: الخام، ترميز الرابط، هروب JSON (مفرد ومزدوج)، هروب HTML، base64."""
+        from assistant.redact import key_exact_forms
+        return key_exact_forms(self._api_key)
+
     def _redact(self, text: str) -> str:
-        if not self._api_key:
-            return text
-        for variant in {self._api_key, urllib.parse.quote(self._api_key, safe=""), urllib.parse.quote_plus(self._api_key)}:
-            text = text.replace(variant, "***")
+        """يحجب المفتاح بكل صيغه (حساس لحالة الأحرف لا) وبصيغ محوّلة للمفاتيح الطويلة (معكوس/ست عشري/مقطّع/أجزاء >= 12 محرفاً)، ثم أي نمط
+        مفتاح معروف الشكل: النص قد يكون من خادم يعكس الترويسة."""
+        text = str(text)
+        try:
+            from assistant.redact import redact_key, redact
+            if self._api_key:
+                text = redact_key(text, self._api_key)
+            text = redact(text)
+        except Exception:
+            pass
         return text
 
     # يوفّرها الصنف الفرعي

@@ -1,12 +1,12 @@
 # نتائج الاختبارات الفعلية (آلية)
 
-آخر تشغيل: 2026-10-16 10:33:21 — 93 ملف، فشل: 1
+آخر تشغيل: 2026-10-16 10:53:17 — 93 ملف، فشل: 0
 
 هذه النتائج تُنتَج على لابتوب المالك. لا تدّعِ نجاحاً غير مذكور هنا.
 
 | الملف | النتيجة | الزمن |
 |---|---|---|
-| `assistant/tests/test_b11.py` | PASS | 0.9s |
+| `assistant/tests/test_b11.py` | PASS | 0.8s |
 | `assistant/tests/test_b15.py` | PASS | 0.3s |
 | `assistant/tests/test_b16.py` | PASS | 1.5s |
 | `assistant/tests/test_b17.py` | PASS | 0.3s |
@@ -15,34 +15,34 @@
 | `assistant/tests/test_b20.py` | PASS | 0.2s |
 | `assistant/tests/test_b21.py` | PASS | 0.2s |
 | `assistant/tests/test_b22.py` | PASS | 0.9s |
-| `assistant/tests/test_b23.py` | PASS | 3.2s |
+| `assistant/tests/test_b23.py` | PASS | 3.1s |
 | `assistant/tests/test_b24.py` | PASS | 1.0s |
-| `assistant/tests/test_b25.py` | PASS | 0.6s |
-| `assistant/tests/test_b26.py` | PASS | 0.4s |
+| `assistant/tests/test_b25.py` | PASS | 0.5s |
+| `assistant/tests/test_b26.py` | PASS | 0.3s |
 | `assistant/tests/test_b28.py` | PASS | 0.2s |
 | `assistant/tests/test_b28_rules.py` | PASS | 0.3s |
-| `assistant/tests/test_b29_rules.py` | PASS | 3.0s |
+| `assistant/tests/test_b29_rules.py` | PASS | 2.9s |
 | `assistant/tests/test_b30_rules.py` | PASS | 1.4s |
-| `assistant/tests/test_b31_ui.py` | PASS | 2.1s |
+| `assistant/tests/test_b31_ui.py` | PASS | 2.0s |
 | `assistant/tests/test_b32_rules.py` | PASS | 0.2s |
-| `assistant/tests/test_b34_controller.py` | PASS | 7.3s |
-| `assistant/tests/test_b34_core.py` | PASS | 4.4s |
+| `assistant/tests/test_b34_controller.py` | PASS | 7.1s |
+| `assistant/tests/test_b34_core.py` | PASS | 3.6s |
 | `assistant/tests/test_b34_tools.py` | PASS | 0.8s |
-| `assistant/tests/test_b35_core.py` | PASS | 15.9s |
+| `assistant/tests/test_b35_core.py` | PASS | 15.7s |
 | `assistant/tests/test_b35_rules.py` | PASS | 0.2s |
 | `assistant/tests/test_b35_tools.py` | PASS | 0.6s |
-| `assistant/tests/test_b35_ui.py` | PASS | 3.8s |
-| `assistant/tests/test_b36_core.py` | PASS | 13.6s |
+| `assistant/tests/test_b35_ui.py` | PASS | 3.7s |
+| `assistant/tests/test_b36_core.py` | PASS | 11.2s |
 | `assistant/tests/test_b36_rules.py` | PASS | 0.2s |
 | `assistant/tests/test_b36_tools.py` | PASS | 0.8s |
 | `assistant/tests/test_b36_ui.py` | PASS | 6.1s |
 | `assistant/tests/test_b37_core.py` | PASS | 5.9s |
 | `assistant/tests/test_b37_ui.py` | PASS | 3.4s |
-| `assistant/tests/test_b38_tools.py` | PASS | 3.9s |
+| `assistant/tests/test_b38_tools.py` | PASS | 3.8s |
 | `assistant/tests/test_b39_core.py` | PASS | 3.0s |
 | `assistant/tests/test_b39_rules.py` | PASS | 1.0s |
 | `assistant/tests/test_b39_tools.py` | PASS | 0.3s |
-| `assistant/tests/test_b39_ui.py` | **FAIL** | 0.3s |
+| `assistant/tests/test_b39_ui.py` | PASS | 1.2s |
 | `assistant/tests/test_b40_rules.py` | PASS | 0.2s |
 | `assistant/tests/test_b40_tools.py` | PASS | 0.3s |
 | `assistant/tests/test_b40_ui.py` | PASS | 0.9s |
@@ -52,24 +52,24 @@
 | `assistant/tests/test_b42_d7.py` | PASS | 0.3s |
 | `assistant/tests/test_b42_redact.py` | PASS | 1.0s |
 | `assistant/tests/test_b42_ui.py` | PASS | 0.4s |
-| `assistant/tests/test_b43_stdio.py` | PASS | 1.1s |
+| `assistant/tests/test_b43_stdio.py` | PASS | 1.0s |
 | `assistant/tests/test_b6.py` | PASS | 0.4s |
 | `assistant/tests/test_b8.py` | PASS | 0.5s |
-| `assistant/tests/test_bench.py` | PASS | 0.9s |
-| `assistant/tests/test_benchmarks_20runs.py` | PASS | 2.1s |
+| `assistant/tests/test_bench.py` | PASS | 1.0s |
+| `assistant/tests/test_benchmarks_20runs.py` | PASS | 2.3s |
 | `assistant/tests/test_budget.py` | PASS | 0.1s |
 | `assistant/tests/test_config.py` | PASS | 0.4s |
 | `assistant/tests/test_controller.py` | PASS | 0.6s |
 | `assistant/tests/test_cov_app_single_instance_crashlog.py` | PASS | 0.3s |
 | `assistant/tests/test_cov_config_workspace_validation.py` | PASS | 0.2s |
 | `assistant/tests/test_cov_controller_guards.py` | PASS | 0.2s |
-| `assistant/tests/test_cov_executor_stale_guard.py` | PASS | 0.2s |
+| `assistant/tests/test_cov_executor_stale_guard.py` | PASS | 0.1s |
 | `assistant/tests/test_cov_files_crash_recovery.py` | PASS | 0.5s |
 | `assistant/tests/test_cov_files_guard_rails.py` | PASS | 0.2s |
 | `assistant/tests/test_cov_files_rollback_on_journal_failure.py` | PASS | 0.2s |
 | `assistant/tests/test_cov_files_undo_edges.py` | PASS | 0.2s |
 | `assistant/tests/test_cov_ledger_money_paths.py` | PASS | 0.2s |
-| `assistant/tests/test_cov_openai_compat_failures.py` | PASS | 1.2s |
+| `assistant/tests/test_cov_openai_compat_failures.py` | PASS | 1.1s |
 | `assistant/tests/test_cov_planner_untrusted_plan.py` | PASS | 0.1s |
 | `assistant/tests/test_cov_provider_cancel_errors.py` | PASS | 0.1s |
 | `assistant/tests/test_cov_router_spend_guard.py` | PASS | 0.2s |
@@ -82,11 +82,11 @@
 | `assistant/tests/test_cov_widget_close_and_approval.py` | PASS | 2.6s |
 | `assistant/tests/test_deliberate_failures.py` | PASS | 0.2s |
 | `assistant/tests/test_files.py` | PASS | 0.2s |
-| `assistant/tests/test_fuzz.py` | PASS | 6.3s |
+| `assistant/tests/test_fuzz.py` | PASS | 5.8s |
 | `assistant/tests/test_fuzz_invariants.py` | PASS | 3.0s |
 | `assistant/tests/test_ledger.py` | PASS | 0.3s |
 | `assistant/tests/test_models.py` | PASS | 0.1s |
-| `assistant/tests/test_no_secrets.py` | PASS | 0.1s |
+| `assistant/tests/test_no_secrets.py` | PASS | 0.2s |
 | `assistant/tests/test_planner.py` | PASS | 0.1s |
 | `assistant/tests/test_planner_executor_verifier.py` | PASS | 0.2s |
 | `assistant/tests/test_providers.py` | PASS | 0.1s |
@@ -214,7 +214,7 @@ Tk callback error: <class 'ValueError'>: boom-b35
 ```
 ### assistant/tests/test_b36_core.py
 ```
-sort 1500 files: 4 runs, 1516 steps, 11.1s
+sort 1500 files: 4 runs, 1516 steps, 9.1s
 PASS: test_b36_core completed successfully
 ```
 ### assistant/tests/test_b36_rules.py
@@ -266,19 +266,16 @@ PASS: test_b39_rules completed successfully
 t4: 3/3 = 100% (ويلسون 95% الأدنى 44%) PASS
 t5: 3/3 = 100% (ويلسون 95% الأدنى 44%) PASS
 البوابة الكلية: PASS
-كُتب التقرير: C:\Users\AkarTech\AppData\Local\Temp\tmpzh300es0\sub\M.md (لم يُنفَّذ commit؛ راجعه ثم ارفعه بنفسك)
+كُتب التقرير: C:\Users\AkarTech\AppData\Local\Temp\tmplc0etdvx\sub\M.md (لم يُنفَّذ commit؛ راجعه ثم ارفعه بنفسك)
 PASS: test_b39_tools completed successfully
 ```
 ### assistant/tests/test_b39_ui.py
 ```
-ok 1: pure settings logic
-ok 2: describe_provider
-Traceback (most recent call last):
-  File "C:\Users\AkarTech\Documents\COS_Projects\ComputerUse-CodeEditor\assistant\tests\test_b39_ui.py", line 190, in <module>
-    assert c.apply_settings({"provider": "demo", "workspace": "/etc"}) is False and c.provider is before
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-AssertionError
-FAIL: test_b39_ui
+ok 3: apply_settings atomic + session-only key
+ok 4: connection check
+ok 5: startup notice names the active provider and cost
+ok 6: settings dialog + ping button
+PASS: test_b39_ui completed successfully
 ```
 ### assistant/tests/test_b40_rules.py
 ```

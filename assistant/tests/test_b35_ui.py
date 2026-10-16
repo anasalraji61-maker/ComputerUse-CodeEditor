@@ -93,7 +93,7 @@ try:
         ws = tmp / "ws"
         ws.mkdir()
         for f in files:
-            (ws / f).write_text(f)
+            (ws / f).write_text(f, encoding="utf-8")
         led = SQLiteLedger(tmp / "l.db", initial_balance=100, spending_limit=100)
         return AssistantController(Prov(steps), ws, led), ws
 
@@ -119,7 +119,7 @@ try:
     c.runner.undo_task = lambda tid: 0
     c.undo_last()
     e = c.wait_for("error", 3)
-    assert e and "تعذّر التراجع" in e["text"] and "2" in e["text"], e
+    assert e and "تعذّر التراجع" in e["text"] and "عمليتان" in e["text"], e
     # جزئي: استُعيدت واحدة وبقيت واحدة
     fm = c.runner.file_manager
     c.runner.undo_task = lambda tid: (fm.undo_step(), 1)[1]
@@ -195,7 +195,7 @@ try:
             real_fcntl.flock = real_flock
     # ب) مجلد قفل لا يمكن إنشاؤه (تحته ملف عادي): لا نمنع التشغيل
     blocker = pathlib.Path(tempfile.mkdtemp(prefix="b35_blk_")) / "plainfile"
-    blocker.write_text("x")
+    blocker.write_text("x", encoding="utf-8")
     assert app.acquire_instance_lock("k_bad", blocker / "sub", use_mutex=False) is True
 
     # ج) ويندوز بلا msvcrt/fcntl (ملف «pid:بصمة»): مُحاكى بدوال العمليات المزيّفة
@@ -214,7 +214,7 @@ try:
             assert app._pid_alive(4242) is True and app._pid_alive(7777) is False
             me = os.getpid()
             assert app.acquire_instance_lock("kp", d4, use_mutex=False) is True
-            assert lf.read_text().startswith(f"{me}:win:own"), lf.read_text()
+            assert lf.read_text(encoding="utf-8").startswith(f"{me}:win:own"), lf.read_text(encoding="utf-8")
             # الثانية في العملية نفسها (القفل بيدنا ورقمنا حيّ) = نسخة ثانية تُرفض
             assert app.acquire_instance_lock("kp", d4, use_mutex=False) is False
             app._release_pid_file(str(lf), me)   # ما يفعله atexit
@@ -222,14 +222,14 @@ try:
             assert app.acquire_instance_lock("kp", d4, use_mutex=False) is True   # بعد الإفراج يُقبل
             app._release_pid_file(str(lf), me)
             # عملية أخرى حيّة ببصمتها = تمنع؛ ببصمة مختلفة (رقم أُعيد استعماله) أو ميتة أو تالف = يتيم
-            lf.write_text("4242:win:111")
+            lf.write_text("4242:win:111", encoding="utf-8")
             assert app.acquire_instance_lock("kp", d4, use_mutex=False) is False
-            lf.write_text("4242")   # قفل قديم بلا بصمة: الرقم الحيّ يكفي
+            lf.write_text("4242", encoding="utf-8")   # قفل قديم بلا بصمة: الرقم الحيّ يكفي
             assert app.acquire_instance_lock("kp", d4, use_mutex=False) is False
             for stale in ("4242:win:999", "7777:win:1", "", "999999999999999999999", "-1", "0", "abc", "9" * 5000):
-                lf.write_text(stale)
+                lf.write_text(stale, encoding="utf-8")
                 assert app.acquire_instance_lock("kp", d4, use_mutex=False) is True, repr(stale[:12])
-                assert lf.read_text().startswith(f"{me}:"), lf.read_text()[:30]
+                assert lf.read_text(encoding="utf-8").startswith(f"{me}:"), lf.read_text(encoding="utf-8")[:30]
                 app._release_pid_file(str(lf), me)
                 assert not lf.exists()
     finally:
@@ -304,8 +304,8 @@ try:
     (base / "data").mkdir()
     (base / "ws").mkdir()
     (base / "data" / "ledger.db").write_bytes(b"garbage" * 100)
-    (base / "data" / "usage.json").write_text("{not json")
-    (base / "ws" / ".undo_journal.json").write_text("{corrupt")
+    (base / "data" / "usage.json").write_text("{not json", encoding="utf-8")
+    (base / "ws" / ".undo_journal.json").write_text("{corrupt", encoding="utf-8")
     os.environ["COS_DATA_DIR"], os.environ["COS_WORKSPACE"] = str(base / "data"), str(base / "ws")
     try:
         ctl, notice = app.build_controller(DemoProvider())
@@ -325,7 +325,7 @@ try:
     c.runner.undo_task = lambda tid: UndoResult(0, remaining=2, reason="عملية أحدث تعترض الطريق")
     c.undo_last()
     e = c.wait_for("error", 3)
-    assert e and "عملية أحدث تعترض الطريق" in e["text"] and "2" in e["text"], e
+    assert e and "عملية أحدث تعترض الطريق" in e["text"] and "عمليتان" in e["text"], e
     c.runner.undo_task = lambda tid: UndoResult(1, remaining=1, reason="السبب س")
     c.undo_last()
     u = c.wait_for("undo", 3)
@@ -336,7 +336,8 @@ try:
     c.runner.undo_task = raiser
     c.undo_last()   # لا يرفع
     e = c.wait_for("error", 3)
-    assert e and "RuntimeError" in e["text"], e
+    assert e and "RuntimeError" not in e["text"] and "تعذّر التراجع" in e["text"], e   # التفاصيل التقنية في crash.log لا في الرسالة
+    assert "RuntimeError: مشغول" in (DATA / "crash.log").read_text(encoding="utf-8")
     print("ok R4-8b: undo robust + reason")
 
     # ---------- 5) أدوات الواجهة (tkinter) ----------
@@ -377,11 +378,11 @@ try:
     om = W.AssistantWidget.outcome_message
     assert om({"success": True, "executed": 2, "failed": 0, "skipped": 0}) == ("تم بنجاح ✔", "ok")
     m, tag = om({"success": True, "executed": 2, "failed": 0, "skipped": 4})
-    assert "جزئياً" in m and "تُخطّي 4" in m and "نُفّذ 2" in m and tag == "warn", m
+    assert "جزئياً" in m and "تُخطّيت 4 خطوات" in m and "نُفّذت خطوتان" in m and tag == "warn", m
     m, tag = om({"success": False, "executed": 1, "failed": 1, "skipped": 0})
-    assert "فشلت" in m and "فشل 1" in m and tag == "error"
-    assert om({"success": False}) == ("فشلت المهمة ✖ (راجع التقرير أعلاه)", "error")
-    assert om({"success": False, "executed": 0, "failed": 0, "skipped": 3}) == ("لم يُنفَّذ شيء — رفضت كل الخطوات", "warn")
+    assert "لم تكتمل المهمة" in m and "فشلت خطوة واحدة" in m and tag == "error"
+    assert om({"success": False}) == ("فشلت المهمة ✖. التفاصيل في التقرير أعلاه.", "error")
+    assert om({"success": False, "executed": 0, "failed": 0, "skipped": 3}) == ("لم يُنفَّذ شيء — لم تتم الموافقة على أي خطوة", "warn")
     assert om({"success": True, "executed": 0, "failed": 0, "skipped": 3})[0].startswith("لم يُنفَّذ شيء")
     # مفتاح إيقاف العزل
     try:
@@ -444,7 +445,7 @@ try:
         w.handle_event({"type": "undo", "count": 1, "remaining": 2, "skipped": 0, "partial": True})
         assert "تم التراجع جزئياً" in w.chat.get("1.0", "end")
         w.handle_event({"type": "undo", "count": 2, "remaining": 0, "skipped": 0, "partial": False})
-        assert "تم التراجع عن 2 عملية" in w.chat.get("1.0", "end")
+        assert "تم التراجع عن عمليتين" in w.chat.get("1.0", "end")
         # صف الخطة: الهدف معزول بعد التنظيف
         w._show_plan([{"step_id": 1, "action": "move", "target": "تقرير\u202e.pdf", "level": "REVERSIBLE",
                        "params": {"dest": "Docs"}}])

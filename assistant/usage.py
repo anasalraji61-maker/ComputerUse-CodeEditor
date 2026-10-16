@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Callable, Dict, Optional
 
 DEFAULT_DAILY_CAP_USD = 1.0
+REGRESS_WINDOW_DAYS = 3        # بعد تراجع الساعة يُحتسب الأعلى من خانتي (اليوم، أحدث يوم) هذه المدة
 KEEP_DAYS = 7                  # أيام تُحفظ في الملف (ساعة تعود للوراء لا تمحو السجل)
 PENDING_TTL_SEC = 600.0        # حجز معلّق (نداء قد يكون فُوتر ثم انهار التطبيق) يُحتسب 10 دقائق
 _DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -134,6 +135,8 @@ class UsageMeter:
         self.reset_note = ""     # يُملأ إن عُزل ملف تالف وبدأ العدّ من جديد (تعرضه الواجهة)
         self.warning = ""        # قراءة/كتابة فشلت مؤقتاً فلم يُطبَّق السقف بدقة
         self.quarantined_path: Optional[Path] = None
+        self.clock_regress = False   # الساعة تأخرت عن أحدث يوم مسجّل بأكثر من يوم (ما زلنا داخل نافذة الاحتياط)
+        self.clock_note = ""
         global _ACTIVE
         _ACTIVE = weakref.ref(self)
 
@@ -150,8 +153,8 @@ class UsageMeter:
             self.quarantined_path = dest
         except OSError:
             self.quarantined_path = None
-        self.reset_note = (f"سجل الاستهلاك اليومي كان تالفاً ({why}) فأُعيد ضبطه؛ العدّ يبدأ من الصفر لليوم"
-                           + (f" وحُفظت النسخة التالفة باسم {dest.name}." if self.quarantined_path else "."))
+        self.reset_note = ("سجل الاستهلاك اليومي كان تالفاً فأُعيد ضبطه وبدأ العدّ من جديد لهذا اليوم، لذلك قد يتجاوز إنفاقك السقف قليلاً."
+                           + (f" (حُفظت النسخة التالفة باسم {dest.name})" if self.quarantined_path else ""))
 
     def _read_raw(self) -> Optional[dict]:
         """dict الأيام، أو {} لملف غير موجود/تالف (بعد العزل)، أو None لخطأ قراءة عابر مستمر (يُملأ self.warning)."""
@@ -179,7 +182,7 @@ class UsageMeter:
                 return {}
             self.warning = ""
             return raw
-        self.warning = f"تعذّرت قراءة سجل الاستهلاك مؤقتاً ({type(last_exc).__name__}) فلم يُطبَّق سقف الإنفاق بدقة هذه المرة."
+        self.warning = "تعذّرت قراءة سجل الاستهلاك مؤقتاً فلم يُطبَّق سقف الإنفاق بدقة هذه المرة."
         return None
 
     @staticmethod
@@ -200,51 +203,97 @@ class UsageMeter:
             out[k] = f
         return out
 
-    def _effective_day(self, days: Dict[str, float]) -> str:
-        """اليوم المعتمد = الأحدث بين تاريخ اليوم وآخر يوم مسجّل: ساعة راجعة للوراء لا تصفّر السقف."""
-        today = self._today().isoformat()
-        return max([today] + list(days))
-
-    def _snapshot(self) -> Optional[Dict[str, float]]:
-        raw = self._read_raw()
-        if raw is None:
+    # ---------- منطق اليوم والساعة الخاطئة ----------
+    # لا نطوي ولا ندمج خانات الأيام أبداً (الطيّ المدمّر كان يخسر الإنفاق عند تصحيح الساعة). نحتفظ بـ high_water_day رتيب (لا يتراجع)
+    # وبعلم clock_regress: إن كانت الساعة خلف high_water_day بأكثر من يوم، يُنسب الإنفاق الجديد إلى خانة high_water_day (ويُنسخ لخانة اليوم الحالي)
+    # ويُحتسب spent_today = أكبر خانتين (اليوم الحالي، high_water) طوال REGRESS_WINDOW_DAYS من لحظة اكتشاف التراجع، ثم يُعاد تثبيت المرجع على اليوم الحالي.
+    @staticmethod
+    def _d(key: str) -> Optional[datetime.date]:
+        try:
+            return datetime.date.fromisoformat(key)
+        except ValueError:
             return None
-        return self._fold_future(self._clean(raw))
 
-    def _fold_future(self, days: Dict[str, float]) -> Dict[str, float]:
-        """مفاتيح أيام بعد «غداً» نتيجة ساعة خاطئة (مثلاً 2030): نطويها في اليوم الحالي مرة واحدة ونُبقي المفاتيح <= غداً،
-        فلا يتحوّل «أحدث يوم مسجّل» إلى سقف مثبّت على المستقبل. المفاتيح <= اليوم تبقى (حماية الساعة الراجعة للوراء)."""
-        limit = (self._today() + datetime.timedelta(days=1)).isoformat()
-        future = [k for k in days if k > limit]
-        if not future:
-            return days
-        today = self._today().isoformat()
-        out = {k: v for k, v in days.items() if k <= limit}
-        out[today] = out.get(today, 0.0) + sum(days[k] for k in future)
-        return out
+    def _resolve(self, raw: dict) -> dict:
+        days = {k: v for k, v in self._clean(raw).items() if self._d(k) is not None}
+        meta = raw.get("_meta") if isinstance(raw.get("_meta"), dict) else {}
+        T = self._today()
+        tk = T.isoformat()
+        stored_hw = self._d(meta.get("high_water_day")) if isinstance(meta.get("high_water_day"), str) else None
+        stored_rd = self._d(meta.get("regress_day")) if isinstance(meta.get("regress_day"), str) else None
+        cands = [d for d in (stored_hw, *(self._d(k) for k in days)) if d is not None]
+        hw = max(cands) if cands else T
+        R = {"days": days, "T": T, "dirty": False, "rebase": False, "regress": False, "protect": [tk],
+             "add_keys": [tk], "regress_day": None}
+        if T >= hw:                                   # الوضع الطبيعي (أو يوم جديد): الخانة الحقيقية لليوم
+            R["hw"], R["read"] = T, days.get(tk, 0.0)
+            R["dirty"] = bool(meta.get("clock_regress") or stored_rd)
+            return R
+        lag = (hw - T).days
+        hk = hw.isoformat()
+        if lag <= 1:                                  # فرق منطقي (منتصف الليل/منطقة زمنية/DST): نبقى على خانة الأحدث
+            R.update(hw=hw, read=max(days.get(tk, 0.0), days.get(hk, 0.0)), add_keys=[hk], protect=[tk, hk],
+                     regress=bool(meta.get("clock_regress")), regress_day=stored_rd)
+            return R
+        rd = stored_rd or T                           # تراجع حقيقي: المرجع أول يوم لوحظ فيه
+        if T > rd + datetime.timedelta(days=REGRESS_WINDOW_DAYS):
+            R.update(hw=T, read=days.get(tk, 0.0), rebase=True, dirty=True)   # انتهت النافذة: نعيد تثبيت المرجع على اليوم الحقيقي
+            return R
+        R.update(hw=hw, read=max(days.get(tk, 0.0), days.get(hk, 0.0)), add_keys=[hk, tk], protect=[tk, hk],
+                 regress=True, regress_day=rd, dirty=(stored_rd is None or not meta.get("clock_regress")))
+        return R
+
+    def _meta_of(self, R: dict) -> dict:
+        return {"high_water_day": R["hw"].isoformat(), "clock_regress": bool(R["regress"]),
+                "regress_day": R["regress_day"].isoformat() if R["regress_day"] else None}
+
+    def _commit(self, R: dict, usd: float = 0.0) -> None:
+        days = dict(R["days"])
+        if R["rebase"]:                               # خانات بعد «غداً» من ساعة خاطئة منتهية النافذة تُهمَل (لا تُدمج في غيرها)
+            limit = (R["T"] + datetime.timedelta(days=1)).isoformat()
+            days = {k: v for k, v in days.items() if k <= limit}
+        if usd > 0:
+            for k in R["add_keys"]:
+                days[k] = days.get(k, 0.0) + usd
+        keep = set(sorted(days)[-KEEP_DAYS:]) | {k for k in R["protect"] if k in days}
+        data: dict = {k: days[k] for k in sorted(keep) if math.isfinite(days[k])}
+        data["_meta"] = self._meta_of(R)
+        try:
+            _atomic_write(self.path, json.dumps(data))
+        except OSError as exc:
+            self.warning = "تعذّرت كتابة سجل الاستهلاك؛ قد لا تُحتسب هذه الكلفة."
+
+    def _note_clock(self, R: dict) -> None:
+        self.clock_regress = bool(R["regress"])
+        self.clock_note = ("ساعة الجهاز تبدو متأخرة عن آخر تاريخ مسجّل؛ صحّح تاريخ الجهاز. يُحتسب الأعلى من إنفاق اليومين احتياطاً لبضعة أيام."
+                           if R["regress"] else "")
 
     def spent_today(self) -> float:
         with self._lock:
-            days = self._snapshot()
-            if days is None:
+            raw = self._read_raw()
+            if raw is None:
                 return 0.0          # قراءة عابرة فاشلة: تحذير بدل «بلغت السقف»
-            return days.get(self._effective_day(days), 0.0)
+            R = self._resolve(raw)
+            if R["dirty"]:          # اكتشاف تراجع/انتهاء نافذة يُثبَّت في الملف حتى لا ينتظر إضافة قد يمنعها السقف نفسه
+                with _FileLock(self._flock_path, timeout=2.0):
+                    raw2 = self._read_raw()
+                    if raw2 is not None:
+                        R = self._resolve(raw2)
+                        if R["dirty"]:
+                            self._commit(R)
+            self._note_clock(R)
+            return R["read"]
 
     def add(self, usd: float) -> None:
         if not (isinstance(usd, (int, float)) and math.isfinite(usd) and usd > 0):
             return
         with self._lock, _FileLock(self._flock_path):
-            days = self._snapshot()   # إعادة القراءة داخل القفل: عملية أخرى قد تكون كتبت
-            if days is None:
-                return                # غير قابل للقراءة مؤقتاً: لا نكتب فوقه
-            key = self._effective_day(days)
-            days[key] = days.get(key, 0.0) + float(usd)
-            keep = sorted(days)[-KEEP_DAYS:]
-            data = {k: days[k] for k in keep if math.isfinite(days[k])}
-            try:
-                _atomic_write(self.path, json.dumps(data))
-            except OSError as exc:
-                self.warning = f"تعذّرت كتابة سجل الاستهلاك ({type(exc).__name__}); قد لا تُحتسب هذه الكلفة."
+            raw = self._read_raw()   # إعادة القراءة داخل القفل: عملية أخرى قد تكون كتبت
+            if raw is None:
+                return               # غير قابل للقراءة مؤقتاً: لا نكتب فوقه
+            R = self._resolve(raw)
+            self._note_clock(R)
+            self._commit(R, float(usd))
 
     # ---------- الحجوزات المعلّقة (تبقى بعد انهيار) ----------
     def _pending_read(self) -> Dict[str, dict]:
@@ -315,8 +364,8 @@ class UsageMeter:
         return self.spent_today() + self.inflight_usd() >= self.cap
 
     def message(self) -> str:
-        base = (f"بلغتَ سقف الإنفاق اليومي على النماذج الحقيقية ({self.spent_today():.2f}$ من {self.cap:.2f}$). "
-                f"المخطط المحلي المجاني ما زال متاحاً بـ COS_PROVIDER=demo، أو ارفع السقف بمتغير COS_MAX_USD_PER_DAY.")
+        base = (f"وصلت إلى سقف الإنفاق اليومي على النموذج الذكي ({self.spent_today():.2f} من {self.cap:.2f} دولار). "
+                f"ارفع السقف اليومي من «الإعدادات» (أو بمتغير البيئة COS_MAX_USD_PER_DAY)، أو اختر «الوضع المحلي» المجاني.")
         return base + (f" ({self.reset_note})" if self.reset_note else "")
 
     def reserve_denied_message(self, usd: float) -> str:
@@ -324,9 +373,9 @@ class UsageMeter:
         if self.exceeded():
             return self.message()
         left = max(0.0, self.cap - self.spent_today() - self.inflight_usd())
-        return (f"الكلفة القصوى المقدَّرة لهذا النداء ({usd:.3f}$) أكبر من المتبقي من سقف الإنفاق اليومي ({left:.3f}$ من {self.cap:.2f}$ "
-                f"بعد احتساب النداءات الجارية). جرّب بعد انتهاء النداءات الجارية، أو ارفع السقف بمتغير COS_MAX_USD_PER_DAY.")
+        return (f"هذا الطلب قد يكلّف أكثر من المتبقي من سقفك اليومي (المتبقي {left:.2f} دولار). "
+                f"انتظر انتهاء الطلبات الجارية أو ارفع السقف اليومي من «الإعدادات» (أو بمتغير البيئة COS_MAX_USD_PER_DAY).")
 
     def notices(self) -> list:
         """رسائل ظاهرة للمستخدم عن حالة السجل (إعادة ضبط/قراءة عابرة فاشلة)؛ فارغة عادةً."""
-        return [m for m in (self.reset_note, self.warning) if m]
+        return [m for m in (self.reset_note, self.warning, self.clock_note) if m]

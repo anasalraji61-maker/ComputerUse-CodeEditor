@@ -35,7 +35,7 @@ try:
         made = 0
         for n in evil_names:
             try:
-                (root / n).write_text("x")
+                (root / n).write_text("x", encoding="utf-8")
                 made += 1
             except OSError:
                 pass
@@ -48,7 +48,7 @@ try:
         assert ok and "\u2028" not in ev["value"] and "\u202e" not in ev["value"]
         # أسماء طويلة تُقتطع
         long_name = "x" * 200 + ".txt"
-        (root / long_name).write_text("x")
+        (root / long_name).write_text("x", encoding="utf-8")
         assert long_name not in v._listing(root)
         # رسائل الفشل تنظَّف أيضاً
         bad_step = PlanStep(2, "inspect", "no\u2028such\u202e.txt")
@@ -100,35 +100,44 @@ try:
                 os.environ[k] = v0
 
     # ---- 3) ملف تنفيذي مزروع في المجلد الحالي / مجلد العمل ----
-    if os.name != "nt":
-        with tempfile.TemporaryDirectory() as tmp:
-            planted = pathlib.Path(tmp).resolve() / "evil"
-            planted.mkdir()
-            exe = planted / "winget"
-            exe.write_text("#!/bin/sh\necho pwned\n")
-            exe.chmod(0o755)
-            clean = pathlib.Path(tmp).resolve() / "clean"
-            clean.mkdir()
-            exe2 = clean / "winget"
-            exe2.write_text("#!/bin/sh\necho ok\n")
-            exe2.chmod(0o755)
-            # مدخل نسبي/فارغ في PATH لا يُحلّ أبداً
-            old_cwd = os.getcwd()
-            os.chdir(str(planted))
-            try:
-                assert resolve_exe("winget", path_env="" + os.pathsep + ".") is None
-                # المجلد الحالي لا يُحظر بذاته (قد يكون / أو System32): فقط reject_roots تُرفض، والمداخل النسبية لا تُحلّ
-                assert resolve_exe("winget", path_env=os.pathsep.join([str(planted), str(clean)])) == str(exe)
-                os.chdir("/")
-                assert resolve_exe("winget", path_env=str(clean)) == str(exe2)
-            finally:
-                os.chdir(old_cwd)
-            # مجلد العمل مرفوض
-            assert resolve_exe("winget", reject_roots=[planted], path_env=os.pathsep.join([str(planted), str(clean)])) == str(exe2)
-            assert resolve_exe("winget", reject_roots=[planted], path_env=str(planted)) is None
-        # ShellTool يرفض اسماً يحلّ داخل مجلد العمل
-        assert ShellTool(reject_roots=[os.path.dirname(sys.executable)]).reject_roots
-    else:
+    def mkexe(path, label):
+        """ملف تنفيذي تجريبي: posix سكربت sh بإذن التنفيذ؛ ويندوز ملف .cmd (يحلّه PATHEXT) بمحتوى باتش. يعيد المسار الفعلي المنشأ."""
+        if os.name == "nt":
+            q = path.with_name(path.name + ".cmd")
+            q.write_bytes(("@echo off\r\necho %s\r\n" % label).encode("utf-8"))
+            return q
+        path.write_text("#!/bin/sh\necho %s\n" % label, encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def same(got, want):
+        """مقارنة مسار حلّه resolve_exe بالمتوقع: على ويندوز يضيف الامتداد من PATHEXT بحروف كبيرة (winget.CMD) والنظام لا يميّز الحالة."""
+        return got is not None and os.path.normcase(os.path.realpath(got)) == os.path.normcase(os.path.realpath(str(want)))
+
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        planted = pathlib.Path(tmp).resolve() / "evil"
+        planted.mkdir()
+        exe = mkexe(planted / "winget", "pwned")
+        clean = pathlib.Path(tmp).resolve() / "clean"
+        clean.mkdir()
+        exe2 = mkexe(clean / "winget", "ok")
+        # مدخل نسبي/فارغ في PATH لا يُحلّ أبداً
+        old_cwd = os.getcwd()
+        os.chdir(str(planted))
+        try:
+            assert resolve_exe("winget", path_env="" + os.pathsep + ".") is None
+            # المجلد الحالي لا يُحظر بذاته (قد يكون / أو System32): فقط reject_roots تُرفض، والمداخل النسبية لا تُحلّ
+            assert same(resolve_exe("winget", path_env=os.pathsep.join([str(planted), str(clean)])), exe)
+            os.chdir(os.path.abspath(os.sep))
+            assert same(resolve_exe("winget", path_env=str(clean)), exe2)
+        finally:
+            os.chdir(old_cwd)
+        # مجلد العمل مرفوض
+        assert same(resolve_exe("winget", reject_roots=[planted], path_env=os.pathsep.join([str(planted), str(clean)])), exe2)
+        assert resolve_exe("winget", reject_roots=[planted], path_env=str(planted)) is None
+    # ShellTool يرفض اسماً يحلّ داخل مجلد العمل
+    assert ShellTool(reject_roots=[os.path.dirname(sys.executable)]).reject_roots
+    if os.name == "nt":
         # ويندوز: whoami/where من System32 أولاً
         sysroot = os.environ.get("SystemRoot", r"C:\Windows")
         assert resolve_exe("whoami").lower().startswith(os.path.join(sysroot, "System32").lower())
@@ -142,10 +151,10 @@ try:
             planted.mkdir()
             for d in (t / "System32", planted):
                 f = d / "whoami.EXE"
-                f.write_text("#!/bin/sh\necho x\n")
+                f.write_text("#!/bin/sh\necho x\n", encoding="utf-8")
                 f.chmod(0o755)
             wg = planted / "winget.EXE"
-            wg.write_text("#!/bin/sh\necho x\n")
+            wg.write_text("#!/bin/sh\necho x\n", encoding="utf-8")
             wg.chmod(0o755)
             old_name, old_root, old_cwd = os.name, os.environ.get("SystemRoot"), os.getcwd()
             os.environ["SystemRoot"] = str(t)
@@ -299,9 +308,9 @@ try:
 
     # ---- 7) تنبيه الخصوصية ----
     _, note = build_provider({"COS_PROVIDER": "gemini", "GEMINI_API_KEY": "k" * 20})
-    assert "60" in note and "أسماء الملفات" in note
+    assert "60" in note and "أسماء ملفات" in note
     _, note2 = build_provider({"COS_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "k" * 20})
-    assert "60" in note2 and "أسماء الملفات" in note2
+    assert "60" in note2 and "أسماء ملفات" in note2
 
     # ================= جولة المراجعة R3 =================
     import subprocess as _sp2
@@ -421,7 +430,7 @@ try:
         finally:
             vmod.os.lstat = real_lstat
         # ملف عادي: لا تنبيه
-        (root / "n.txt").write_text("hi")
+        (root / "n.txt").write_text("hi", encoding="utf-8")
         st2 = PlanStep(2, "move", "n.txt", {"dest": "n2.txt"})
         b2 = v.snapshot(st2)
         os.replace(str(root / "n.txt"), str(root / "n2.txt"))
@@ -513,13 +522,13 @@ try:
             r_t.generate("q")
             raise AssertionError
         except ProviderError as exc:
-            assert "المقدَّرة" in str(exc) and "بلغتَ سقف" not in str(exc), str(exc)
+            assert "قد يكلّف أكثر من المتبقي" in str(exc) and "وصلت إلى سقف" not in str(exc), str(exc)
         full = UsageMeter(pathlib.Path(tmp) / "full.json", daily_cap_usd=0.0)
         try:
             ModelRouter(Unk(), usage_meter=full, cache_size=0).generate("q")
             raise AssertionError
         except ProviderError as exc:
-            assert "بلغتَ سقف" in str(exc)
+            assert "وصلت إلى سقف" in str(exc)
 
     # ---- جولة 2: 400 لسبب آخر لا يعطّل حقل التفكير نهائياً ----
     long400 = (400, b'{"error":{"message":"Request contains an invalid argument: prompt too long"}}')

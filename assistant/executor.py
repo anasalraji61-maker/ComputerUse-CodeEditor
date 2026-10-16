@@ -1,11 +1,13 @@
 """وحدة المنفّذ (Executor) — تنفيذ الخطوات حصراً عبر بوابات الأمان والموافقة والميزانية وزر الإيقاف."""
+import os
 from pathlib import Path
 from typing import Callable, Dict, Any, List, Optional
 
+from assistant.arabic import ACTION_AR
 from assistant.planner import PlanStep
 from assistant.safety import SafetyGuard, SafetyLevel, KillSwitch
 from assistant.budget import BudgetTracker
-from assistant.tools.files import FileManager
+from assistant.tools.files import FileManager, entry_kind, content_fingerprint
 from assistant.tools.shell import ShellTool
 from assistant.tools.winget import WingetTool
 
@@ -20,6 +22,19 @@ class ApprovalTimedOut(Exception):
 class ExecutionInterruptedError(Exception):
     """استثناء عند انقطاع التنفيذ بسبب الإيقاف أو الميزانية."""
     pass
+
+
+STALE_REASON = "تغيّر العنصر بعد وضع الخطة"
+STALE_CONTENT_REASON = "تغيّر محتوى العنصر بعد وضع الخطة"
+STALE_KEEP_REASON = "النسخة المُبقاة لم تعد موجودة أو تغيّر محتواها بعد وضع الخطة"
+
+
+class StaleStepError(Exception):
+    """الخطوة لم تعد تطابق ما رآه المستخدم وقت وضع الخطة (العنصر تغيّر/استُبدل/اختفى المُبقى): تُتخطّى هي وحدها ولا تفشل الخطة. .reason بالعربية."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
 
 
 class Executor:
@@ -48,6 +63,13 @@ class Executor:
         self.approval_log: List[str] = []
         self.last_denial: Optional[str] = None  # "denied" | "timeout" | "stopped" لآخر رفض (لتفرقة الرسائل)
 
+    def _rel(self, p: Any) -> str:
+        """مسار للعرض نسبي إلى مجلد العمل (بلا مسار القرص المطلق)؛ خارج المجلد يُعرض اسمه فقط."""
+        try:
+            return Path(str(p)).relative_to(self.file_manager.allowed_root).as_posix() or "."
+        except ValueError:
+            return Path(str(p)).name
+
     def _decide_approval(self, step: PlanStep) -> bool:
         """طلب موافقة لهذه الخطوة تحديداً وتسجيل القرار."""
         outcome = "approved"
@@ -63,12 +85,71 @@ class Executor:
         self.last_denial = None if decision else outcome
         label = {"approved": "تمت الموافقة", "denied": "رُفضت",
                  "timeout": "انتهت المهلة دون ردّ فلم تُنفَّذ", "stopped": "أُوقفت المهمة قبل القرار"}[outcome]
-        self.approval_log.append(f"الخطوة {step.step_id} ({step.action_type} → {step.target}): {label}")
+        self.approval_log.append(f"الخطوة {step.step_id} ({ACTION_AR.get(step.action_type, step.action_type)}: {step.target}): {label}")
         return decision
+
+    def stale_reason(self, step: PlanStep) -> Optional[str]:
+        """سبب عربي إن كان العنصر المستهدف تغيّر بعد وضع الخطة (فيُتخطّى بلا تنفيذ)، وإلا None. يقارن:
+        - step.sig (يضعه المنسّق وقت التخطيط): نوع العنصر (ملف/مجلد) دائماً؛ وحجم+mtime للحذف والنقل (المجلدات: النوع فقط)؛
+        - params.guard (تضعه القواعد لخطوات المكررات): size/mtime_ns/hash للهدف، وkeep/keep_size/keep_hash للنسخة المُبقاة (يجب أن تبقى موجودة بمحتواها)."""
+        action = step.action_type
+        if action not in ("delete", "trash", "move", "copy", "rename"):
+            return None
+        sig = getattr(step, "sig", None)
+        guard = step.params.get("guard") if isinstance(step.params, dict) else None
+        if isinstance(sig, dict) and any(k in sig for k in ("h", "keep")):   # حراسة المكررات التي ولّدها المنسّق: نفس مفاتيح params.guard
+            extra = {"hash": sig.get("h"), "keep": sig.get("keep"), "keep_size": sig.get("ks"), "keep_hash": sig.get("kh")}
+            guard = {**{k: v for k, v in extra.items() if v is not None}, **(guard or {})}
+        if not sig and not guard:
+            return None
+        try:
+            p = self.file_manager.validate_path(step.target)
+        except Exception:
+            return None   # مسار مرفوض يعالجه الفحص المسبق/المدير بأخطائه المعتادة
+        kind = entry_kind(p)
+        if sig:
+            if kind != sig.get("k"):
+                return STALE_REASON
+            if kind == "file" and action in ("delete", "trash", "move"):
+                try:
+                    st = os.lstat(str(p))
+                except OSError:
+                    return STALE_REASON
+                if int(st.st_size) != sig.get("s") or int(st.st_mtime_ns) != sig.get("m"):
+                    return STALE_REASON
+        if guard:
+            if kind != "file":
+                return STALE_REASON
+            try:
+                st = os.lstat(str(p))
+            except OSError:
+                return STALE_REASON
+            if ("size" in guard and int(st.st_size) != guard["size"]) or ("mtime_ns" in guard and int(st.st_mtime_ns) != guard["mtime_ns"]):
+                return STALE_CONTENT_REASON
+            if "hash" in guard and content_fingerprint(p) != guard["hash"]:
+                return STALE_CONTENT_REASON
+            if guard.get("keep"):
+                try:
+                    kp = self.file_manager.validate_path(guard["keep"])
+                except Exception:
+                    return STALE_KEEP_REASON
+                if kp == p or entry_kind(kp) != "file":
+                    return STALE_KEEP_REASON
+                try:
+                    if "keep_size" in guard and int(os.lstat(str(kp)).st_size) != guard["keep_size"]:
+                        return STALE_KEEP_REASON
+                except OSError:
+                    return STALE_KEEP_REASON
+                if "keep_hash" in guard and content_fingerprint(kp) != guard["keep_hash"]:
+                    return STALE_KEEP_REASON
+        return None
 
     def execute_step(self, step: PlanStep) -> Dict[str, Any]:
         """تنفيذ خطوة واحدة مع التحقق الإلزامي من الأمان والموافقة والميزانية وزر الإيقاف."""
         self.kill_switch.check()
+        why = self.stale_reason(step)   # قبل طلب الموافقة والتنفيذ: لا نسأل المستخدم عن شيء لم يعد كما رآه
+        if why:
+            raise StaleStepError(why)
 
         level = self.safety_guard.classify_action(step.action_type)
         approved = False
@@ -101,17 +182,17 @@ class Executor:
             existed = self.file_manager.validate_path(step.target).exists()
             created = self.file_manager.create_dir(step.target)
             info.update(success=True, path=str(created))
-            self.executed_log.append(f"المجلد موجود مسبقاً (لم يتغير شيء): {created}" if existed else f"تم إنشاء المجلد: {created}")
+            self.executed_log.append(f"المجلد موجود مسبقاً (لم يتغير شيء): {self._rel(created)}" if existed else f"تم إنشاء المجلد: {self._rel(created)}")
 
         elif action == "move":
             moved = self.file_manager.move(step.target, params["dest"])
             info.update(success=True, dest=str(moved))
-            self.executed_log.append(f"تم نقل {step.target} إلى {moved}")
+            self.executed_log.append(f"تم نقل {step.target} إلى {self._rel(moved)}")
 
         elif action == "copy":
             copied = self.file_manager.copy(step.target, params["dest"])
             info.update(success=True, dest=str(copied))
-            self.executed_log.append(f"تم نسخ {step.target} إلى {copied}")
+            self.executed_log.append(f"تم نسخ {step.target} إلى {self._rel(copied)}")
 
         elif action == "rename":
             renamed = self.file_manager.rename(step.target, params["new_name"])
@@ -128,7 +209,7 @@ class Executor:
                 raise RuntimeError("أداة winget غير مهيأة للمنفذ.")
             code, out, err = self.winget_tool.upgrade_package(step.target)
             info.update(success=(code == 0), exit_code=code, stdout=out, stderr=err, package=step.target)
-            self.executed_log.append(f"ترقية حزمة winget {step.target} (رمز الخروج: {code})")
+            self.executed_log.append(f"تحديث البرنامج {step.target}: " + ("تم بنجاح" if code == 0 else f"فشل (رمز {code})"))
 
         elif action == "run_command":
             if not self.shell_tool:
@@ -139,7 +220,7 @@ class Executor:
                 raise ExecutionInterruptedError("الأمر المعروض للمستخدم لا يطابق الأمر الفعلي؛ رُفضت الخطوة.")
             code, out, err = self.shell_tool.run(cmd_list)
             info.update(success=(code == 0), exit_code=code, stdout=out, stderr=err, cmd=list(cmd_list))
-            self.executed_log.append(f"تشغيل الأمر {cmd_list} (رمز الخروج: {code})")
+            self.executed_log.append(f"تم تشغيل الأمر {' '.join(str(c) for c in cmd_list)} بنجاح" if code == 0 else f"فشل الأمر {' '.join(str(c) for c in cmd_list)} (رمز {code})")
 
         else:  # لا يجب الوصول إليه: الجدول الصريح يمنع المجهول
             raise ExecutionInterruptedError(f"لا يوجد منفّذ للإجراء '{action}'.")

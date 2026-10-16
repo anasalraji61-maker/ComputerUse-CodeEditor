@@ -33,10 +33,10 @@ class GeminiProvider(HttpProvider):
     def _parse(self, data: dict) -> Tuple[str, int, int]:
         cands = data.get("candidates")
         if not cands:
-            raise ProviderError("رد Gemini بلا مرشحين (قد يكون محجوباً).")
+            raise ProviderError("امتنعت الخدمة عن الرد (قد يكون الطلب محجوباً). صُغ الطلب بشكل مختلف.")
         parts = (cands[0].get("content") or {}).get("parts") or []
         text = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
         if not text:
-            raise ProviderError("رد Gemini فارغ.")
+            raise ProviderError("جاء رد الخدمة فارغاً بلا أي نص. أعد المحاولة أو صُغ الطلب بشكل مختلف.")
         u = data.get("usageMetadata") or {}
         return text, int(u.get("promptTokenCount", 0)), int(u.get("candidatesTokenCount", 0))

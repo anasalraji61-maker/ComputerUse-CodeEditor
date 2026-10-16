@@ -30,6 +30,8 @@ class ExecutionReport:
         self.undo_journal_path = undo_journal_path
         self.approvals = approvals or []
         self.skipped = skipped or []
+        self.review_line: Optional[str] = None     # سطر «مراجعة مستقلة» الاستشاري (verify_review.attach_review)؛ لا يغيّر success
+        self.review_needs: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -43,6 +45,7 @@ class ExecutionReport:
             "undo_available": self.undo_available,
             "approvals": self.approvals,
             "skipped": self.skipped,
+            "review": self.review_line,
         }
 
     def render_arabic_text(self) -> str:
@@ -92,6 +95,11 @@ class ExecutionReport:
             lines.append("## قرارات الموافقة:")
             for a in self.approvals:
                 lines.append(f"- {_one(a)}")
+
+        if self.review_line:
+            lines.append("")
+            lines.append("## مراجعة مستقلة:")
+            lines.append(f"- {_one(self.review_line)}")
 
         lines.append("")
         lines.append(f"## الكلفة بالنقاط: {self.points_charged} نقطة.")

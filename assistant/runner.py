@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from assistant.arabic import n_units
 from assistant.models.base import ModelProvider
 from assistant.planner import Planner, PlanStep, PlanParseError
-from assistant.executor import Executor, Approver
+from assistant.executor import Executor, Approver, StaleStepError
 from assistant.verifier import Verifier, VersionProbe
 from assistant.reporter import ExecutionReport
 from assistant.safety import (
@@ -20,7 +20,7 @@ from assistant.safety import (
 )
 from assistant.budget import BudgetTracker, BudgetExceededError
 from assistant.ledger import SQLiteLedger, InsufficientBalanceError, SpendingLimitExceededError
-from assistant.tools.files import (FileManager, _is_link, tree_size, human_size,
+from assistant.tools.files import (FileManager, _is_link, tree_size, entry_kind, content_fingerprint, FP_FULL_LIMIT as FP_LIMIT_FULL, human_size,
                                    free_space_short, free_space_margin, name_problem, name_len,
                                    explain_error, UndoResult, MAX_NAME_UNITS, MAX_PATH_CHARS, IS_WINDOWS,
                                    WorkspaceBusyError, UNDO_LOCK_TIMEOUT_SECONDS, BUSY_UNDO_REASON)
@@ -37,6 +37,12 @@ class BudgetCheck:
 
 _SIM_MAX_ENTRIES = 400_000     # أقصى عناصر تُمسح على القرص أثناء المحاكاة
 _SIM_MAX_SECONDS = 10.0
+_LISTING_COUNT_MAX = 200_000    # حدّ عدّ عناصر القائمة بعد الاقتطاع (المجموع حدّ أدنى إن بلغه)
+_LISTING_COUNT_SECONDS = 3.0
+_DUP_OBJECTIVE = re.compile(r"(?<!\w)[وف]?(?:ال)?(?:مكرر\w*|متكرر\w*|تكرار|duplicates?)(?!\w)", re.I)   # طلب «المكررات» (يطابق ما تقرؤه القواعد)
+_DUP_STAMP_SECONDS = 8.0       # حدّ زمن بصمات المكررات وقت التخطيط
+_DUP_STAMP_BYTES = 256 << 20   # أقصى بايتات تُقرأ كاملةً لبصمات المكررات (بعدها عيّنات فقط)
+_DUP_DEST_DIRS = ("مكررات",)
 
 
 class _VNode:
@@ -282,11 +288,15 @@ class TaskRunner:
         winget_runner: Optional[Callable[[List[str]], Tuple[int, str, str]]] = None,
         version_probe: Optional[VersionProbe] = None,
         shell_tool: Optional[ShellTool] = None,
-        max_steps: int = 220,
+        max_steps: int = 420,
         max_tokens: int = 4000,
         max_seconds: float = 1800.0,
         clock: Callable[[], float] = time.monotonic,
+        usage_meter=None,
+        review_enabled: Optional[bool] = None,
     ):
+        self.usage_meter = usage_meter            # لحجز كلفة المراجعة المستقلة الاختيارية (verify_review)
+        self.review_enabled = review_enabled      # None: من التهيئة (config verify_model / COS_VERIFY_MODEL)، الافتراضي مغلق
         self.allowed_root = Path(allowed_root).resolve()
         self.provider = provider
         self.ledger = ledger
@@ -310,6 +320,9 @@ class TaskRunner:
         self.verifier = Verifier(allowed_root=self.allowed_root, version_probe=self.version_probe, kill_switch=self.kill_switch)
         self.last_plan_note: Optional[str] = None
         self.last_listing_skipped: List[str] = []   # عناصر لم تُعرض للمخطط لأن أسماءها غير صالحة (للتبليغ لا للإسقاط الصامت)
+        self.last_listing_total: int = 0             # عدد عناصر مجلد العمل (مستويان) التي كان يمكن عرضها: يتجاوز المعروض عند الاقتطاع
+        self.last_listing_truncated: bool = False    # هل اقتُطعت القائمة المعروضة؟ (للقواعد: لا تعميم على «كل الملفات» حين True)
+        self.last_listing_total_exact: bool = True   # False: توقف العدّ عند حدّ الزمن/العدد فالمجموع حدّ أدنى
         self._journal_starts: Dict[str, int] = {}
         self._journal_ends: Dict[str, int] = {}
 
@@ -347,28 +360,56 @@ class TaskRunner:
                 return None
             return real + ("/" if p.is_dir() else "")
 
+        total = 0
+        exact = True
+        deadline = time.monotonic() + _LISTING_COUNT_SECONDS
+
+        def counted(p: Path, rel: Path) -> bool:
+            """بعد الاقتطاع: عدّ فقط (بلا فحص أسماء) لعناصر ما كانت لتُخفى (السلة/السجل/الروابط)."""
+            return not (rel.parts[0] == ".trash" or rel.parts[0].startswith(".undo_journal") or _is_link(p))
+
         try:
             for p in sorted(self.allowed_root.iterdir()):
+                if truncated:
+                    if total >= _LISTING_COUNT_MAX or time.monotonic() > deadline:
+                        exact = False
+                        break
+                    if counted(p, p.relative_to(self.allowed_root)):
+                        total += 1
+                        if p.is_dir():
+                            try:
+                                with os.scandir(str(p)) as it:
+                                    for c in it:
+                                        if not _is_link(Path(c.path)):
+                                            total += 1
+                                        if total >= _LISTING_COUNT_MAX:
+                                            break
+                            except OSError:
+                                pass
+                    continue
                 name = visible(p, p.relative_to(self.allowed_root))
                 if name is None:
                     continue
                 out.append(name)
+                total += 1
                 if len(out) >= max_entries:
                     truncated = True
-                    break
+                    continue
                 if p.is_dir():
                     for c in sorted(p.iterdir()):
+                        if truncated:   # بعد الاقتطاع داخل هذا المجلد: نُكمل العدّ فقط (بلا فحص أسماء ولا إضافة لـ skipped)
+                            total += counted(c, c.relative_to(self.allowed_root))
+                            continue
                         cname = visible(c, c.relative_to(self.allowed_root))
                         if cname is None:
                             continue
+                        total += 1
                         out.append(cname)
                         if len(out) >= max_entries:
                             truncated = True
-                            break
-                if truncated:
-                    break
         except OSError:
             pass
+        self.last_listing_total, self.last_listing_truncated, self.last_listing_total_exact = total, truncated, exact
         self.last_listing_skipped = skipped
         if truncated:
             out.append("… (القائمة مقتطعة)")
@@ -392,7 +433,137 @@ class TaskRunner:
             plan = self.planner.plan(objective, context=context)
             note = getattr(self.planner, "last_note", None)
         self.last_plan_note = note  # للتوافق فقط (مشتركة)
+        try:
+            self._stamp_plan(plan, objective)
+        except Exception:
+            pass   # البصمات حراسة إضافية: عطبها لا يُسقط التخطيط
         return plan, note
+
+    # ---------- بصمات الخطة: ما تغيّر بعد وضع الخطة لا يُنفَّذ ----------
+    def _stamp_plan(self, plan: List[PlanStep], objective: str) -> None:
+        """يضع في كل خطوة حذف/نقل/نسخ/إعادة تسمية بصمة هدفها وقت التخطيط (النوع + حجم/mtime للملف) فيتخطّى المنفّذ الخطوة إن استُبدل العنصر بمجلد
+        (أو العكس) أو عُدّل بعد أن رآها المستخدم. وللحذف/النقل المأخوذ من طلب «المكررات» (أو نقل إلى مجلد «مكررات») يُضاف بصمة المحتوى
+        والنسخة المُبقاة (يجب أن تبقى موجودة بمحتواها): تعديل المستخدم لملف بعد التخطيط أو حذف النسخة المُبقاة لا يُتلف شيئاً.
+        مسار لمسته خطوة سابقة في الخطة نفسها (وجهة/إنشاء) لا يُبصَم: حالته وقت التنفيذ ناتجة عن الخطة لا عن القرص الحالي."""
+        fm = self.file_manager
+        touched: List[str] = []
+
+        def norm(x: str) -> str:
+            return "/".join(part for part in str(x).replace("\\", "/").split("/") if part not in ("", ".")).casefold()
+
+        def overlaps(rel: str) -> bool:
+            return any(rel == t or rel.startswith(t + "/") or t.startswith(rel + "/") for t in touched)
+
+        dup_ctx = bool(_DUP_OBJECTIVE.search(objective or ""))
+        victims: List[Tuple[PlanStep, Path]] = []
+        for st in plan:
+            a = st.action_type
+            rel = norm(st.target)
+            if a in ("delete", "trash", "move", "copy", "rename") and rel and not overlaps(rel):
+                try:
+                    p = fm.validate_path(st.target)
+                except Exception:
+                    p = None
+                kind = entry_kind(p) if p is not None else None
+                if kind in ("file", "dir"):
+                    sig: Dict[str, Any] = {"k": kind}
+                    if kind == "file":
+                        try:
+                            stt = os.lstat(str(p))
+                            sig["s"], sig["m"] = int(stt.st_size), int(stt.st_mtime_ns)
+                        except OSError:
+                            sig = {}
+                    if sig:
+                        st.sig = sig
+                        dest = str(st.params.get("dest", "")).replace("\\", "/")
+                        dupish_move = a == "move" and dest.startswith("مكررات/") and dest == "مكررات/" + st.target.replace("\\", "/").replace("/", "_")
+                        if (kind == "file" and a in ("delete", "trash", "move") and sig.get("s", 0) > 0
+                                and (dup_ctx or dupish_move) and "guard" not in st.params):
+                            victims.append((st, p))
+            if a in ("create_dir", "copy", "move", "rename"):
+                if a == "rename":
+                    touched.append(norm(str(Path(st.target).parent / str(st.params.get("new_name", "")))))
+                elif a == "create_dir":
+                    touched.append(rel)
+                else:
+                    touched.append(norm(str(st.params.get("dest", ""))))
+        if victims:
+            self._stamp_duplicates(victims)
+
+    @staticmethod
+    def _rel_norm(x: str) -> str:
+        return "/".join(part for part in str(x).replace("\\", "/").split("/") if part not in ("", ".")).casefold()
+
+    def _depends_on_skipped(self, step: PlanStep, blocked: List[str]) -> Optional[str]:
+        """سبب عربي إن كانت الخطوة تستهدف وجهة خطوة سبق تخطّيها (فلا يوجد ما تعمل عليه)."""
+        if not blocked or step.action_type not in ("move", "copy", "rename", "delete", "trash", "inspect"):
+            return None
+        t = self._rel_norm(step.target)
+        if t and any(t == b or t.startswith(b + "/") for b in blocked if b):
+            return "الخطوة السابقة التي كانت ستجهّزه لم تُنفَّذ"
+        return None
+
+    def _stamp_duplicates(self, victims: List[Tuple[PlanStep, Path]]) -> None:
+        """بصمة محتوى كل ضحية ونسخة مُبقاة مطابقة لها (ملف آخر ليس ضحية في الخطة). بلا نسخة مطابقة: تُحرس الضحية وحدها."""
+        root = self.allowed_root
+        deadline = time.monotonic() + _DUP_STAMP_SECONDS
+        budget = [_DUP_STAMP_BYTES]
+
+        def fp(path: Path, size: int) -> Optional[str]:
+            full = FP_LIMIT_FULL if budget[0] > 0 else 0   # بعد استنفاد ميزانية القراءة: عيّنات فقط
+            budget[0] -= min(size, full)
+            return content_fingerprint(path, full)
+
+        vset = {str(p) for _st, p in victims}
+        by_size: Dict[int, List[Tuple[PlanStep, Path]]] = {}
+        for st, p in victims:
+            h = fp(p, st.sig["s"])
+            if h:
+                st.sig["h"] = h
+                by_size.setdefault(st.sig["s"], []).append((st, p))
+        # مسح مجلد العمل: ملفات بحجم أحد الضحايا وليست ضحية (ولا في .trash/السجل/«مكررات»/روابط)
+        seen = 0
+        cand: Dict[int, List[Tuple[str, Path]]] = {}
+        stack = [root]
+        while stack and time.monotonic() < deadline and seen < _SIM_MAX_ENTRIES:
+            d = stack.pop()
+            try:
+                it = os.scandir(str(d))
+            except OSError:
+                continue
+            with it:
+                for e in it:
+                    seen += 1
+                    if d == root and (e.name == ".trash" or e.name.startswith(".undo_journal") or e.name.casefold() in _DUP_DEST_DIRS):
+                        continue
+                    try:
+                        if e.is_symlink() or _is_link(Path(e.path)):
+                            continue
+                        if e.is_dir(follow_symlinks=False):
+                            stack.append(Path(e.path))
+                        elif e.is_file(follow_symlinks=False):
+                            sz = int(e.stat(follow_symlinks=False).st_size)
+                            if sz in by_size and e.path not in vset:
+                                cand.setdefault(sz, []).append((os.path.relpath(e.path, str(root)).replace(os.sep, "/"), Path(e.path)))
+                    except OSError:
+                        continue
+        for sz, group in by_size.items():
+            options = sorted(cand.get(sz, ()), key=lambda t: (t[0].count("/"), len(t[0]), t[0].casefold()))
+            keep_h: Dict[str, Optional[str]] = {}
+            for st, p in group:
+                for rel, kp in options:
+                    if time.monotonic() > deadline:
+                        break
+                    try:
+                        self.file_manager.validate_path(rel)   # اسم لا يقبله المدير (محجوز/نقطتان…) لا يصلح نسخة مُبقاة تُفحص لاحقاً
+                    except Exception:
+                        continue
+                    h = keep_h.get(rel)
+                    if h is None and rel not in keep_h:
+                        h = keep_h[rel] = fp(kp, sz)
+                    if h and h == st.sig.get("h"):
+                        st.sig["keep"], st.sig["ks"], st.sig["kh"] = rel, sz, h
+                        break
 
     def make_plan(self, objective: str) -> List[PlanStep]:
         return self.make_plan_with_note(objective)[0]
@@ -571,6 +742,8 @@ class TaskRunner:
 
         skipped: List[str] = []
         skipped_ids: set = set()
+        stale_ids: set = set()      # خطوات تخطّيناها لأن العنصر تغيّر بعد التخطيط
+        blocked: List[str] = []     # وجهات خطوات متخطّاة: خطوة لاحقة تستهدفها تُتخطّى أيضاً بدل أن تفشل الخطة
 
         def finish(success: bool) -> ExecutionReport:
             fm.current_task = None
@@ -601,7 +774,7 @@ class TaskRunner:
                         )
                     except Exception as exc:  # عطب الدفتر لا يُسقط التقرير ولا يخفي ما جرى فعلاً على الملفات
                         failures.append(f"تعذّر تسجيل الفشل في الدفتر: {exc}")
-            return ExecutionReport(
+            report = ExecutionReport(
                 task_id=task_id,
                 objective=objective,
                 success=success,
@@ -614,6 +787,10 @@ class TaskRunner:
                 approvals=list(executor.approval_log),
                 skipped=list(skipped),
             )
+            if started:   # بعد احتساب الكلفة في الدفتر: مراجعة استشارية اختيارية (مغلقة افتراضياً) لا تغيّر النجاح أبداً
+                from assistant.verify_review import attach_review
+                attach_review(report, self.provider, self.usage_meter, enabled=self.review_enabled)
+            return report
 
         # 1. فحص زر الإيقاف والقدرة المالية قبل أي شيء
         try:
@@ -690,7 +867,10 @@ class TaskRunner:
 
         # 4. تنفيذ وتدقيق مستقل لكل خطوة فور تنفيذها
         befores: Dict[int, Dict[str, Any]] = {}
+        infos: Dict[int, Dict[str, Any]] = {}
+        ws_fn = getattr(self.verifier, "workspace_snapshot", None)
         try:
+            ws_before = ws_fn() if ws_fn is not None else None     # D7: لقطة مجلد العمل كله قبل الخطة (أسماء + أحجام)
             total = len(plan)
             t_start = self._clock()
             for idx, step in enumerate(plan, 1):
@@ -701,8 +881,23 @@ class TaskRunner:
                      action=step.action_type, target=step.target)
                 before = self.verifier.snapshot(step)
                 befores[step.step_id] = before
+                dep = self._depends_on_skipped(step, blocked)
                 try:
+                    if dep:
+                        raise StaleStepError(dep)
                     info = executor.execute_step(step)
+                except StaleStepError as exc:
+                    # العنصر تغيّر بعد وضع الخطة (أو خطوة سابقة تخطّيناها): تُتخطّى هذه الخطوة وحدها وتكمل البقية
+                    skipped.append(f"{step.target} ({exc.reason}) فلم يُنفَّذ")
+                    skipped_ids.add(step.step_id)
+                    stale_ids.add(step.step_id)
+                    if step.action_type in ("move", "copy"):
+                        blocked.append(self._rel_norm(str(step.params.get("dest", ""))))
+                    elif step.action_type == "rename":
+                        blocked.append(self._rel_norm(str(Path(step.target).parent / str(step.params.get("new_name", "")))))
+                    evidence.append({"item": step.target, "type": "تخطّي: تغيّر بعد التخطيط", "value": exc.reason})
+                    emit(event="step_done", index=idx, total=total, step_id=step.step_id, ok=True, detail="تخطّي: " + exc.reason)
+                    continue
                 except ApprovalRequiredError as exc:
                     if step.action_type.strip().lower() in ("delete", "trash") and executor.last_denial == "denied":
                         # رفض صريح لحذف واحد: نتخطاه ونعرض الباقي بدل إلغاء المهمة كلها
@@ -712,6 +907,8 @@ class TaskRunner:
                         emit(event="step_done", index=idx, total=total, step_id=step.step_id, ok=True, detail="تخطّي بقرارك")
                         continue
                     raise
+                if isinstance(info, dict):
+                    infos[step.step_id] = info
                 ok, ev, err = self.verifier.verify_step(step, info, before)
                 evidence.append(ev)
                 emit(event="step_done", index=idx, total=total, step_id=step.step_id, ok=ok, detail=ev.get("value", ""))
@@ -720,7 +917,8 @@ class TaskRunner:
                     return finish(False)
             self.kill_switch.check()  # الإيقاف أثناء الخطوة الأخيرة لا يُعلَن نجاحاً صامتاً
             if skipped_ids and len(skipped_ids) == len(plan):
-                failures.append("لم تُنفَّذ أي خطوة لأنك رفضت كل الخطوات الخطرة.")
+                failures.append("لم تُنفَّذ أي خطوة لأن العناصر تغيّرت بعد وضع الخطة (أو رفضتَ بعضها)؛ أعد الطلب لتُبنى خطة جديدة." if stale_ids
+                                else "لم تُنفَّذ أي خطوة لأنك رفضت كل الخطوات الخطرة.")
                 return finish(False)
             if skipped_ids:  # الكلفة على ما نُفّذ فعلاً فقط
                 charge = self.estimate_plan_cost(objective, plan, skipped_ids)
@@ -730,6 +928,12 @@ class TaskRunner:
             if not j_ok:
                 failures.append(j_err or "فشل تدقيق سجل التراجع")
                 return finish(False)
+            if ws_fn is not None:   # D7: أي فرق في مجلد العمل لا تفسّره الخطوات المنفّذة يُفشل التدقيق
+                w_ok, w_ev, w_err = self.verifier.verify_workspace(plan, infos, skipped_ids, ws_before, ws_fn())
+                evidence.append(w_ev)
+                if not w_ok:
+                    failures.append(w_err or "تغييرات غير متوقعة في مجلد العمل")
+                    return finish(False)
         except EmergencyStopTriggered as exc:
             failures.append(f"تم الإيقاف أثناء التنفيذ: {exc}")
             return finish(False)

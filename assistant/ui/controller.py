@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from assistant.models.base import ModelProvider, CONTEXT_MARKER
-from assistant.models.rules import parse_context, strip_format_chars, merge_clarification, INFO_PREFIX
+from assistant.models.rules import parse_context, strip_format_chars, merge_clarification, INFO_PREFIX, is_undo_request
 from assistant.models.http_base import ProviderError
 from assistant.executor import ApprovalTimedOut
 from assistant.planner import PlanStep, PlanParseError, sanitize_display
@@ -23,6 +23,9 @@ from assistant.runner import TaskRunner
 from assistant.safety import KillSwitch, SafetyGuard
 from assistant.ledger import SQLiteLedger
 from assistant.config import validate_workspace, load_config, save_config, WorkspaceError
+from assistant.tools.files import retry_io
+from assistant.ui import settings as _settings
+from assistant.arabic import n_units
 
 MAX_QUESTIONS = 3
 MAX_CLARIFY_ROUNDS = 3   # جولات توضيح متتالية كحد أقصى (سؤال ← جواب ← سؤال…) قبل التخطيط المباشر
@@ -33,6 +36,29 @@ CLARIFY_SYSTEM = (
     "CLARIFY — أنت مساعد مهام مكتبية. إن كان الطلب ناقصاً أو غامضاً فأعد JSON بالشكل "
     '{"questions": ["سؤال قصير", ...]} بحد أقصى 3 أسئلة قصيرة، وإلا أعد {"questions": []}.'
 )
+
+# رسائل مشتركة (نص واحد لكل حالة مهما كان مكان اكتشافها)
+MSG_UNDO_BUSY = "لا يمكن التراجع الآن. انتظر انتهاء المهمة أو اضغط «إيقاف»، وإن كانت هناك خطة جاهزة فاضغط «إلغاء الخطة»."
+MSG_WORKSPACE_BUSY = "لا يمكن تغيير المجلد الآن. انتظر انتهاء المهمة أو اضغط «إلغاء الخطة» أولاً."
+MSG_SETTINGS_BUSY = "لا يمكن تغيير الإعدادات الآن. انتظر انتهاء المهمة أو اضغط «إيقاف» ثم أعد المحاولة."
+MSG_UNEXPECTED = "حدث خلل غير متوقع. لم يتغيّر شيء في ملفاتك؛ أعد المحاولة، وإن تكرر أرسل ملف crash.log إلى المطوّر."
+MSG_UNDO_FAILED = "تعذّر التراجع الآن. تأكد أن الملفات غير مفتوحة في برنامج آخر ثم أعد المحاولة."
+
+
+_OPEN_WORDS = re.compile(r"(?<!\w)(?:افتح|افتحلي|اعرض|اعرضلي|اظهر|show|open|view)(?!\w)", re.I)
+MAX_UNDO_WORDS = 8   # طلب تراجع قصير فقط؛ الطويل (قد يخلط تراجعاً بعمل آخر) لا ينفّذ تراجعاً من الدردشة
+
+
+def wants_undo(text: str) -> bool:
+    """طلب نصي صريح للتراجع (نفس زر «تراجع»). لا نعدّه كذلك إن كان «افتح/اعرض سلة المحذوفات» أو طويلاً يخلط عملاً آخر."""
+    t = str(text or "")
+    if len(t.split()) > MAX_UNDO_WORDS or _OPEN_WORDS.search(t):
+        return False
+    try:
+        return bool(is_undo_request(t))
+    except Exception:
+        return False
+
 
 # حالات المتحكم
 IDLE, CLARIFYING, PLANNING, PLAN_READY, RUNNING = "IDLE", "CLARIFYING", "PLANNING", "PLAN_READY", "RUNNING"
@@ -46,6 +72,12 @@ class AssistantController:
         self._chain: List[str] = []      # مهام سلسلة طلب واحد (الطلب نفسه يُعاد لإكمال الباقي) لزر «تراجع عن الكل»
         self._chain_key: Optional[str] = None
         self.usage_meter = usage_meter
+        _settings.seed_env_secrets()   # مفاتيح البيئة تُحجب من الأحداث والسجلات منذ البدء
+        self._incoming_secrets: List[str] = []   # مفتاح قيد التطبيق (قبل اعتماده): يُحجب من كل رسالة وحدث وسجل
+        self._session_secrets: Dict[str, str] = {}   # مفاتيح API لهذه الجلسة فقط: في الذاكرة، لا تُكتب في قرص ولا سجل ولا حدث
+        self.last_settings_message = ""
+        self._pinging = False
+        self._settings_gen = 0
         self._approval_seq = 0
         self._pending_approval = None
         self.kill_switch = KillSwitch()
@@ -111,6 +143,7 @@ class AssistantController:
         for q in chain:
             provs.append(q)
             provs.extend(getattr(q, "providers", {}).values())
+        _settings.remember_secrets(_settings.provider_keys(prov))   # مفاتيح المزوّد نفسه (قد تأتي من قاموس بيئة لا من os.environ)
         for p in provs:
             if hasattr(p, "cancel_check") and p.cancel_check is None:
                 p.cancel_check = check
@@ -142,7 +175,7 @@ class AssistantController:
         """تغيير مجلد العمل (فقط أثناء الخمول) بعد تحقق صارم، مع حفظ الاختيار."""
         with self._lock:
             if self.state != IDLE:
-                self.emit("error", text="لا يمكن تغيير المجلد أثناء مهمة جارية.")
+                self.emit("error", text=MSG_WORKSPACE_BUSY)
                 return False
             try:
                 p = validate_workspace(path)
@@ -167,8 +200,159 @@ class AssistantController:
             self.emit("workspace", path=str(p))
         return True
 
+    # ---------- الإعدادات وفحص الاتصال ----------
+    def _redact_secrets(self, text) -> str:
+        """سجل المفاتيح المعروفة + قيم البيئة السرية + أنماط المفاتيح، ثم مفاتيح الجلسة والمفتاح الوارد."""
+        return _settings.redact(_settings.redact_known(text), list(self._session_secrets.values()) + list(self._incoming_secrets))
+
+    def _scrub(self, v, depth: int = 0):
+        if isinstance(v, str):
+            return self._redact_secrets(v) if v else v
+        if depth < 4:
+            if isinstance(v, list):
+                return [self._scrub(x, depth + 1) for x in v]
+            if isinstance(v, tuple):
+                return tuple(self._scrub(x, depth + 1) for x in v)
+            if isinstance(v, dict):
+                return {k: self._scrub(x, depth + 1) for k, x in v.items()}
+        return v
+
+    def _log_exc(self, what: str, exc: BaseException) -> None:
+        """التفاصيل التقنية (اسم الصنف ونصه) تذهب إلى crash.log فقط، بعد حجب المفاتيح؛ لا تصل المستخدم."""
+        try:
+            from assistant.app import write_crash_log
+            write_crash_log(self._redact_secrets(f"{what}: {type(exc).__name__}: {sanitize_display(exc, 600)}"))
+        except Exception:
+            pass
+
+    def provider_info(self) -> Dict[str, Any]:
+        return _settings.describe_provider(self.provider, self.usage_meter.cap if self.usage_meter is not None else None)
+
+    def current_settings(self) -> Dict[str, Any]:
+        """قيم تعبئة نافذة الإعدادات (لا مفتاح فيها أبداً، فقط هل يوجد مفتاح جلسة)."""
+        info = self.provider_info()
+        saved = _settings.load_saved(load_config())
+        choice = _settings.choice_of(self.provider)
+        if info["kind"] == "rules" and saved.get("provider") not in (None, "demo"):
+            choice = saved["provider"]   # عاد للقواعد لأن المفتاح ناقص: تبقى نيّة المستخدم ظاهرة ليلصق المفتاح فقط
+        return {"provider": choice, "line": info["line"], "kind": info["kind"],
+                "small_model": saved.get("small_model", ""), "large_model": saved.get("large_model", ""),
+                "workspace": str(self.workspace),
+                "daily_cap": self.usage_meter.cap if self.usage_meter is not None else None,
+                "has_session_key": bool(self._session_secrets)}
+
+    def apply_settings(self, values) -> bool:
+        """يطبّق الإعدادات ذرّياً: يتحقق ويبني سلسلة المزوّدات الجديدة قبل أي تغيير، وأي فشل يترك كل شيء كما كان. فقط أثناء الخمول.
+        المفتاح الوارد يُحجب من كل رسالة/حدث/سجل منذ اللحظة الأولى (حتى لو فشل التحقق قبل اعتماده)."""
+        incoming = []
+        try:
+            raw = values.get("api_key") if hasattr(values, "get") else None
+            if isinstance(raw, str) and raw.strip():
+                incoming = [raw, raw.strip()]
+        except Exception:
+            incoming = []
+        _settings.remember_secrets(incoming)
+        with self._lock:
+            self._incoming_secrets = incoming
+            try:
+                return self._apply_settings_locked(values)
+            finally:
+                self._incoming_secrets = []
+
+    @staticmethod
+    def _norm_path(p) -> str:
+        """مقارنة مسارات مجلد العمل كما يراها النظام (ويندوز: حالة الأحرف والفواصل لا تُحدث فرقاً)."""
+        return os.path.normcase(os.path.abspath(os.path.expanduser(str(p))))
+
+    def _apply_settings_locked(self, values) -> bool:
+        if self.state != IDLE:
+            return self._settings_fail(MSG_SETTINGS_BUSY)
+        secrets = dict(self._session_secrets)
+        try:
+            norm = _settings.normalize(values)
+            if norm["clear_key"]:
+                secrets = {}
+            choice = norm["provider"]
+            if norm["api_key"]:
+                kind = norm["key_kind"]
+                secrets[_settings.KEY_ENV[kind]] = norm["api_key"]
+                if choice == "auto":
+                    choice = kind   # المفتاح المُلصق يحدد المزوّد بدل أن يغلبه مفتاح محيط آخر
+            env = _settings.build_env(os.environ, choice, secrets, norm["small_model"], norm["large_model"])
+            if choice in ("gemini", "anthropic", "openai") and not _settings.key_available(env, choice):
+                raise _settings.SettingsError(f"لا يوجد مفتاح لـ {_settings.KEY_LABEL[choice]}. الصق المفتاح في خانة مفتاح الخدمة (يُحفظ لهذه الجلسة فقط).")
+            from assistant.models.factory import build_provider
+            new_provider, note = build_provider(env)
+            ws = norm["workspace"]
+            new_ws = None
+            if ws and self._norm_path(ws) != self._norm_path(self.workspace):
+                new_ws = validate_workspace(ws)
+                if self._norm_path(new_ws) == self._norm_path(self.workspace):
+                    new_ws = None
+        except (_settings.SettingsError, ProviderError, WorkspaceError) as exc:
+            return self._settings_fail(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            self._log_exc("تطبيق الإعدادات", exc)
+            return self._settings_fail(_settings.MSG_APPLY_FAILED)
+        old_provider, old_runner = self.provider, self.runner
+        self.provider = new_provider
+        try:
+            if new_ws is not None:
+                if not self.set_workspace(new_ws):   # يصدر خطأه بنفسه؛ نتراجع عن المزوّد
+                    raise RuntimeError("workspace")
+            else:
+                self.runner = self._make_runner(self.runner.allowed_root)
+        except Exception as exc:  # noqa: BLE001
+            self.provider, self.runner = old_provider, old_runner
+            if str(exc) == "workspace":
+                self.last_settings_message = "تعذّر تغيير مجلد العمل، فلم تُطبَّق أي إعدادات."
+                return False
+            self._log_exc("تجهيز المزوّد الجديد", exc)
+            return self._settings_fail(_settings.MSG_APPLY_FAILED)
+        self._wire_cancel(new_provider)
+        self._accounted = self._usd_total()
+        self._session_secrets = secrets
+        self._settings_gen += 1
+        if norm["daily_cap"] is not None and self.usage_meter is not None:
+            self.usage_meter.cap = float(norm["daily_cap"])
+        try:   # غير السري فقط
+            save_config(_settings.safe_config_update(load_config(), norm))
+        except OSError:
+            pass
+        info = self.provider_info()
+        self.last_settings_message = ""
+        self.emit("settings_applied", text="تم تطبيق الإعدادات. " + info["line"], kind=info["kind"], label=info["label"])
+        return True
+
+    def _settings_fail(self, msg: str) -> bool:
+        msg = sanitize_display(self._redact_secrets(msg), 500)
+        self.last_settings_message = msg
+        self.emit("error", text=msg)
+        return False
+
+    def check_connection(self) -> bool:
+        """فحص اتصال بطلب صغير جداً في خيط عامل (لا يحجب Tk). النتيجة حدث ping{ok,text,...}."""
+        with self._lock:
+            if self._pinging:   # فحص جارٍ: لا نكرره (الزر معطّل في الواجهة أيضاً)
+                return False
+            self._pinging = True
+            prov, secrets = self.provider, list(self._session_secrets.values())
+        def work():
+            try:
+                res = _settings.run_ping(prov, self.usage_meter, self._cancel_requested, secrets)
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "text": f"فشل الفحص: خطأ غير متوقع ({type(exc).__name__}).", "kind": "other", "label": "", "model": None, "ms": 0, "usd": 0.0}
+            finally:
+                with self._lock:
+                    self._pinging = False
+            res["text"] = sanitize_display(self._redact_secrets(res.get("text", "")), 600)
+            self.emit("ping", **res)
+        threading.Thread(target=work, daemon=True).start()
+        return True
+
     # ---------- أحداث ----------
     def emit(self, type_: str, **data):
+        data = {k: self._scrub(v) for k, v in data.items()}   # خط دفاع أخير دائم: لا يخرج مفتاح (من البيئة أو الجلسة) في أي حدث
         self.event_queue.put({"type": type_, **data})
 
     def drain_events(self) -> List[Dict[str, Any]]:
@@ -209,7 +393,8 @@ class AssistantController:
                 self._plan = None
                 self._slots = []
                 self._go(IDLE)
-            self.emit("error", text=f"{what}: {type(exc).__name__}: {sanitize_display(exc, 300)}")
+            self._log_exc(what, exc)
+            self.emit("error", text=f"{what}. {MSG_UNEXPECTED}")
 
     def _spawn_guarded(self, gen, expected_state, fn, *args):
         """يطلق عاملاً؛ إن فشل الإطلاق نفسه (مثل RuntimeError: can't start new thread) نعيد الحالة إلى IDLE ونُعلن الخطأ."""
@@ -236,8 +421,10 @@ class AssistantController:
     def submit_request(self, text: str):
         text = strip_format_chars(text or "").strip()  # علامات الاتجاه/العرض الصفري تُحذف قبل أي فهم أو تخطيط
         with self._lock:
+            if text and len(text) <= MAX_REQUEST_CHARS and wants_undo(text):   # «تراجع»/«ارجع اللي حذفته» كتابةً = زر «تراجع» نفسه (بما فيه الانشغال وتأكيد غير الموثَّق)؛ لا تخطيط ولا تنفيذ غيره
+                return self.undo_last()
             if self.state not in (IDLE,):
-                return self.emit("error", text="المساعد مشغول بمهمة حالية. أوقفها أو انتظر انتهاءها.")
+                return self.emit("error", text="المساعد مشغول بمهمة حالية. انتظر انتهاءها أو اضغط «إيقاف».")
             if not text:
                 return self.emit("error", text="اكتب طلبك أولاً.")
             if len(text) > MAX_REQUEST_CHARS:
@@ -449,7 +636,7 @@ class AssistantController:
             if gen != self._gen:
                 return
             if spent > 0:
-                self.emit("status", text=f"كلفة التخطيط: {spent:.4f}$")
+                self.emit("status", text=f"كلفة التخطيط: نحو {spent:.2f} دولار")
             self._plan = plan
             self._request_full = text
             self._task_id = "task_" + uuid.uuid4().hex[:10]
@@ -501,14 +688,18 @@ class AssistantController:
         fatal = None
         try:
             objective = " ".join(str(objective).split())   # سطر واحد: لا أسطر مزوّرة في رأس التقرير («- المطلوب: …»)
-            report = self.runner.run(task_id, objective, plan=plan, progress=self._on_progress)
+            try:
+                report = self.runner.run(task_id, objective, plan=plan, progress=self._on_progress)
+            finally:
+                self._record_spend(0.0)   # كلفة نداءات النموذج داخل التشغيل (مراجعة/تحقق) تدخل العدّاد اليومي حتى لو فشل التشغيل
             undo_available = bool(report.undo_available)
             event = ("report", dict(success=report.success, text=report.render_arabic_text(),
                                     undo_available=report.undo_available, task_id=task_id,
                                     executed=len(report.executed_steps or []), failed=len(report.failures or []),
                                     skipped=len(report.skipped or [])))
         except Exception as exc:
-            event = ("error", dict(text=f"خطأ غير متوقع: {type(exc).__name__}: {sanitize_display(exc, 400)}"))
+            self._log_exc("خطأ أثناء التنفيذ", exc)
+            event = ("error", dict(text=MSG_UNEXPECTED))
         except BaseException as exc:   # الحالة تعود لـ IDLE دائماً ثم يُعاد رفع الاستثناء
             fatal = exc
         if event and event[0] == "report":
@@ -516,7 +707,7 @@ class AssistantController:
         # القراءات البطيئة (قاعدة الرصيد/عدّاد المزوّد) قبل القفل؛ داخله إعلانات فقط
         extra_status = []
         try:
-            extra_status.append(f"رصيدك: {self.runner.ledger.get_balance()} نقطة")
+            extra_status.append(f"رصيدك: {n_units(self.runner.ledger.get_balance(), 'نقطة')}")
         except Exception:
             pass
         try:
@@ -524,7 +715,7 @@ class AssistantController:
             if callable(totals):
                 t = totals()
                 if t.get("calls"):
-                    extra_status.append(f"استهلاك النموذج حتى الآن: ≈ {t['points']:.2f} نقطة ({t['usd']:.4f}$)")
+                    extra_status.append(f"استهلاك النموذج الذكي حتى الآن: نحو {t['usd']:.2f} دولار")
         except Exception:
             pass
         # العودة لـ IDLE وإعلان النتيجة في كتلة واحدة: طلب تالٍ لا يستطيع أن يسبق «report» بحدث «plan» في الطابور
@@ -612,7 +803,8 @@ class AssistantController:
             try:
                 return self._undo_last_locked(allow_unverified)
             except Exception as exc:   # لا يتسرب استثناء إلى معالج Tk
-                return self.emit("error", text=f"تعذّر التراجع: {type(exc).__name__}: {sanitize_display(exc, 300)}")
+                self._log_exc("خطأ أثناء التراجع", exc)
+                return self.emit("error", text=MSG_UNDO_FAILED)
 
     def chain_size(self) -> int:
         """عدد مهام آخر سلسلة طلب (الطلب نفسه المعاد لإكمال الباقي) القابلة للتراجع دفعة واحدة."""
@@ -625,14 +817,13 @@ class AssistantController:
             try:
                 return self._undo_chain_locked(allow_unverified)
             except Exception as exc:
-                return self.emit("error", text=f"تعذّر التراجع: {type(exc).__name__}: {sanitize_display(exc, 300)}")
+                self._log_exc("خطأ أثناء التراجع عن السلسلة", exc)
+                return self.emit("error", text=MSG_UNDO_FAILED)
 
     def _undo_guard(self):
         """رسالة رفض إن كان التراجع غير ممكن الآن، وإلا None."""
-        if self.state == RUNNING:
-            return "لا يمكن التراجع أثناء التنفيذ. أوقف المهمة أولاً."
         if self.state != IDLE:
-            return "ألغِ الخطة الحالية أو انتظر انتهاءها قبل التراجع."
+            return MSG_UNDO_BUSY
         return None
 
     def _undo_core(self, task_id, untagged, allow_unverified=False):
@@ -685,15 +876,15 @@ class AssistantController:
         if task_id in self._chain and remaining == 0:
             self._chain.remove(task_id)
         for note in notes:
-            self.emit("status", text=sanitize_display(note, 300))
+            self.emit("info", text=sanitize_display(note, 300), notice=True)   # رسالة دائمة في المحادثة لا سطر حالة يُمحى
         if unverified:   # لا نُنفّذ ما لا يمكن التحقق من أصله بصمت: نطلب تأكيداً
             if n:
                 self.emit("undo", count=n, task_id=task_id or "", remaining=remaining, skipped=skipped, partial=True, reason="")
             return self._emit_confirm(unverified, reason, "last")
         if n == 0:
             if remaining > 0:
-                why = f" — {reason}" if reason else " (قد تكون الملفات تغيّرت يدوياً أو توجد مهام أحدث)"
-                return self.emit("error", text=f"تعذّر التراجع: بقيت {remaining} عملية لم تُستعد{why}. راجع الملاحظات ثم أعد المحاولة.")
+                why = f" — {reason}" if reason else " (قد تكون الملفات تغيّرت أو توجد مهام أحدث)"
+                return self.emit("error", text=f"تعذّر التراجع: بقيت {n_units(remaining, 'عملية')} لم يُتراجع عنها{why}. انظر الرسائل أعلاه ثم أعد المحاولة.")
             why = f": {reason}" if reason else " (تم سابقاً، أو اختفى ناتجها، أو توجد مهام أحدث)"
             return self.emit("error", text=f"لا يوجد ما يمكن التراجع عنه لهذه المهمة{why}.")
         self.emit("undo", count=n, task_id=task_id or "", remaining=remaining, skipped=skipped,
@@ -742,7 +933,7 @@ class AssistantController:
                 self._chain.clear()   # لا شيء يُتراجع عنه وبلا عائق: السلسلة منتهية فلا تُعاد رسالة الخطأ كل مرة
                 return self.emit("info", text="لا يوجد ما يمكن التراجع عنه في هذه السلسلة (تم التراجع عنها سابقاً أو اختفى ناتجها).")
             why = f" — {last_reason}" if last_reason else ""
-            return self.emit("error", text=f"تعذّر التراجع عن السلسلة{why}. راجع الملاحظات.")
+            return self.emit("error", text=f"تعذّر التراجع عن آخر طلب{why}. انظر الرسائل أعلاه.")
         self.emit("undo", count=total_n, task_id="", remaining=last_remaining, skipped=total_skipped, tasks=tasks,
                   chain_left=left, partial=bool(last_remaining or total_skipped or last_reason or left), reason=last_reason)
 
@@ -776,8 +967,8 @@ class AssistantController:
             name = self._safe_report_name(task_id)
             tmp = d / f".{name}.tmp"
             tmp.write_text(self._clean_report_text(text), encoding="utf-8")
-            os.replace(tmp, d / f"{name}.txt")
-            files = sorted(d.glob("*.txt"), key=lambda f: f.stat().st_mtime)
+            retry_io(os.replace, tmp, d / f"{name}.txt")   # ويندوز: قارئ/مضاد فيروسات قد يقفل الهدف لحظياً
+            files = sorted(d.glob("*.txt"), key=lambda f: (f.stat().st_mtime, f.name))   # تعادل الوقت: بالاسم
             for old in files[:-200]:
                 try:
                     old.unlink()
@@ -792,7 +983,7 @@ class AssistantController:
         if not self.reports_dir:
             return out
         try:
-            files = sorted(Path(self.reports_dir).glob("*.txt"), key=lambda f: f.stat().st_mtime, reverse=True)[:max(1, int(limit))]
+            files = sorted(Path(self.reports_dir).glob("*.txt"), key=lambda f: (f.stat().st_mtime, f.name), reverse=True)[:max(1, int(limit))]
             import time
             for f in files:
                 try:

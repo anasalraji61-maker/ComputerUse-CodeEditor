@@ -52,7 +52,7 @@ try:
         mv = PlanStep(2, "move", "a.txt", {"dest": "dest/a.txt"})
         snap_mv = ver.snapshot(mv)
         ok, _, err = ver.verify_step(mv, None, snap_mv)
-        assert ok is False and "دليل" in err
+        assert ok is False and "ما يثبت" in err
         ok, _, err = ver.verify_step(mv, {}, snap_mv)
         assert ok is False
 

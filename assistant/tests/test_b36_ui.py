@@ -46,7 +46,7 @@ try:
         ws = tmp / "ws"
         ws.mkdir()
         for f in files:
-            (ws / f).write_text(f)
+            (ws / f).write_text(f, encoding="utf-8")
         led = SQLiteLedger(tmp / "l.db", initial_balance=balance, spending_limit=1000)
         c = AssistantController(Prov(plan_fn), ws, led, reports_dir=(tmp / "reports") if reports else None)
         return c, ws, tmp
@@ -190,7 +190,7 @@ try:
         w_.mkdir()
         for f in files:
             (w_ / f).parent.mkdir(parents=True, exist_ok=True)
-            (w_ / f).write_text("x")
+            (w_ / f).write_text("x", encoding="utf-8")
         return AssistantController(RuleProvider(), w_, SQLiteLedger(t / "l.db", initial_balance=100, spending_limit=100)), w_
 
     def first(c, kinds, t=8):
@@ -253,7 +253,7 @@ try:
             return json.dumps({"questions": ["؟"]}) if "CLARIFY" in system_prompt else json.dumps({"steps": [st(1, "inspect", "a.txt")]})
     t = pathlib.Path(tempfile.mkdtemp(prefix="b36_q_")).resolve()
     (t / "ws").mkdir()
-    (t / "ws" / "a.txt").write_text("x")
+    (t / "ws" / "a.txt").write_text("x", encoding="utf-8")
     c = AssistantController(AlwaysAsk(), t / "ws", SQLiteLedger(t / "l.db", initial_balance=100, spending_limit=100))
     c.submit_request("x")
     assert first(c, ("questions",))
@@ -281,9 +281,9 @@ try:
     emp = pathlib.Path(tempfile.mkdtemp(prefix="b36_empty_"))
     assert W.workspace_is_empty(emp) is True
     (emp / ".trash").mkdir()
-    (emp / ".undo_journal.json").write_text("[]")
+    (emp / ".undo_journal.json").write_text("[]", encoding="utf-8")
     assert W.workspace_is_empty(emp) is True   # المخفي لا يُحسب
-    (emp / "f.txt").write_text("x")
+    (emp / "f.txt").write_text("x", encoding="utf-8")
     assert W.workspace_is_empty(emp) is False
 
     c, ws, tmp = mk(plan1, files=())
@@ -348,14 +348,14 @@ try:
             w._on_undo_all()
         finally:
             messagebox.askyesno = real_ask
-        assert asked and "2" in asked[0][1]
+        assert asked and "مهمتين" in asked[0][1]
         end = time.time() + 5
         while time.time() < end and "في 2 مهمة" not in w.chat.get("1.0", "end"):
             for ev in c.drain_events():
                 w.handle_event(ev)
             root.update()
             time.sleep(0.02)
-        assert "تم التراجع عن 2 عملية في 2 مهمة" in w.chat.get("1.0", "end")
+        assert "تم التراجع عن عمليتين في مهمتين" in w.chat.get("1.0", "end")
     finally:
         root.destroy()
     print("ok 7: widget")

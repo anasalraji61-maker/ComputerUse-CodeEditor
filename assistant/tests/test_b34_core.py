@@ -89,7 +89,7 @@ try:
         # التراجع يذكر الحجم
         r.file_manager.undo_notes.clear()
         assert r.undo_task("lin2") >= 5
-        assert any("KB" in n or "MB" in n for n in r.file_manager.undo_notes), r.file_manager.undo_notes
+        assert any("كيلوبايت" in n or "ميجابايت" in n for n in r.file_manager.undo_notes), r.file_manager.undo_notes
 
     # وجهة نسخة سابقة تُعدّ مصدراً جديداً: سلسلة نسخ A->B->C->D تُحسب 3 أضعاف
     with tempfile.TemporaryDirectory() as tmp:
@@ -142,7 +142,7 @@ try:
     with tempfile.TemporaryDirectory() as tmp:
         steps = [st(1, "create_dir", "Arc"), st(2, "copy", "a.txt", dest="Arc/a.txt"), st(3, "copy", "d", dest="Arc/d")]
         root, r = mk(tmp, steps)
-        (root / "a.txt").write_text("hi"); (root / "d").mkdir(); (root / "d" / "q").write_text("q")
+        (root / "a.txt").write_text("hi", encoding="utf-8"); (root / "d").mkdir(); (root / "d" / "q").write_text("q", encoding="utf-8")
         rep = r.run("ok", "x", plan=r.make_plan("x"))
         assert rep.success, rep.failures
 
@@ -228,9 +228,9 @@ try:
     with tempfile.TemporaryDirectory() as tmp:
         from assistant.models.rules import RuleProvider
         root = pathlib.Path(tmp).resolve() / "w"; root.mkdir()
-        (root / "ok\u0301.txt").write_text("1")
-        (root / "bad\u200b.txt").write_text("1")
-        (root / "نحن\u200cهم.txt").write_text("1")
+        (root / "ok\u0301.txt").write_text("1", encoding="utf-8")
+        (root / "bad\u200b.txt").write_text("1", encoding="utf-8")
+        (root / "نحن\u200cهم.txt").write_text("1", encoding="utf-8")
         led = SQLiteLedger(db_path=pathlib.Path(tmp) / "l.db")
         r = TaskRunner(root, RuleProvider(), led)
         listing = r.workspace_listing()
@@ -294,7 +294,7 @@ try:
     with tempfile.TemporaryDirectory() as tmp:
         steps = [st(1, "copy", "docs", dest="archive"), st(2, "copy", "r.pdf", dest="docs/r.pdf")]
         root, r = mk(tmp, steps)
-        (root / "docs").mkdir(); (root / "docs" / "a.txt").write_text("a"); (root / "r.pdf").write_bytes(b"1" * 10)
+        (root / "docs").mkdir(); (root / "docs" / "a.txt").write_text("a", encoding="utf-8"); (root / "r.pdf").write_bytes(b"1" * 10)
         chk = r._preflight_budget(r.make_plan("x"))
         assert chk.total == 1 + 10 and not chk.over_cap, chk.total
         rep = r.run("fp", "x", plan=r.make_plan("x"))
@@ -366,7 +366,7 @@ try:
         (ws / "f.bin").write_bytes(b"1" * 400)
         fm.copy("f.bin", "a.bin")
         fm.undo_all()
-        assert any("B" in n for n in fm.undo_notes), fm.undo_notes
+        assert any("بايت" in n for n in fm.undo_notes), fm.undo_notes
         fm.trash_cap_bytes = 100          # السلة (400 بايت) فوق السقف: لا نسخ جديد ولا حذف نهائي آلي
         raises(CopyBudgetExceededError, fm.copy, "f.bin", "b.bin")
         assert (ws / ".trash").exists() and not (ws / "b.bin").exists()
@@ -408,7 +408,7 @@ try:
         from assistant.models.rules import RuleProvider
         root = pathlib.Path(tmp).resolve() / "w"; root.mkdir()
         for n in ["photo (1).tmp", "photo.jpg", "~$cv.docx", "cv.docx", "x.tmp", "a", "a.txt", "keep.pdf"]:
-            (root / n).write_text("x")
+            (root / n).write_text("x", encoding="utf-8")
         (root / "Docs").mkdir()
         r = TaskRunner(root, RuleProvider(), SQLiteLedger(db_path=pathlib.Path(tmp) / "l.db"))
         plan, note = r.make_plan_with_note("احذف الملفات المؤقتة")
@@ -416,7 +416,7 @@ try:
         (root / "cv.docx").unlink(); (root / "photo.jpg").unlink()    # بلا مستند/صورة أصلية: القفل اليتيم والنسخة اليتيمة يُحذفان كالمعتاد
         plan2, _ = r.make_plan_with_note("احذف الملفات المؤقتة")
         assert sorted(x.target for x in plan2) == ["photo (1).tmp", "x.tmp", "~$cv.docx"], [x.target for x in plan2]
-        (root / "cv.docx").write_text("x"); (root / "photo.jpg").write_text("x")
+        (root / "cv.docx").write_text("x", encoding="utf-8"); (root / "photo.jpg").write_text("x", encoding="utf-8")
         assert "~$cv.docx" in note and "photo (1).tmp" in note, note
         plan, note = r.make_plan_with_note("create a backup of Docs")
         assert [(x.action_type, x.target) for x in plan] == [("create_dir", "نسخة_احتياطية"), ("copy", "Docs")], plan
@@ -443,7 +443,7 @@ try:
         assert chk.total == 90000 and chk.over_cap and chk.exact, chk.total
         rep = r.run("big", "x", plan=r.make_plan("x"))
         assert rep.success, rep.failures
-        assert "87.9 KB" in seen[0], seen
+        assert "87.9 كيلوبايت" in seen[0], seen
     # مسح يتجاوز الحدّ: يُعلَن غير دقيق ويطلب موافقة
     import assistant.runner as rn
     with tempfile.TemporaryDirectory() as tmp:
@@ -521,7 +521,7 @@ try:
     # (6) نقل مجلد إلى داخل نفسه يُكشف قبل التنفيذ؛ وسقوط الصبّ بعد نقله/حذفه يمنع الرفض الكاذب
     with tempfile.TemporaryDirectory() as tmp:
         root, r = mk(tmp, [st(1, "create_dir", "New"), st(2, "move", "D", dest="D/sub")])
-        (root / "D").mkdir(); (root / "D" / "f").write_text("1")
+        (root / "D").mkdir(); (root / "D" / "f").write_text("1", encoding="utf-8")
         rep = r.run("mv", "x", plan=r.make_plan("x"))
         assert not rep.success and rep.executed_steps == [] and not (root / "New").exists(), rep.failures
     for variant in (st(3, "delete", "X/c0"), st(3, "move", "X/c0", dest="Y/c0")):

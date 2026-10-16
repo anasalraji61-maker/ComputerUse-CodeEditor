@@ -90,7 +90,7 @@ try:
         assert pump(root, plan_ready)
         w.undo_btn.configure(state="normal")
         w._on_undo()
-        assert "ألغِ الخطة" in chat_text(w) and (base / "ws" / "م1").is_dir()
+        assert "لا يمكن التراجع الآن" in chat_text(w) and (base / "ws" / "م1").is_dir()
         w.cancel_btn.invoke()
 
 

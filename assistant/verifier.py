@@ -11,12 +11,18 @@ from assistant.arabic import n_units
 from assistant.planner import PlanStep, sanitize_display
 from assistant.safety import MUTATING_ACTIONS
 from assistant.tools.winget import WINGET_NOT_FOUND_CODE, WINGET_NOT_FOUND_MSG
-from assistant.tools.files import is_unc_like, check_not_big_cloud_file, CloudFileNotLocalError, CLOUD_HYDRATE_LIMIT
+from assistant.tools.files import (is_unc_like, check_not_big_cloud_file, CloudFileNotLocalError, CLOUD_HYDRATE_LIMIT, _is_link,
+                                   COPY_TMP_PREFIX, RENAME_TMP_PREFIX)
 
-_NO_UPGRADE = re.compile(r"no (applicable|available) upgrade|no newer package|no installed package|no applicable update"
+_NO_UPGRADE = re.compile(r"no (applicable|available) upgrade|no newer package|no applicable update"
                          r"|لا (?:يوجد|توجد|تتوفر|يتوفر)\s+(?:أي\s+)?(?:ترقي|تحديث|إصدار|اصدار)", re.I)
-_VERSIONISH = re.compile(r"\d[\w.+\-]*")
+_NOT_INSTALLED = re.compile(r"no installed package|لم يتم العثور على حزمة مثبّتة|لم يتم العثور على حزمة مثبتة", re.I)
+_VERSIONISH = re.compile(r"\d[\w.+\-]*…?")   # «…»: خلية عمودٍ قصّها winget لضيق الطرفية
+_ELLIPSIS = "…"
+MIN_TRUNC_PREFIX = 8                        # أقصر بادئة معرّف مقصوص نقبل مطابقتها (تفادياً لحزمة أخرى)
 VersionProbe = Callable[[str], Tuple[int, str, str]]
+WS_MAX_ENTRIES = 20000      # أكبر مجلد عمل نقارنه كاملاً قبل/بعد الخطة (D7)؛ الأكبر يُتخطّى بتنبيه لا بفشل
+WS_MAX_SECONDS = 4.0
 
 
 def _d(value: Any, limit: int = 120) -> str:
@@ -27,6 +33,12 @@ def _d(value: Any, limit: int = 120) -> str:
 
 # رموز خروج winget (HRESULT) تعني «لا تحديث ينطبق» وليست فشلاً حقيقياً
 _WINGET_NOT_APPLICABLE = {0x8A15002B, 0x8A150061}   # UPDATE_NOT_APPLICABLE, PACKAGE_ALREADY_INSTALLED
+_WINGET_NOT_INSTALLED = 0x8A150014                    # NO_APPLICATIONS_FOUND: لا حزمة مثبّتة بهذا المعرّف
+_WINGET_REBOOT = {0x8A150109, 0x8A15010A}             # تم التثبيت ويلزم/بدأت إعادة تشغيل: ليس فشلاً إن أثبت الفحص المستقل تغيّر الإصدار
+
+
+def _u32(code: Any) -> Optional[int]:
+    return (code & 0xFFFFFFFF) if isinstance(code, int) and not isinstance(code, bool) else None
 
 
 def _fmt_code(code: Any) -> str:
@@ -178,6 +190,134 @@ class Verifier:
                 snap["probe_line"] = None
         return snap
 
+    # ---------- D7: مقارنة مجلد العمل كله قبل/بعد الخطة ----------
+    def workspace_snapshot(self, max_entries: Optional[int] = None, max_seconds: Optional[float] = None) -> Optional[Dict[str, Tuple[str, int, str]]]:
+        """قائمة كل عناصر مجلد العمل (اسم نسبي مطوي الحروف ← (نوع، حجم، الاسم الأصلي)) دون قراءة المحتوى؛ تستثني .trash و.undo_journal* في الجذر
+        وملفات النسخ/إعادة التسمية المؤقتة الخاصة بالمساعد. None إن تجاوز المجلد الحدّ (عناصر/وقت) فلا مقارنة بدل مقارنة ناقصة."""
+        max_entries = WS_MAX_ENTRIES if max_entries is None else max_entries
+        max_seconds = WS_MAX_SECONDS if max_seconds is None else max_seconds
+        root = self.allowed_root
+        t0 = time.monotonic()
+        out: Dict[str, Tuple[str, int, str]] = {}
+        stack: List[Tuple[Path, str]] = [(root, "")]
+        while stack:
+            d, rel_d = stack.pop()
+            try:
+                it = os.scandir(str(d))
+            except OSError:
+                continue
+            with it:
+                while True:
+                    if self.kill_switch is not None:
+                        self.kill_switch.check()
+                    try:
+                        e = next(it)
+                    except StopIteration:
+                        break
+                    except OSError:
+                        break
+                    name = e.name
+                    if not rel_d and (name == ".trash" or name.startswith(".undo_journal")):
+                        continue
+                    if name.startswith((COPY_TMP_PREFIX, RENAME_TMP_PREFIX)):
+                        continue
+                    rel = (rel_d + "/" + name) if rel_d else name
+                    try:
+                        link = _is_link(Path(e.path))
+                        is_dir = (not link) and e.is_dir(follow_symlinks=False)
+                        size = 0 if (is_dir or link) else e.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+                    out[rel.casefold()] = ("l" if link else ("d" if is_dir else "f"), size, rel)
+                    if len(out) > max_entries or time.monotonic() - t0 > max_seconds:
+                        return None
+                    if is_dir:
+                        stack.append((Path(e.path), rel))
+        return out
+
+    def _ws_rel(self, value: Any) -> Optional[str]:
+        """مسار (مطلق أو نسبي) ← صيغة نسبية مطوية الحروف داخل الجذر، أو None."""
+        if not isinstance(value, (str, Path)) or str(value).strip() == "":
+            return None
+        try:
+            p = Path(str(value))
+            p = p if p.is_absolute() else self.allowed_root / p
+            rel = Path(os.path.normpath(str(p))).relative_to(self.allowed_root)
+        except (ValueError, OSError):
+            try:
+                rel = p.resolve().relative_to(self.allowed_root)
+            except Exception:
+                return None
+        r = rel.as_posix()
+        return "" if r == "." else r.casefold()
+
+    def verify_workspace(self, plan_steps: List[PlanStep], infos: Optional[Dict[int, Dict[str, Any]]],
+                         skipped_ids, ws_before, ws_after) -> Tuple[bool, Dict[str, Any], Optional[str]]:
+        """D7: كل فرق بين لقطتي مجلد العمل (أُنشئ/حُذف/تغيّر حجمه) يجب أن تفسّره خطوة منفّذة من الخطة؛ غير ذلك يفشل التدقيق."""
+        ev: Dict[str, Any] = {"item": "مجلد العمل كله", "type": "مقارنة مجلد العمل"}
+        infos = infos or {}
+        steps = [s for s in plan_steps if s.step_id not in (skipped_ids or ())]
+        if any(s.action_type.strip().lower() == "run_command" for s in steps):
+            ev["value"] = "لم تُجرَ: الخطة تشغّل أمراً قد يغيّر الملفات بما لا يمكن توقعه"
+            return True, ev, None
+        if ws_before is None or ws_after is None:
+            ev["value"] = f"لم تُجرَ: مجلد العمل كبير (أكثر من {WS_MAX_ENTRIES} عنصر) أو تعذّرت قراءته في الوقت المحدد"
+            return True, ev, None
+        removed_ok: List[str] = []     # مناطق (شجرات) يجوز أن تختفي
+        added_ok: List[str] = []       # مناطق يجوز أن تظهر
+        anc_ok: set = set()            # مجلدات أصل أُنشئت ضمناً
+        for s in steps:
+            a = s.action_type.strip().lower()
+            if a not in MUTATING_ACTIONS:
+                continue
+            tgt = self._ws_rel(s.target)
+            info = infos.get(s.step_id) or {}
+            if a in ("delete", "trash", "move", "rename") and tgt:
+                removed_ok.append(tgt)
+            dest = None
+            if a in ("move", "copy", "rename"):
+                dest = self._ws_rel(info.get("dest"))
+                if dest is None and a == "rename" and tgt is not None:
+                    dest = self._ws_rel(Path(str(s.target)).parent / str(s.params.get("new_name", "")))
+                if dest is None:
+                    dest = self._ws_rel(s.params.get("dest"))
+            elif a == "create_dir":
+                dest = tgt
+            if dest:
+                added_ok.append(dest)
+                parts = dest.split("/")
+                for i in range(1, len(parts)):
+                    anc_ok.add("/".join(parts[:i]))
+
+        def covered(key: str, regions: List[str]) -> bool:
+            return any(key == r or key.startswith(r + "/") for r in regions)
+
+        added = [k for k in ws_after if k not in ws_before]
+        removed = [k for k in ws_before if k not in ws_after]
+        changed = [k for k in ws_after if k in ws_before and ws_before[k][0] == "f" and ws_after[k][0] == "f" and ws_before[k][1] != ws_after[k][1]]
+        kindchg = [k for k in ws_after if k in ws_before and ws_before[k][0] != ws_after[k][0]]
+        bad_add = [k for k in added if not covered(k, added_ok) and not (k in anc_ok and ws_after[k][0] == "d")]
+        bad_rem = [k for k in removed if not covered(k, removed_ok)]
+        bad_chg = [k for k in changed if not covered(k, added_ok) and not covered(k, removed_ok)]
+        bad_kind = [k for k in kindchg if not covered(k, added_ok) and not covered(k, removed_ok)]
+        if bad_add or bad_rem or bad_chg or bad_kind:
+            def names(keys, snap):
+                return "، ".join("«" + _d(snap[k][2], 60) + "»" for k in sorted(keys)[:4]) + (" …" if len(keys) > 4 else "")
+            parts = []
+            if bad_add:
+                parts.append(f"{n_units(len(bad_add), 'عنصر', 'acc')} جديداً لم تطلبه الخطة ({names(bad_add, ws_after)})")
+            if bad_rem:
+                parts.append(f"اختفاء {n_units(len(bad_rem), 'عنصر')} لم تشمله الخطة ({names(bad_rem, ws_before)})")
+            if bad_chg or bad_kind:
+                both = bad_chg + bad_kind
+                parts.append(f"تغيّر {n_units(len(both), 'عنصر')} خارج الخطة ({names(both, ws_after)})")
+            msg = ("تغييرات غير متوقعة في مجلد العمل خارج ما رسمته الخطة: " + "؛ ".join(parts)
+                   + ". قد يكون برنامج آخر يكتب في المجلد الآن أو تصرّفاً غير مقصود؛ راجع المجلد ويمكنك التراجع عن هذه المهمة.")
+            ev["value"] = msg
+            return False, ev, msg
+        ev["value"] = f"لا تغييرات خارج الخطة ({n_units(len(ws_before), 'عنصر')} قبل، {n_units(len(ws_after), 'عنصر')} بعد)"
+        return True, ev, None
+
     MAX_LISTED = 40
 
     def _listing(self, p: Path) -> str:
@@ -197,24 +337,46 @@ class Verifier:
         return f" — يحوي {n_units(len(names), 'عنصر', 'acc')}: {shown}{more}"
 
     @staticmethod
-    def _package_line(out: str, pkg: str) -> str:
-        """سطر الحزمة بمطابقة معرّفها كاملاً (عمود Id) لا كجزء من معرّف آخر: Git.GitLFS ليس Git.Git."""
+    def _id_index(toks: List[str], want: str) -> int:
+        """موضع عمود Id في الأسطر: مطابقة كاملة أولاً، وإلا معرّف مقصوص بـ«…» (طرفية ضيقة) بشرط بادئة كافية الطول."""
+        low = [t.lower() for t in toks]
+        if want and want in low:
+            return low.index(want)
+        for i, t in enumerate(low):
+            if t.endswith(_ELLIPSIS) and len(t) - 1 >= MIN_TRUNC_PREFIX and want.startswith(t[:-1]):
+                return i
+        return -1
+
+    @classmethod
+    def _package_line(cls, out: str, pkg: str) -> str:
+        """سطر الحزمة بمطابقة معرّفها (عمود Id) لا كجزء من معرّف آخر: Git.GitLFS ليس Git.Git. المعرّف المقصوص بـ«…» يُقبل
+        فقط إن لم يوجد سطر بمعرّف كامل (مطابقة كاملة لها الأسبقية)."""
         want = (pkg or "").strip().lower()
-        for ln in (out or "").splitlines():
-            if want and want in (tok.lower() for tok in ln.split()):
+        if not want:
+            return ""
+        lines = (out or "").splitlines()
+        for ln in lines:
+            if want in (tok.lower() for tok in ln.split()):
+                return _d(ln, 160)
+        for ln in lines:
+            if cls._id_index(ln.split(), want) >= 0:
                 return _d(ln, 160)
         return ""
 
-    @staticmethod
-    def _still_upgradable(line: str, pkg: str) -> bool:
-        """هل يظهر في سطر الحزمة عمود «Available» بإصدار مختلف عن المثبّت؟ (مستقل عن لغة رسائل winget)"""
+    @classmethod
+    def _still_upgradable(cls, line: str, pkg: str) -> bool:
+        """هل يظهر في سطر الحزمة عمود «Available» بإصدار مختلف عن المثبّت؟ (مستقل عن لغة رسائل winget).
+        قيمة مقصوصة بـ«…» تُعدّ إصداراً ثانياً: winget لا يملأ الخلية إلا إن وُجد إصدار مختلف."""
         toks = line.split()
-        low = [t.lower() for t in toks]
-        want = (pkg or "").strip().lower()
-        if want not in low:
+        i = cls._id_index(toks, (pkg or "").strip().lower())
+        if i < 0:
             return False
-        vers = [t for t in toks[low.index(want) + 1:] if _VERSIONISH.fullmatch(t)]
-        return len(vers) >= 2 and vers[0] != vers[1]
+        vers = [t for t in toks[i + 1:] if _VERSIONISH.fullmatch(t)]
+        if len(vers) < 2:
+            return False
+        if vers[0].endswith(_ELLIPSIS) or vers[1].endswith(_ELLIPSIS):
+            return True
+        return vers[0] != vers[1]
 
     # ---------- التدقيق بعد التنفيذ ----------
     def verify_step(
@@ -230,20 +392,26 @@ class Verifier:
 
         # R17: لا دليل تنفيذ = فشل
         if not info or info.get("step_id") != step.step_id:
-            return fail(f"لا يوجد دليل تنفيذ للخطوة {step.step_id}؛ لا يُعتبر منفذاً.")
+            return fail(f"لم أجد ما يثبت تنفيذ الخطوة {step.step_id}، فلن أعدّها منفّذة.")
         if action == "winget_upgrade" and info.get("exit_code") == WINGET_NOT_FOUND_CODE and WINGET_NOT_FOUND_MSG in str(info.get("stderr", "")):
             return fail(WINGET_NOT_FOUND_MSG)   # winget غير موجود: رسالة عربية واضحة لا «رمز 127»
-        if action == "winget_upgrade":   # «لا تحديث ينطبق» يُحكم قبل رسالة الفشل العامة
+        reboot = False
+        if action == "winget_upgrade":
             code = info.get("exit_code")
-            if (isinstance(code, int) and not isinstance(code, bool) and (code & 0xFFFFFFFF) in _WINGET_NOT_APPLICABLE) or \
-                    (not info.get("success") and _NO_UPGRADE.search(str(info.get("stdout", "")) + " " + str(info.get("stderr", "")))):
+            u = _u32(code)
+            out_all = str(info.get("stdout", "")) + " " + str(info.get("stderr", ""))
+            if u == _WINGET_NOT_INSTALLED or (u not in (0, None) and _NOT_INSTALLED.search(out_all)):
+                return fail(f"الحزمة «{_d(step.target, 80)}» غير مثبّتة على هذا الجهاز فلا شيء لتحديثه (رمز {_fmt_code(code)})."
+                            + _out_tail(info))
+            if (u in _WINGET_NOT_APPLICABLE) or (not info.get("success") and _NO_UPGRADE.search(out_all)):   # «لا تحديث ينطبق» قبل رسالة الفشل العامة
                 return fail(f"لا يوجد تحديث متاح: الحزمة محدّثة أصلاً أو لا ينطبق عليها تحديث (رمز {_fmt_code(code)})."
                             + _out_tail(info))
-        if not info.get("success"):
+            reboot = u in _WINGET_REBOOT
+        if not info.get("success") and not reboot:
             return fail(f"المنفّذ أبلغ عن عدم نجاح الخطوة {step.step_id}."
                         + (f" رمز الخروج {_fmt_code(info.get('exit_code'))}." + _out_tail(info) if action == "winget_upgrade" else ""))
         if before is None or before.get("invalid"):
-            return fail(f"لا توجد لقطة صالحة قبل التنفيذ للخطوة {step.step_id}: {_d((before or {}).get('invalid', 'مفقودة'), 200)}")
+            return fail(f"تعذّر التأكد من نتيجة الخطوة {step.step_id} لأن حالة الملف قبل التنفيذ غير معروفة: {_d((before or {}).get('invalid', 'مفقودة'), 200)}")
 
         try:
             if action == "inspect":
@@ -290,31 +458,37 @@ class Verifier:
                 return True, ev, None
 
             if action == "winget_upgrade":
-                if info.get("exit_code") != 0:
-                    return fail(f"فشل الأمر: رمز الخروج {_fmt_code(info.get('exit_code'))} بدلاً من 0." + _out_tail(info))
+                if info.get("exit_code") != 0 and not reboot:
+                    return fail(f"فشل الأمر (رمز {_fmt_code(info.get('exit_code'))})." + _out_tail(info))
                 if self.version_probe is None:
                     return fail("لا توجد أداة تحقق مستقلة لـ winget؛ لا يمكن تأكيد النجاح.")
                 code, out, _err = self.version_probe(step.target)
                 after_line = self._package_line(out, step.target)
                 if code != 0 or not after_line:
                     return fail(f"الفحص المستقل لم يجد الحزمة '{_d(step.target)}' (رمز {code}).")
-                ev["type"] = "رمز الخروج + فحص مستقل"
+                ev["type"] = "رمز الخروج + فحص مستقل"   # الاسم ثابت: تعتمد عليه المراجعة والاختبارات
                 before_line = (before or {}).get("probe_line")
+                if reboot:   # الرمز وحده لا يكفي: نشترط أن يُظهر الفحص المستقل تغيّر سطر الحزمة فعلاً
+                    if not (before_line and after_line and before_line != after_line):
+                        return fail(f"أبلغ winget عن إعادة تشغيل مطلوبة لكن الفحص المستقل لم يُظهر تغيّر إصدار الحزمة: {after_line}")
+                    ev["value"] = (f"تمت الترقية ويلزم إعادة تشغيل الجهاز لإكمالها (رمز {_fmt_code(info.get('exit_code'))}). "
+                                   f"قبل: {before_line} ← بعد: {after_line}")
+                    return True, ev, None
                 if before_line and after_line and before_line == after_line:
                     if _NO_UPGRADE.search(str(info.get("stdout", "")) + " " + str(info.get("stderr", ""))):
                         return fail(f"لا يوجد تحديث متاح: الحزمة محدّثة أصلاً (لم يتغير سطرها): {after_line}")
                     if self._still_upgradable(after_line, step.target):  # الدليل من القرص نفسه: سطرها لم يتغير وإصدار أحدث ما زال متاحاً
                         return fail(f"لم تتم الترقية: سطر الحزمة لم يتغير وإصدار أحدث ما زال متاحاً: {after_line}")
-                    ev["value"] = f"0 والحزمة ظاهرة، لكن سطرها لم يتغير: {after_line}"
+                    ev["value"] = f"الحزمة ظاهرة لكن سطرها لم يتغير: {after_line}"
                 elif before_line and after_line:
-                    ev["value"] = f"0 والحزمة ظاهرة. قبل: {before_line} ← بعد: {after_line}"
+                    ev["value"] = f"تم التحديث. قبل: {before_line} ← بعد: {after_line}"
                 else:
-                    ev["value"] = f"0 والحزمة ظاهرة في list: {_d(step.target)}"
+                    ev["value"] = f"الحزمة ظاهرة في قائمة البرامج المثبّتة: {_d(step.target)}"
                 return True, ev, None
 
             if action == "run_command":
                 if info.get("exit_code") != 0:
-                    return fail(f"فشل الأمر: رمز الخروج {_d(info.get('exit_code'), 20)} بدلاً من 0.")
+                    return fail(f"فشل الأمر (رمز {_d(info.get('exit_code'), 20)}).")
                 expected = step.params.get("expected_output")
                 out = str(info.get("stdout", ""))
                 if isinstance(expected, str) and expected and expected not in out:
@@ -364,13 +538,13 @@ class Verifier:
                 want = want[len("sha256:"):].strip()
             if not actual.is_file() or self.calculate_hash(actual).lower() != want:
                 got = self.calculate_hash(actual) if actual.is_file() else "DIR"
-                return fail(f"عدم تطابق البصمة للملف '{_d(actual.name)}': متوقع {want}، الفعلي {got}.")
+                return fail(f"عدم تطابق البصمة: محتوى الملف «{_d(actual.name)}» لا يطابق المتوقع (البصمة المتوقعة {want[:12]}…، الفعلية {got[:12]}…).")
 
         ev["type"] = "ملف موجود ومطابق"
-        ev["value"] = f"{after_digest[:18]}… (مطابق للأصل قبل التنفيذ)" if not meta else \
-            f"{after_digest[:18]}… (الحجم والتاريخ مطابقان للأصل)" + self._meta_note(meta)
+        ev["value"] = "المحتوى مطابق للأصل" if not meta else \
+            "الحجم والتاريخ مطابقان للأصل" + self._meta_note(meta)
         if not any(actual == c for c in candidates):  # هبط على اسم فريد «name (1).ext» لأن المخطط موجود أصلاً
-            ev["value"] += f" — destination renamed to {_d(actual.name)} (الوجهة أُعيدت تسميتها إلى «{_d(actual.name)}» لوجود اسم مطابق)"
+            ev["value"] += f" — الوجهة أُعيدت تسميتها إلى «{_d(actual.name)}» لأن الاسم المطلوب موجود"
         return True, ev, None
 
     def verify_journal(
@@ -404,10 +578,10 @@ class Verifier:
                     time.sleep(0.25)
         if data is None:
             ev["value"] = "مفقود أو تالف"
-            return False, ev, "سجل التراجع .undo_journal.json مفقود أو تالف على القرص!"
+            return False, ev, "ملف التراجع مفقود أو تالف، فقد لا يمكن التراجع عن هذه المهمة."
         if not isinstance(data, list) or len(data) - journal_start < need:
             ev["value"] = "ناقص"
-            return False, ev, f"سجل التراجع لا يحوي عمليات هذه المهمة كاملة (المطلوب {n_units(need, 'عملية')})."
+            return False, ev, f"ملف التراجع لا يحوي تغييرات هذه المهمة كاملة (المطلوب {n_units(need, 'عملية')})."
         missing = self._unjournaled_steps(plan_steps, befores, data[journal_start:])
         if missing:
             ev["value"] = "ناقص"

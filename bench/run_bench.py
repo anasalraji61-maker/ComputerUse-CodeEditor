@@ -94,14 +94,75 @@ def _check3(r, ctx):
     return f
 
 
+class WingetSim:
+    """محاكي winget بحالة: حزمة Git.Git مثبّتة بإصدار قديم ولها إصدار أحدث متاح. يعيد جداول وأكواد خروج بشكل winget الحقيقي
+    (الأكواد من returnCodes.md: 0x8A150014 غير مثبّتة، 0x8A15002B لا ترقية)، وتغيّر الترقية الصحيحة إصدار الحزمة فعلاً.
+    خلافاً للمحاكاة القديمة (0 و«Successfully upgraded» لكل أمر) يمكن أن يفشل الفحص حين يكون السلوك خاطئاً.
+    lying=True: يدّعي النجاح (0) دون تغيير الإصدار، لاختبار أن الفحص يكتشف الكذب."""
+    NOT_FOUND = 0x8A150014
+    NOT_APPLICABLE = 0x8A15002B
+
+    def __init__(self, lying: bool = False, installed=None):
+        # id -> [name, version, latest]
+        self.pkgs = {k: list(v) for k, v in (installed or {"Git.Git": ("Git", "2.45.0", "2.46.0")}).items()}
+        self.lying = lying
+        self.calls: List[List[str]] = []
+
+    def _table(self, ids) -> str:
+        rows = [(self.pkgs[i][0], i, self.pkgs[i][1], self.pkgs[i][2] if self.pkgs[i][2] != self.pkgs[i][1] else "") for i in ids]
+        head = ["Name", "Id", "Version", "Available", "Source"]
+        body = [[n, i, v, a, "winget"] for n, i, v, a in rows]
+        w = [max(len(h), *(len(r[k]) for r in body)) for k, h in enumerate(head)]
+        fmt = lambda r: " ".join(c.ljust(w[k]) for k, c in enumerate(r)).rstrip()
+        return fmt(head) + "\n" + "-" * (sum(w) + 4) + "\n" + "\n".join(fmt(r) for r in body) + "\n"
+
+    def version(self, pkg_id: str) -> Optional[str]:
+        p = self.pkgs.get(pkg_id)
+        return p[1] if p else None
+
+    def __call__(self, cmd):
+        self.calls.append(list(cmd))
+        if cmd[:2] == ["winget", "list"] and "-q" in cmd:
+            q = cmd[cmd.index("-q") + 1].lower()
+            ids = [i for i in self.pkgs if q in i.lower()]
+            if not ids:
+                return self.NOT_FOUND, "No installed package found matching input criteria.\n", ""
+            return 0, self._table(ids), ""
+        if cmd[:2] == ["winget", "upgrade"] and "--id" in cmd:
+            pid = cmd[cmd.index("--id") + 1]
+            if "--exact" not in cmd or pid not in self.pkgs:
+                return self.NOT_FOUND, "No installed package found matching input criteria.\n", ""
+            p = self.pkgs[pid]
+            if p[1] == p[2]:
+                return self.NOT_APPLICABLE, "No available upgrade found.\n", ""
+            if not self.lying:
+                p[1] = p[2]
+            return 0, f"Found {p[0]} [{pid}] Version {p[2]}\nSuccessfully installed\n", ""
+        return 1, "", "unsupported in simulator: " + " ".join(cmd)
+
+
 def _setup4(r):
     pass
 
 
 def _check4(r, ctx):
-    calls = ctx.get("winget_calls", [])
-    ok = any(c[:2] == ["winget", "upgrade"] and "Git.Git" in c for c in calls)
-    return [] if ok else ["لم يُستدعَ أمر ترقية Git.Git"]
+    """يفحص حالة المحاكي لا نية الخطة: الإصدار تغيّر فعلاً، والأوامر هي ترقية Git.Git بالمعرّف الدقيق وفحص list فقط."""
+    sim = ctx.get("winget")
+    if sim is None:
+        return ["لا محاكي winget في السياق"]
+    f = []
+    if sim.version("Git.Git") != "2.46.0":
+        f.append(f"إصدار Git.Git بعد التنفيذ {sim.version('Git.Git')} لا 2.46.0 (لم تحدث ترقية فعلية)")
+    ups = [c for c in sim.calls if c[:2] == ["winget", "upgrade"]]
+    if not ups:
+        f.append("لم يُستدعَ أمر ترقية")
+    for c in ups:
+        if c[c.index("--id") + 1:c.index("--id") + 2] != ["Git.Git"] or "--exact" not in c:
+            f.append("أمر ترقية لحزمة غير Git.Git أو بلا --exact: " + " ".join(c[:6]))
+    for c in sim.calls:
+        if c[:2] not in (["winget", "upgrade"], ["winget", "list"]):
+            f.append("أمر winget غير متوقع: " + " ".join(c[:3]))
+    return f
 
 
 def _setup5(r):
@@ -167,7 +228,8 @@ def _totals(provider: ModelProvider) -> Dict[str, Any]:
 
 
 def run_bench(provider: ModelProvider, runs: int = 5, tasks: Optional[List[BenchTask]] = None,
-              max_usd: float = 1.0, progress: Callable[[str], None] = lambda s: None) -> Dict[str, Any]:
+              max_usd: float = 1.0, progress: Callable[[str], None] = lambda s: None,
+              winget_factory: Callable[[], "WingetSim"] = WingetSim) -> Dict[str, Any]:
     tasks = tasks or TASKS
     if not (isinstance(max_usd, (int, float)) and math.isfinite(max_usd) and max_usd > 0):
         raise ValueError("--max-usd يجب أن يكون عدداً موجباً محدوداً.")
@@ -185,11 +247,9 @@ def run_bench(provider: ModelProvider, runs: int = 5, tasks: Optional[List[Bench
                 root = pathlib.Path(tmp).resolve() / "ws"
                 root.mkdir()
                 t.setup(root)
-                ctx: Dict[str, Any] = {"winget_calls": []}
-
-                def mock_winget(cmd, _ctx=ctx):
-                    _ctx["winget_calls"].append(list(cmd))
-                    return 0, "Successfully upgraded Git.Git", ""
+                sim = winget_factory()
+                ctx: Dict[str, Any] = {"winget": sim, "winget_calls": sim.calls}
+                mock_winget = sim
 
                 ledger = SQLiteLedger(pathlib.Path(tmp).resolve() / "l.db", initial_balance=1000, spending_limit=1000)
                 runner = TaskRunner(root, provider, ledger, approver=(lambda s: True) if t.approve else None,
@@ -218,6 +278,36 @@ def run_bench(provider: ModelProvider, runs: int = 5, tasks: Optional[List[Bench
             "stopped_for_budget": stopped_for_budget, "max_usd": max_usd, "totals": _totals(provider)}
 
 
+GATE_RATE = 90.0           # بوابة SPEC: نسبة النجاح (التقدير النقطي) لا تقل عن 90% لكل مهمة
+MIN_GATE_RUNS = 3          # دورة أو دورتان لا تثبتان بوابة مهما كانت نتيجتهما
+
+
+def wilson_lower(ok: int, n: int, z: float = 1.96) -> float:
+    """الحد الأدنى لفاصل ويلسون (95% افتراضياً) لنسبة نجاح ok من n، كنسبة مئوية. n=0 → 0."""
+    if n <= 0:
+        return 0.0
+    ok = min(max(0, ok), n)
+    p = ok / n
+    denom = 1.0 + z * z / n
+    centre = p + z * z / (2 * n)
+    margin = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    return 100.0 * max(0.0, (centre - margin) / denom)
+
+
+def evaluate(res: Dict[str, Any]) -> Dict[str, Any]:
+    """لكل مهمة: نسبة النجاح، حد ويلسون الأدنى 95%، وPASS/FAIL مقابل بوابة SPEC (تقدير نقطي >= 90% مع دورات كافية).
+    الحد الأدنى لويلسون معلومة إضافية للقرار لا شرط في البوابة. gate_ok فقط إن نجحت كل المهام."""
+    required = max(MIN_GATE_RUNS, int(res.get("runs", MIN_GATE_RUNS)))
+    tasks: Dict[str, Dict[str, Any]] = {}
+    for key, r in res["results"].items():
+        n = r["runs"]
+        rate = 100.0 * r["ok"] / n if n else 0.0
+        enough = n >= required
+        tasks[key] = {"title": r["title"], "runs": n, "ok": r["ok"], "rate": rate, "wilson_lower": wilson_lower(r["ok"], n),
+                      "enough_runs": enough, "passed": bool(enough and rate >= GATE_RATE)}
+    return {"required_runs": required, "tasks": tasks, "gate_ok": bool(tasks) and all(t["passed"] for t in tasks.values())}
+
+
 def render_markdown(res: Dict[str, Any]) -> str:
     L = [
         "# تقرير القياس (MEASUREMENT)",
@@ -228,22 +318,25 @@ def render_markdown(res: Dict[str, Any]) -> str:
         f"- أسعار التوكنات مأخوذة من إعدادات المشروع (تحقق منها بتاريخ {PRICES_VERIFIED_ON})، وكلفة النقطة {COST_USD_PER_POINT}$.",
         "- النجاح = تقرير المنظومة «تم» **و**فحص مستقل لحالة القرص بعد التنفيذ. winget محاكى دائماً.",
         "",
-        "| المهمة | الدورات | نسبة النجاح | متوسط الخطوات | متوسط الزمن (ث) | توكنات إدخال | توكنات إخراج | الكلفة ($) | الكلفة (نقطة) |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| المهمة | الدورات | نسبة النجاح | حد ويلسون الأدنى 95% | البوابة | متوسط الخطوات | متوسط الزمن (ث) | توكنات إدخال | توكنات إخراج | الكلفة ($) | الكلفة (نقطة) |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
-    gate_ok = True
+    ev = evaluate(res)
+    gate_ok = ev["gate_ok"]
     tot_usd = 0.0
     for key, r in res["results"].items():
         n = max(1, r["runs"])
-        rate = 100.0 * r["ok"] / n if r["runs"] else 0.0
-        gate_ok &= (r["runs"] >= max(3, int(res.get("runs", 3))) and rate >= 90.0)  # دورة واحدة لا تثبت البوابة
+        t = ev["tasks"][key]
         tot_usd += r["usd"]
-        L.append(f"| {r['title']} | {r['runs']} | {rate:.0f}% ({r['ok']}/{r['runs']}) | {r['steps'] / n:.1f} | "
+        L.append(f"| {r['title']} | {r['runs']} | {t['rate']:.0f}% ({r['ok']}/{r['runs']}) | {t['wilson_lower']:.0f}% | "
+                 f"{'PASS' if t['passed'] else 'FAIL'}{'' if t['enough_runs'] else ' (دورات غير كافية)'} | {r['steps'] / n:.1f} | "
                  f"{r['secs'] / n:.2f} | {r['tin']} | {r['tout']} | {r['usd']:.4f} | {r['usd'] / COST_USD_PER_POINT:.2f} |")
     L += ["", f"**إجمالي الكلفة:** {tot_usd:.4f}$ ≈ {tot_usd / COST_USD_PER_POINT:.2f} نقطة.", ""]
     if res["stopped_for_budget"]:
         L.append(f"> توقف القياس مبكراً عند بلوغ سقف الإنفاق {res['max_usd']}$؛ النتائج جزئية.")
-    L.append(f"**بوابة المرحلة 1 (≥90% لكل مهمة): {'تحققت' if gate_ok else 'لم تتحقق بعد'}.**")
+    L.append(f"**بوابة المرحلة 1 (≥90% لكل مهمة بتقدير نقطي، وبعدد دورات لا يقل عن {ev['required_runs']}): "
+             f"{'تحققت (PASS)' if gate_ok else 'لم تتحقق بعد (FAIL)'}.**")
+    L.append("حد ويلسون الأدنى يبيّن مدى الاطمئنان إحصائياً (مثلاً 20/20 ≈ 84% و10/10 ≈ 72%) ولا يدخل في شرط البوابة.")
     fails = [(r["title"], f) for r in res["results"].values() for f in r["failures"]]
     L += ["", "## الأعطال"]
     if fails:
@@ -254,6 +347,12 @@ def render_markdown(res: Dict[str, Any]) -> str:
 
 
 def main(argv=None) -> int:
+    for _s in (sys.stdout, sys.stderr):   # أنابيب/كونسول غير UTF-8 (cp1252) أو بلا كونسول: الطباعة العربية لا تُسقط الأداة
+        if _s is not None and hasattr(_s, "reconfigure"):
+            try:
+                _s.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
     ap = argparse.ArgumentParser(description="قياس المهام الخمس بمزوّد حقيقي")
     ap.add_argument("--provider", choices=["anthropic", "gemini", "openai", "ollama"], required=True)
     ap.add_argument("--runs", type=int, default=DEFAULT_RUNS, help="دورات لكل مهمة (الافتراضي 20 = بوابة SPEC)")
@@ -261,7 +360,8 @@ def main(argv=None) -> int:
     ap.add_argument("--yes", action="store_true", help="تأكيد صريح بإنفاق الرصيد بلا سؤال تفاعلي")
     ap.add_argument("--ask-key", action="store_true", help="اطلب المفتاح بإدخال مخفي (لا يُعرض ولا يُحفظ)")
     ap.add_argument("--with-rules", action="store_true", help="قياس الوضع المختلط (القواعد أولاً) بدل النموذج وحده")
-    ap.add_argument("--out", default=str(ROOT / "docs" / "MEASUREMENT.md"))
+    ap.add_argument("--write-doc", action="store_true", help="اكتب التقرير في --out (الافتراضي docs/MEASUREMENT.md). بدونه يُطبع فقط ولا يُكتب شيء")
+    ap.add_argument("--out", default=str(ROOT / "docs" / "MEASUREMENT.md"), help="وجهة الكتابة عند --write-doc (لا يُنفَّذ git commit أبداً)")
     args = ap.parse_args(argv)
 
     import os
@@ -299,10 +399,23 @@ def main(argv=None) -> int:
             print("أُلغي القياس ولم يُنفق شيء.")
             return 3
     res = run_bench(provider, runs=args.runs, max_usd=max_usd, progress=print)
-    out = pathlib.Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render_markdown(res), encoding="utf-8")
-    print(f"كُتب التقرير: {out}")
+    md = render_markdown(res)
+    ev = evaluate(res)
+    print()
+    for key, t in ev["tasks"].items():
+        print(f"{key}: {t['ok']}/{t['runs']} = {t['rate']:.0f}% (ويلسون 95% الأدنى {t['wilson_lower']:.0f}%) {'PASS' if t['passed'] else 'FAIL'}")
+    for r in res["results"].values():
+        for f in r["failures"][:5]:
+            print(f"  فشل - {r['title']}: {f}")
+    print(f"البوابة الكلية: {'PASS' if ev['gate_ok'] else 'FAIL'}")
+    if args.write_doc:
+        out = pathlib.Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(md, encoding="utf-8")
+        print(f"كُتب التقرير: {out} (لم يُنفَّذ commit؛ راجعه ثم ارفعه بنفسك)")
+    else:
+        print("لم يُكتب أي ملف (أضف --write-doc لحفظ التقرير في docs/MEASUREMENT.md). التقرير:\n")
+        print(md)
     return 0
 
 

@@ -2,6 +2,7 @@
 import os
 import re
 import sys
+import time
 import unicodedata
 import tkinter as tk
 from tkinter import ttk, filedialog
@@ -9,13 +10,31 @@ from typing import Any, Dict, List
 
 from assistant.models.rules import strip_format_chars
 from assistant.planner import sanitize_display
-from assistant.ui.controller import AssistantController, MAX_REQUEST_CHARS
+from assistant.ui.controller import (AssistantController, MAX_REQUEST_CHARS, MSG_UNDO_BUSY, MSG_WORKSPACE_BUSY)
+from assistant.arabic import n_units, ACTION_AR   # ACTION_AR: جدول واحد مشترك مع المنفّذ والتقارير
+from assistant.ui import settings as _settings
 
 FONT = ("Segoe UI", 10)
 FONT_B = ("Segoe UI", 10, "bold")
 LEVEL_COLORS = {"READ": "#2e7d32", "REVERSIBLE": "#1565c0", "DANGEROUS": "#ef6c00", "FORBIDDEN": "#c62828"}
-LEVEL_AR = {"READ": "قراءة", "REVERSIBLE": "قابل للتراجع", "DANGEROUS": "خطر", "FORBIDDEN": "محظور"}
+LEVEL_AR = {"READ": "قراءة فقط", "REVERSIBLE": "قابل للتراجع", "DANGEROUS": "تحتاج موافقتك", "FORBIDDEN": "محظور"}
 EXAMPLES = ["رتّب الملفات حسب النوع", "افحص المجلد", "أنشئ مشروع my_app", "ابحث عن الملفات المكررة"]
+
+def questions_header(questions) -> str:
+    """سؤال حقيقي (ينتهي بعلامة استفهام) يُجاب في سطر؛ غير ذلك نصيحة/رفض لا يُطلب جوابه."""
+    qs = [str(q).strip() for q in (questions or [])]
+    if qs and all(q.endswith(("؟", "?")) for q in qs):
+        return "أحتاج توضيحاً قبل الخطة (أجب في سطر واحد):"
+    return "لم أستطع تنفيذ طلبك كما هو:"
+
+
+def points_phrase(v) -> str:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    return n_units(int(f), "نقطة") if f == int(f) else f"{f:g} نقطة"
+
 
 def steps_phrase(n: int) -> str:
     """عدّ عربي سليم: خطوة واحدة / خطوتان / 3–10 خطوات / 11+ خطوة."""
@@ -55,7 +74,8 @@ APPROVAL_NAME_MAX = 120
 
 
 FSI, PDI = "\u2068", "\u2069"   # عزل ثنائي الاتجاه: اسم لاتيني داخل جملة عربية لا يقلب ترتيب الأجزاء المجاورة
-_ISOLATE_CHARS = "\u2066\u2067\u2068\u2069"
+RLM = "\u200f"   # علامة اتجاه من اليمين لليسار: تثبّت اتجاه الفقرة لسطر يبدأ بحرف غير عربي (للعرض فقط)
+_ISOLATE_CHARS = "\u2066\u2067\u2068\u2069\u200f"
 _NAME_TOKEN = re.compile(r"(?:[A-Za-z]:[\\/][^\s«»\"]*|[\w\-.]+(?:[\\/][\w\-. ]+)*\.[A-Za-z0-9]{1,8}\b)")
 
 
@@ -92,11 +112,25 @@ def strip_isolates(text) -> str:
     return "".join(ch for ch in str(text) if ch not in _ISOLATE_CHARS)
 
 
+def rtl_para(text) -> str:
+    """علامة RLM في بداية كل سطر لا يبدأ بحرف عربي (فقرة عربية تبدأ برقم/رمز/لاتيني تبقى من اليمين). للعرض فقط؛ يعطّلها COS_NO_BIDI_ISOLATES."""
+    t = str(text)
+    if not bidi_enabled():
+        return t
+
+    def one(ln):
+        if not ln.strip():
+            return ln
+        c = ln.lstrip()[0]
+        return ln if "\u0600" <= c <= "\u06ff" else RLM + ln
+    return "\n".join(one(x) for x in t.split("\n"))
+
+
 def isolate_names(line: str) -> str:
-    """يعزل في سطر تقرير كل ما يشبه اسم ملف بامتداد أو مسار قرص، ثم السطر كله (اتجاهه من أول حرف قوي)."""
+    """يعزل في سطر تقرير كل ما يشبه اسم ملف بامتداد أو مسار قرص، ثم السطر كله (اتجاهه من أول حرف قوي؛ RLM يثبّته من اليمين)."""
     if not line:
         return line
-    return isolate(_NAME_TOKEN.sub(lambda m: isolate(m.group(0)), line))
+    return isolate(rtl_para(_NAME_TOKEN.sub(lambda m: isolate(m.group(0)), line)))
 
 
 def wheel_units(delta: int, num: int = 0) -> int:
@@ -241,10 +275,6 @@ def approval_detail(params) -> str:
     return "\n".join(parts)
 
 
-ACTION_AR = {
-    "inspect": "فحص", "create_dir": "إنشاء مجلد", "move": "نقل", "copy": "نسخ", "rename": "إعادة تسمية",
-    "delete": "نقل للسلة", "trash": "نقل للسلة", "winget_upgrade": "تحديث برنامج", "run_command": "تشغيل أمر",
-}
 
 
 PLAN_HEIGHT = 150  # بكسل: ارتفاع منطقة الخطة القابلة للتمرير
@@ -280,7 +310,7 @@ class AssistantWidget:
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         root.report_callback_exception = self._on_callback_exception   # استثناء في معالج Tk: crash.log + سطر في المحادثة
         self._build()
-        welcome = "مرحباً! اكتب المهمة التي تريد تنفيذها، وسأعرض عليك الخطة قبل البدء.\nمجلد العمل: " + isolate(clean_line(controller.workspace))
+        welcome = "مرحباً! اكتب ما تريد تنفيذه وسأعرض عليك الخطة قبل البدء.\nمجلد العمل: " + isolate(clean_line(controller.workspace))
         if workspace_is_empty(controller.workspace):
             welcome += "\n" + EMPTY_WORKSPACE_HINT
         self.add_message(welcome, "assistant")
@@ -313,7 +343,7 @@ class AssistantWidget:
         except Exception:
             pass
         try:
-            self.add_message(f"حدث خطأ غير متوقع في الواجهة ({getattr(exc_type, '__name__', 'Error')}). سُجّل في crash.log في مجلد البيانات.", "error")
+            self.add_message("حدث خطأ غير متوقع في الواجهة. سُجّل في ملف crash.log داخل مجلد بيانات التطبيق.", "error")
         except Exception:
             pass
         try:
@@ -363,7 +393,7 @@ class AssistantWidget:
                                   activeforeground="white", font=FONT_B, relief="flat", padx=14, pady=6,
                                   command=self._on_stop)
         self.stop_btn.pack(side="left", padx=8, pady=8)
-        tk.Label(header, text="مساعد المهام المكتبية", bg="#263238", fg="white", font=("Segoe UI", 12, "bold")
+        tk.Label(header, text="مساعد المهام", bg="#263238", fg="white", font=("Segoe UI", 12, "bold")
                  ).pack(side="right", padx=12)
         self.balance_lbl = tk.Label(header, text="", bg="#263238", fg="#b0bec5", font=FONT)
         self.balance_lbl.pack(side="left", padx=4)
@@ -388,6 +418,7 @@ class AssistantWidget:
         self.entry = tk.Entry(inp, font=FONT, justify="right", relief="solid", bd=1)
         self.entry.pack(side="right", fill="x", expand=True, ipady=4)
         self.entry.bind("<Return>", lambda e: self._on_send())
+        self.entry.bind("<KP_Enter>", lambda e: self._on_send())   # Enter لوحة الأرقام
         self.entry.focus_set()
         self._bind_keycodes(self.entry)
 
@@ -422,6 +453,10 @@ class AssistantWidget:
         self.undo_all_btn.pack(side="left", padx=2)
         self.reports_btn = tk.Button(actions2, text="التقارير", font=FONT, relief="flat", command=self._on_reports)
         self.reports_btn.pack(side="left", padx=2)
+        self.settings_btn = tk.Button(actions2, text="الإعدادات", font=FONT, relief="flat", command=self._on_settings)
+        self.settings_btn.pack(side="right", padx=2)
+        self.ping_btn = tk.Button(actions2, text="فحص اتصال الخدمة", font=FONT, relief="flat", command=self._on_ping)
+        self.ping_btn.pack(side="right", padx=2)
 
         self.status = tk.Label(r, text="جاهز", bg="#f5f5f5", fg="#546e7a", font=FONT, anchor="e")
         self.status.pack(side="bottom", fill="x", padx=10)
@@ -440,11 +475,9 @@ class AssistantWidget:
         self._plan_win = self.plan_canvas.create_window((0, 0), window=self.plan_inner, anchor="nw")
         self.plan_inner.bind("<Configure>", lambda e: self.plan_canvas.configure(scrollregion=self.plan_canvas.bbox("all")))
         self.plan_canvas.bind("<Configure>", lambda e: self.plan_canvas.itemconfigure(self._plan_win, width=e.width))
-        def _wheel(e):
-            self.plan_canvas.yview_scroll(wheel_units(e.delta, getattr(e, "num", 0)), "units")
-        # العجلة فوق الصفوف أيضاً: ربط عام ما دام المؤشر فوق إطار الخطة
-        self.plan_frame.bind("<Enter>", lambda e: self.root.bind_all("<MouseWheel>", _wheel))
-        self.plan_frame.bind("<Leave>", lambda e: self.root.unbind_all("<MouseWheel>"))
+        # العجلة: ربط محلي على اللوحة وإطارها وصفوفها (لا bind_all على الجذر: لا يمس عجلة المحادثة ولا نوافذ الحوار ولا يترك ربطاً عاماً عالقاً)
+        for wdg in (self.plan_frame, self.plan_canvas, self.plan_inner):
+            self._bind_plan_wheel(wdg)
 
         self.chat = tk.Text(r, wrap="word", height=6, state="disabled", font=FONT, bg="white", relief="flat",
                             padx=8, pady=6)
@@ -456,7 +489,7 @@ class AssistantWidget:
         self.chat.tag_configure("assistant", justify="right", foreground="#212121", rmargin=4)
         self.chat.tag_configure("error", justify="right", foreground="#b71c1c", rmargin=4)
         self.chat.tag_configure("ok", justify="right", foreground="#1b5e20", rmargin=4)
-        self.chat.tag_configure("report", justify="right", foreground="#37474f", rmargin=4, font=("Consolas", 9))
+        self.chat.tag_configure("report", justify="right", foreground="#37474f", rmargin=4, font=("Segoe UI", 10))
         self.chat.tag_configure("warn", justify="right", foreground="#e65100", rmargin=4)
         self._bind_keycodes(self.chat)
         self.chat.bind("<<Copy>>", self._copy_chat_selection)
@@ -465,12 +498,20 @@ class AssistantWidget:
     # ---------- عرض ----------
     def add_message(self, text: str, tag: str = "assistant"):
         self.chat.configure(state="normal")
-        self.chat.insert("end", text + "\n\n", tag)
+        self.chat.insert("end", rtl_para(text) + "\n\n", tag)
         self.chat.configure(state="disabled")
         self.chat.see("end")
 
     def set_status(self, text: str):
         self.status.configure(text=text)
+
+    def _bind_plan_wheel(self, wdg):
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):   # الأخيران لـ X11
+            wdg.bind(seq, self._plan_wheel, add="+")
+
+    def _plan_wheel(self, e):
+        self.plan_canvas.yview_scroll(wheel_units(getattr(e, "delta", 0), getattr(e, "num", 0)), "units")
+        return "break"
 
     def _clear_plan(self):
         for w in self.plan_inner.winfo_children():
@@ -488,6 +529,7 @@ class AssistantWidget:
                            text=f"{s['step_id']}. {action}: {isolate(clean_line(s['target']))} {step_detail(s.get('params'), True)}  [{LEVEL_AR.get(lvl, lvl)}]",
                            fg=LEVEL_COLORS.get(lvl, "#000"))
             row.pack(fill="x", padx=6)
+            self._bind_plan_wheel(row)   # الصفوف لا تمرّر الحدث إلى اللوحة تلقائياً
             self._plan_rows[s["step_id"]] = row
 
     def _reveal(self, row):
@@ -510,13 +552,13 @@ class AssistantWidget:
         short = path if len(path) <= 44 else "…" + path[-43:]
         self.ws_lbl.configure(text=f"مجلد العمل: {isolate(clean_line(short))}")
         try:
-            self.balance_lbl.configure(text=f"الرصيد: {self.controller.ledger.get_balance()}")
+            self.balance_lbl.configure(text=f"الرصيد: {n_units(self.controller.ledger.get_balance(), 'نقطة')}")
         except Exception:
             pass
 
     def _choose_workspace(self):
         if self.controller.state != "IDLE":
-            self.add_message("لا يمكن تغيير المجلد الآن. ألغِ الخطة الحالية (أو انتظر انتهاء المهمة) أولاً.", "assistant")
+            self.add_message(MSG_WORKSPACE_BUSY, "assistant")
             return
         path = filedialog.askdirectory(title="اختر مجلد العمل (مثل Downloads)", initialdir=str(self.controller.workspace))
         if path:
@@ -568,32 +610,54 @@ class AssistantWidget:
     def outcome_message(ev: Dict[str, Any]):
         """(الرسالة، الوسم): نجاح كامل، أو «جزئي» حين رُفضت/تُخطّيت خطوات بقرار المستخدم، أو فشل مع الأعداد."""
         done, failed, skipped = int(ev.get("executed") or 0), int(ev.get("failed") or 0), int(ev.get("skipped") or 0)
-        counts = f"نُفّذ {done} · فشل {failed} · تُخطّي {skipped}"
+        bits = []
+        if done:
+            bits.append(f"نُفّذت {n_units(done, 'خطوة')}")
+        if failed:
+            bits.append(f"فشلت {n_units(failed, 'خطوة')}")
+        if skipped:
+            bits.append(f"تُخطّيت {n_units(skipped, 'خطوة')}")
+        counts = "، ".join(bits)
         if done == 0 and skipped > 0 and failed == 0:
-            return "لم يُنفَّذ شيء — رفضت كل الخطوات", "warn"
+            return "لم يُنفَّذ شيء — لم تتم الموافقة على أي خطوة", "warn"
         if ev.get("success") and skipped > 0:
-            return f"اكتملت جزئياً ⚠ — {counts} (راجع التقرير أعلاه)", "warn"
+            return f"اكتملت جزئياً ⚠ — {counts}. التفاصيل في التقرير أعلاه.", "warn"
         if ev.get("success"):
             return "تم بنجاح ✔", "ok"
         if done or skipped:
-            return f"فشلت المهمة جزئياً ✖ — {counts} (راجع التقرير أعلاه)", "error"
-        return "فشلت المهمة ✖ (راجع التقرير أعلاه)", "error"
+            return f"لم تكتمل المهمة ✖ — {counts}. التفاصيل في التقرير أعلاه.", "error"
+        return "فشلت المهمة ✖. التفاصيل في التقرير أعلاه.", "error"
 
     def _on_close(self):
         """إغلاق النافذة أثناء تنفيذ: نسأل ثم نوقف المهمة ونمهلها لحظات لتنتهي نظيفة بدل قتل الخيط وترك نسخة ناقصة."""
         if self.controller.state == "RUNNING":
             try:
                 from tkinter import messagebox
-                if not messagebox.askyesno("مهمة جارية", "توجد مهمة قيد التنفيذ. أوقفها وأغلق؟", parent=self.root):
+                if not messagebox.askyesno("إغلاق المساعد", "هناك مهمة قيد التنفيذ. هل تريد إيقافها وإغلاق المساعد؟", parent=self.root):
                     return
             except Exception:
                 pass
             self.controller.stop()
-            import time
-            end = time.time() + 5.0
-            while self.controller.state == "RUNNING" and time.time() < end:
-                time.sleep(0.1)
+            if self.controller.state == "RUNNING":   # نمهلها بلا تجميد Tk: استطلاع بـ after لا نوم داخل المعالج
+                if getattr(self, "_closing", False):
+                    return
+                self._closing = True
+                self._close_deadline = time.monotonic() + 5.0
+                self.root.after(100, self._close_poll)
+                return
         self.root.destroy()
+
+    def _close_poll(self):
+        if self.controller.state == "RUNNING" and time.monotonic() < self._close_deadline:
+            try:
+                self.root.after(100, self._close_poll)
+                return
+            except tk.TclError:
+                pass
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
 
     def _on_stop(self):
         self.controller.stop()
@@ -640,7 +704,7 @@ class AssistantWidget:
 
     def _on_undo(self):
         if self.controller.state != "IDLE":
-            self.add_message("ألغِ الخطة الحالية أو انتظر انتهاء المهمة قبل التراجع.", "assistant")
+            self.add_message(MSG_UNDO_BUSY, "assistant")
             return
         self.undo_btn.configure(state="disabled")  # نقرتان متتاليتان لا تلغيان مهمتين
         self.root.after(1500, lambda: self.undo_btn.configure(state="normal"))
@@ -648,15 +712,15 @@ class AssistantWidget:
 
     def _on_undo_all(self):
         if self.controller.state != "IDLE":
-            self.add_message("ألغِ الخطة الحالية أو انتظر انتهاء المهمة قبل التراجع.", "assistant")
+            self.add_message(MSG_UNDO_BUSY, "assistant")
             return
         n = self.controller.chain_size()
         if n < 1:
-            self.add_message("لا توجد سلسلة مهام للتراجع عنها دفعة واحدة. استعمل «تراجع» لآخر مهمة.", "assistant")
+            self.add_message("لا يوجد ما يُتراجع عنه دفعة واحدة. اضغط «تراجع» للتراجع عن آخر مهمة.", "assistant")
             return
         try:
             from tkinter import messagebox
-            if not messagebox.askyesno("تراجع عن الكل", f"سيتراجع المساعد عن {n} مهمة من آخر طلب (الأحدث أولاً). متابعة؟", parent=self.root):
+            if not messagebox.askyesno("تراجع عن الكل", f"سيتراجع المساعد عن {n_units(n, 'مهمة', 'gen')} من آخر طلب (الأحدث أولاً). هل تريد المتابعة؟", parent=self.root):
                 return
         except Exception:
             pass
@@ -673,7 +737,11 @@ class AssistantWidget:
         win = tk.Toplevel(self.root)
         win.title("التقارير المحفوظة")
         win.attributes("-topmost", True)
-        lb = tk.Listbox(win, width=60, height=min(14, len(rows)), font=FONT, justify="right")
+        lb = tk.Listbox(win, width=60, height=min(14, len(rows)), font=FONT)
+        try:
+            lb.configure(justify="right")   # خيار justify غير متاح في بعض إصدارات Tk
+        except tk.TclError:
+            pass
         for r in rows:
             lb.insert("end", f"{r['when']} — {r['title'] or r['task_id']}")
         lb.pack(side="top", fill="both", expand=True, padx=8, pady=8)
@@ -693,6 +761,16 @@ class AssistantWidget:
         tk.Button(win, text="عرض", font=FONT_B, command=show).pack(side="bottom", pady=(0, 8))
         self._reports_win = win
 
+    def _on_settings(self):
+        _settings.open_settings_dialog(self)
+
+    def _on_ping(self):
+        """فحص الاتصال في خيط عامل؛ الواجهة لا تُحجب. النتيجة تصل كحدث ping."""
+        if self.controller.check_connection():
+            self.ping_btn.configure(state="disabled")
+            if self.controller.state == "IDLE":
+                self.set_status("أفحص اتصال الخدمة…")
+
     # ---------- أحداث ----------
     def _poll(self):
         try:
@@ -701,7 +779,12 @@ class AssistantWidget:
                     self.handle_event(ev)
                 except Exception as exc:  # عطب في عرض حدث لا يجب أن يُفقد بقية الأحداث (تقرير/حالة)
                     try:
-                        self.add_message(f"تعذّر عرض حدث ({ev.get('type')}): {type(exc).__name__}", "error")
+                        self.add_message("تعذّر عرض جزء من النتيجة. التفاصيل في ملف crash.log.", "error")
+                        try:
+                            from assistant.app import write_crash_log
+                            write_crash_log(f"عرض حدث {ev.get('type')}: {type(exc).__name__}: {exc}")
+                        except Exception:
+                            pass
                     except Exception:
                         pass
         finally:
@@ -728,7 +811,7 @@ class AssistantWidget:
             self.undo_btn.configure(state="normal")
         elif t == "questions":
             self.awaiting_answers = self.controller.state == "CLARIFYING"  # حدث قديم بعد الإيقاف لا يبتلع الطلب التالي
-            self.add_message("أحتاج توضيحاً قبل الخطة (أجب في سطر واحد):\n" +
+            self.add_message(questions_header(ev["questions"]) + "\n" +
                              "\n".join(f"{i}. {q}" for i, q in enumerate(ev["questions"], 1)), "assistant")
             self.set_status("بانتظار إجابتك")
             self._set_buttons(False, clarifying=self.controller.state == "CLARIFYING")
@@ -739,13 +822,13 @@ class AssistantWidget:
             n_danger = sum(1 for s in ev["steps"] if s["level"] == "DANGEROUS")
             msg = f"هذه الخطة ({steps_phrase(len(ev['steps']))}). راجعها ثم اضغط «ابدأ التنفيذ»."
             if n_danger:
-                msg += f"\nتنبيه: {n_danger} خطوة خطرة ستطلب موافقتك واحدة واحدة."
+                msg += f"\nعدد الخطوات التي تحتاج موافقتك: {n_danger}. سأسألك عن كل خطوة على حدة."
             if ev.get("note"):
                 msg += f"\nملاحظة: {ev['note']}"
             est = ev.get("estimate") or {}
             self._affordable = bool(est.get("affordable", True))
             if est.get("points") is not None:
-                msg += f"\nالكلفة المتوقعة: {est['points']} نقطة · رصيدك: {est['balance']} نقطة"
+                msg += f"\nالكلفة المتوقعة: {points_phrase(est['points'])} · رصيدك: {points_phrase(est['balance'])}"
                 if not est.get("affordable", True):
                     msg += "\n⚠ الرصيد أو سقف الإنفاق لا يكفي لهذه المهمة، لذلك لن تبدأ."
             self.add_message(msg, "assistant")
@@ -786,10 +869,24 @@ class AssistantWidget:
                 self.add_message("لا توجد مهام مسجلة بعد.", "assistant")
             else:
                 lines = ["آخر المهام:"] + [
-                    f"• {STATUS_AR.get(r['status'], r['status'])} — {str(r['task_type'])[:50]} — {r['charged_points']} نقطة"
+                    f"• {STATUS_AR.get(r['status'], r['status'])} — {str(r['task_type'])[:50]} — {points_phrase(r['charged_points'])}"
                     for r in ev["rows"]
                 ]
                 self.add_message("\n".join(lines), "assistant")
+        elif t == "settings_applied":
+            self.add_message(ev["text"], "ok")
+            self._clear_plan()
+            self._set_buttons(False)
+            if self.controller.state == "IDLE":
+                self.set_status("جاهز")
+        elif t == "ping":
+            self.ping_btn.configure(state="normal")
+            self.add_message(ev["text"], "ok" if ev.get("ok") else "error")
+            dlg = getattr(self, "_settings_dlg", None)
+            if dlg is not None:
+                dlg.show_result(ev["text"], bool(ev.get("ok")))
+            if self.controller.state == "IDLE":
+                self.set_status("جاهز" if ev.get("ok") else "تعذّر الاتصال")
         elif t == "workspace":
             self._refresh_workspace_label()
             self.add_message("مجلد العمل الآن: " + isolate(clean_line(ev["path"])), "ok")
@@ -797,20 +894,20 @@ class AssistantWidget:
                 self.add_message(EMPTY_WORKSPACE_HINT, "assistant")
         elif t == "undo":
             if ev.get("partial"):
-                bits = [f"استُعيدت {ev['count']}"]
+                bits = [f"تم التراجع عن {n_units(ev['count'], 'عملية', 'acc')}"]
                 if ev.get("chain_left"):
-                    bits.append(f"بقيت {ev['chain_left']} مهمة من السلسلة")
+                    bits.append(f"بقيت {n_units(ev['chain_left'], 'مهمة')} من آخر طلب")
                 if ev.get("remaining"):
-                    bits.append(f"بقيت {ev['remaining']} لم تُستعد")
+                    bits.append(f"بقيت {n_units(ev['remaining'], 'عملية')} لم يُتراجع عنها")
                 if ev.get("skipped"):
-                    bits.append(f"تُخطّيت {ev['skipped']} (ناتجها غير موجود أو تالف)")
+                    bits.append(f"تُخطّيت {n_units(ev['skipped'], 'عملية')} (ناتجها غير موجود أو تالف)")
                 if ev.get("reason"):
                     bits.append(str(ev["reason"]))
-                self.add_message("تم التراجع جزئياً ⚠ — " + " · ".join(bits) + ". راجع الملاحظات في الشريط/السجل.", "warn")
+                self.add_message("تم التراجع جزئياً ⚠ — " + " · ".join(bits) + ". انظر الرسائل أعلاه.", "warn")
             elif ev.get("tasks"):
-                self.add_message(f"تم التراجع عن {ev['count']} عملية في {ev['tasks']} مهمة.", "ok")
+                self.add_message(f"تم التراجع عن {n_units(ev['count'], 'عملية', 'acc')} في {n_units(ev['tasks'], 'مهمة', 'gen')}.", "ok")
             else:
-                self.add_message(f"تم التراجع عن {ev['count']} عملية.", "ok")
+                self.add_message(f"تم التراجع عن {n_units(ev['count'], 'عملية', 'acc')}.", "ok")
             self.undo_btn.configure(state="normal")
 
     # ---------- نافذة الموافقة ----------
@@ -833,7 +930,7 @@ class AssistantWidget:
         detail = approval_detail(step.get("params"))
         if detail:
             lines.append(detail)
-        title_lbl = tk.Label(win, text="⚠ خطوة خطرة تحتاج موافقتك", bg="#fff3e0", fg="#e65100", font=("Segoe UI", 12, "bold"))
+        title_lbl = tk.Label(win, text="⚠ خطوة تحتاج موافقتك", bg="#fff3e0", fg="#e65100", font=("Segoe UI", 12, "bold"))
         self._approval_label = tk.Label(win, text="\n".join(lines), bg="#fff3e0", font=FONT, justify="right",
                                         wraplength=self.px(420))
         ask_lbl = tk.Label(win, text="هل تسمح بتنفيذ هذه الخطوة فقط؟", bg="#fff3e0", font=FONT)
@@ -882,11 +979,11 @@ class AssistantWidget:
         win.title("تأكيد التراجع")
         win.attributes("-topmost", True)
         win.configure(bg="#fff3e0")
-        text = (f"{n} عملية سابقة لا يمكن التحقق من أصلها (قد يكون المجلد منقولاً أو مفتاح الأمان تغيّر). "
-                "هل تريد التراجع عنها بعد فحص حالة الملفات الحالية؟")
+        text = (f"لا يمكن التأكد من مصدر {n_units(n, 'عملية', 'gen')} سابقة. قد يكون مجلد العمل نُقل من جهاز آخر. "
+                "هل تريد التراجع عنها بعد فحص حالة الملفات الآن؟")
         if ev.get("reason"):
             text += "\n" + sanitize_display(ev["reason"], 300)
-        title_lbl = tk.Label(win, text="⚠ تراجع غير موثَّق", bg="#fff3e0", fg="#e65100", font=("Segoe UI", 12, "bold"))
+        title_lbl = tk.Label(win, text="⚠ تراجع غير مؤكَّد المصدر", bg="#fff3e0", fg="#e65100", font=("Segoe UI", 12, "bold"))
         self._undo_confirm_label = tk.Label(win, text=text, bg="#fff3e0", font=FONT, justify="right", wraplength=self.px(420))
         btns = tk.Frame(win, bg="#fff3e0")   # آخر ابن للنافذة؛ يُرزم أولاً في الأسفل
         btns.pack(side="bottom", pady=12)

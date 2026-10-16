@@ -58,7 +58,7 @@ try:
         ws = tmp / "ws"
         ws.mkdir()
         for f in files:
-            (ws / f).write_text(f)
+            (ws / f).write_text(f, encoding="utf-8")
         led = SQLiteLedger(tmp / "l.db", initial_balance=100, spending_limit=1000)
         return AssistantController(Prov(fn), ws, led), ws
 
@@ -121,15 +121,15 @@ try:
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="b37_plant_")).resolve()
     ws = tmp / "ws"
     ws.mkdir()
-    (ws / "Report.docx").write_text("precious")
-    (ws / ".undo_journal.json").write_text(json.dumps([{"action": "move", "src": "rel:Elsewhere.docx", "dest": "rel:Report.docx"}]))
+    (ws / "Report.docx").write_text("precious", encoding="utf-8")
+    (ws / ".undo_journal.json").write_text(json.dumps([{"action": "move", "src": "rel:Elsewhere.docx", "dest": "rel:Report.docx"}]), encoding="utf-8")
     c = AssistantController(Prov(ren), ws, SQLiteLedger(tmp / "l.db", initial_balance=100, spending_limit=100))
     startup = [e for e in c.drain_events() if e["type"] == "info" and e.get("notice")]
     assert startup, "unverified/rejected journal entries must be announced at startup"
     c.undo_last()
     got = [e["type"] for e in c.drain_events() if e["type"] in ("undo", "undo_confirm", "error")]
     assert "undo" not in got, got   # لا تراجع صامت عن إدخال لا يمكن التحقق منه
-    assert (ws / "Report.docx").read_text() == "precious" and not (ws / "Elsewhere.docx").exists() or "undo_confirm" in got, got
+    assert (ws / "Report.docx").read_text(encoding="utf-8") == "precious" and not (ws / "Elsewhere.docx").exists() or "undo_confirm" in got, got
     c.undo_last(allow_unverified=True)   # لا استثناء
     print("ok 2b: planted journal not undone silently; startup notice shown")
 
@@ -184,7 +184,7 @@ try:
         win = w._undo_confirm_win
         pump(0.1)
         txt = w._undo_confirm_label.cget("text")
-        assert "3 عملية سابقة لا يمكن التحقق من أصلها" in txt and "هل تريد التراجع عنها بعد فحص حالة الملفات الحالية؟" in txt, txt
+        assert "لا يمكن التأكد من مصدر 3 عمليات سابقة" in txt and "هل تريد التراجع عنها بعد فحص حالة الملفات الآن؟" in txt, txt
         assert str(w._undo_confirm_yes.cget("state")) == "disabled", "Yes must start disabled"
         assert win.winfo_children()[-1].winfo_children(), "button frame must be the last child"
         pump(0.9)

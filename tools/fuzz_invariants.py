@@ -446,7 +446,7 @@ def gen_steps(rng, m):
         elif act in ("move", "copy"):
             p = {"dest": pick_dest(rng, m, t)}
         elif act == "rename":
-            nn = rng.choice([sane_choice(rng, SAFE_FILES + DIR_POOL)] * 6 + [pbase(t).upper(), pbase(t).lower(), pbase(t) + "2", "../x", "a/b", "..", ".", "CON", "x.", "(1)"])
+            nn = rng.choice([sane_choice(rng, SAFE_FILES + DIR_POOL)] * 6 + ([] if FS_SAFE["on"] else [pbase(t).upper(), pbase(t).lower()]) + [pbase(t) + "2", "../x", "a/b", "..", ".", "CON", "x.", "(1)"])
             if rng.random() < 0.15:
                 nn = pbase(t)
             p = {"new_name": nn}
@@ -467,8 +467,11 @@ def gen_macro(rng, m):
     f = rng.choice(files) if files else "a.txt"
     f2 = rng.choice(files) if files else "b.pdf"
     d = rng.choice(dirs) if dirs else "docs"
-    kind = rng.choice(["swap", "delrecreate", "nestmove", "copyrenamedel", "cycle", "collide", "deepchain", "selfmoves",
-                       "caseonly", "organize", "dirsandback", "delparent", "moveintofile", "samename"])
+    kinds = ["swap", "delrecreate", "nestmove", "copyrenamedel", "cycle", "collide", "deepchain", "selfmoves",
+             "caseonly", "organize", "dirsandback", "delparent", "moveintofile", "samename"]
+    if FS_SAFE["on"]:
+        kinds.remove("caseonly")   # على نظام ملفات غير حساس للحالة a.txt وA.TXT اسم واحد: النموذج المرجعي يفترض العكس
+    kind = rng.choice(kinds)
     S = []
     if kind == "swap":
         S = [("move", f, {"dest": "tmp_swap.bin"}), ("move", f2, {"dest": f}), ("move", "tmp_swap.bin", {"dest": f2})]
@@ -536,6 +539,7 @@ def gen_nl(rng, m):
 
 
 NO_AFTER = {"v": False}
+FS_SAFE = {"on": False}   # ويندوز/نظام ملفات غير حساس للحالة: مجموعات أسماء متوافقة (انظر apply_fs_safe)
 
 
 def gen_fault(rng, undo=False):
@@ -1036,7 +1040,7 @@ def run_scenario(seed, keep=None):
                     A = snap(ws_cur(), True)
                     step = next((x for x in _c.get("plan", []) if x.step_id == ev["step_id"]), None)
                     if step is not None and _s["B"] is not None and not swapped[0]:
-                        skipped = ev.get("detail") == "تخطّي بقرارك"
+                        skipped = str(ev.get("detail", "")).startswith("تخطّي")   # بقرارك، أو العنصر تغيّر بعد التخطيط
                         pr = oracle(str(ws_cur()), step, _s["B"], A, skipped)
                         stats["oracle_" + ("skip" if skipped else step.action_type) + ("_ok" if ev["ok"] else "_fail")] += 1
                         if ev["ok"] and pr:
@@ -1105,6 +1109,8 @@ def run_scenario(seed, keep=None):
                 if isinstance(exc, KeyboardInterrupt):
                     crashed_ki = True
                     stats["run_KI"] += 1
+                    if tid not in ran_ids:
+                        ran_ids.append(tid)   # مهمة قُطعت: التطبيق يعرف معرّفها (last_journaled_task) فيتراجع المستخدم عنها كأي مهمة
                 else:
                     viol("I4", f"TaskRunner.run raised {type(exc).__name__}: {str(exc)[:100]}", "".join(traceback.format_exception(exc))[-800:])
             if rep is not None:
@@ -1313,9 +1319,46 @@ def run_scenario(seed, keep=None):
     return V, stats, spec
 
 
+def fs_is_case_sensitive():
+    """يجرّب مجلد الاختبار الفعلي: هل a وA اسمان مختلفان؟ (ويندوز وmacOS الافتراضي: لا)."""
+    d = tempfile.mkdtemp(prefix="fuzz_case_", dir=TMPROOT)
+    try:
+        Path(d, "probe_a").write_bytes(b"1")
+        return not Path(d, "PROBE_A").exists()
+    except OSError:
+        return os.name != "nt"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _win_ok(n):
+    """اسم صالح كمكوّن مسار على ويندوز: بلا محارف محجوزة/نقطة أو مسافة أخيرة/اسم جهاز/بايت يتيم، وطول معقول (MAX_PATH)."""
+    if len(n) > 80 or any(ch in n for ch in '<>:"|?*\\') or any(0xD800 <= ord(ch) <= 0xDFFF for ch in n):
+        return False
+    return safe_name(n)
+
+
+def apply_fs_safe():
+    """يصفّي مجموعات الأسماء في مكانها: لا أسماء تتصادم بفرق الحالة ولا أسماء غير صالحة على ويندوز، ولا إعادة تسمية بالحالة فقط.
+    أسماء الجذور الأخرى (HOSTILE وسلاسل التخطيط العدائي) تبقى: رفضها اختبار مشروع على أي نظام."""
+    FS_SAFE["on"] = True
+    seen = set()
+    for lst in (DIR_POOL, SAFE_FILES, NORMAL_FILES):
+        out = []
+        for n in lst:
+            key = n.lower()
+            if not all(_win_ok(part) for part in n.split("/")) or key in seen:
+                continue
+            seen.add(key)
+            out.append(n)
+        lst[:] = out
+    # أسماء "غير آمنة" تبقى (المحجوزة تُرفض عند البناء فيُتخطى إنشاؤها)، لكن بلا تصادم حالة مع غيرها
+    UNSAFE_FILES[:] = [n for n in UNSAFE_FILES if n.lower() not in seen and "\udcff" not in n]
+
+
 def main():
     try:
-        sys.stdout.reconfigure(errors="backslashreplace")
+        sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
     except Exception:
         pass
     ap = argparse.ArgumentParser()
@@ -1329,8 +1372,11 @@ def main():
     ap.add_argument("--avoid-known", action="store_true", help="drop names that trigger already-reported bugs ('..' in name, leading space, lone surrogate)")
     ap.add_argument("--profile", default="all", choices=["all", "mixed", "nl"])
     ap.add_argument("--no-after-faults", action="store_true", help="لا أخطاء KeyboardInterrupt/raise_after (محاكاة غير واقعية)")
+    ap.add_argument("--fs-safe", action="store_true", help="مجموعات أسماء لنظام ملفات غير حساس للحالة (تلقائي على ويندوز أو إذا كشف الفحص ذلك)")
     ap.add_argument("-v", action="store_true")
     a = ap.parse_args()
+    if a.fs_safe or os.name == "nt" or not fs_is_case_sensitive():
+        apply_fs_safe()
     NO_AFTER["v"] = a.no_after_faults
     PROFILE["mode"] = a.profile
     if a.avoid_known:
@@ -1402,7 +1448,8 @@ def main():
             for ln in (v.detail or "").splitlines()[:14]:
                 print("     " + ln)
     if a.json:
-        json.dump([{"seed": v.seed, "inv": v.inv, "msg": v.msg, "detail": v.detail} for v in allv], open(a.json, "w"), ensure_ascii=False, indent=1)
+        with open(a.json, "w", encoding="utf-8") as jf:
+            json.dump([{"seed": v.seed, "inv": v.inv, "msg": v.msg, "detail": v.detail} for v in allv], jf, ensure_ascii=False, indent=1)
     return 1 if allv else 0
 
 

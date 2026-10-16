@@ -16,6 +16,7 @@ import unicodedata
 from pathlib import Path
 from typing import Union, List, Dict, Any, Optional, Tuple
 
+from assistant.arabic import n_units
 from assistant.safety import KillSwitch, EmergencyStopTriggered
 
 
@@ -81,6 +82,23 @@ def _same_file(a: Any, b: Any) -> bool:
         return False
 
 
+def _name_listed(p: Any) -> bool:
+    """هل يوجد عنصر بهذا الاسم حرفياً (بحالة الأحرف نفسها) في مجلده؟ عبر os.listdir لا exists: على ويندوز/ماك exists('A.txt') صحيحة إن وُجد 'a.txt'
+    (نفس الملف)، فلا تصلح للتفريق بين «لم تُنفَّذ إعادة التسمية» و«نُفّذت» حين يختلف الاسمان بحالة الأحرف فقط."""
+    q = Path(str(p))
+    try:
+        return q.name in os.listdir(str(q.parent))
+    except OSError:
+        return False
+
+
+def _case_only_pair(a: Any, b: Any) -> bool:
+    """اسمان في المجلد نفسه يختلفان بحالة الأحرف فقط (a.txt / A.txt)."""
+    pa, pb = Path(str(a)), Path(str(b))
+    return bool(pa.name) and pa.name != pb.name and pa.name.casefold() == pb.name.casefold() \
+        and os.path.normcase(str(pa.parent)) == os.path.normcase(str(pb.parent))
+
+
 def _is_link(p: Path) -> bool:
     """رابط رمزي أو تقاطع (junction) أو نقطة تركيب في ويندوز. ملفات OneDrive/السحابة (reparse لكنها ليست روابط) لا تُعدّ روابط."""
     try:
@@ -119,8 +137,8 @@ def check_not_big_cloud_file(p: Path, limit: int = CLOUD_HYDRATE_LIMIT, _lstat=N
         return
     if getattr(st, "st_file_attributes", 0) & _CLOUD_ATTRS and st.st_size > limit:
         raise CloudFileNotLocalError(
-            f"الملف '{p.name}' ({st.st_size // (1024 * 1024)}MB) غير محمّل محلياً من السحابة؛ قراءته ستنزّله كاملاً. "
-            f"اجعله «الاحتفاظ دائماً على هذا الجهاز» ثم أعد المحاولة.")
+            f"الملف «{p.name}» ({human_size(st.st_size)}) غير محمّل محلياً من السحابة؛ قراءته ستنزّله كاملاً. "
+            f"اضغط عليه بزر الفأرة الأيمن واختر «الاحتفاظ دائماً على هذا الجهاز» ثم أعد الطلب.")
 
 
 # ---------- فحص موحّد للأسماء (يستعمله المخطط وقائمة المجلد والقواعد فلا يختلفون) ----------
@@ -256,11 +274,13 @@ def free_space_short(total: int, free: Optional[int], max_margin: int = MAX_FREE
 
 
 def human_size(n: int) -> str:
+    """حجم بوحدات عربية (بايت/كيلوبايت/ميجابايت/جيجابايت) بتمييز العدد عبر arabic.n_units؛ الكسر بخانة واحدة: «87.9 كيلوبايت»."""
     n = int(n)
-    for unit, div in (("GB", 1024 ** 3), ("MB", 1024 ** 2), ("KB", 1024)):
+    for unit, div in (("جيجابايت", 1024 ** 3), ("ميجابايت", 1024 ** 2), ("كيلوبايت", 1024)):
         if n >= div:
-            return f"{n / div:.1f} {unit}"
-    return f"{n} B"
+            r = round(n / div, 1)
+            return n_units(int(r), unit) if r == int(r) else f"{r:.1f} {unit}"
+    return "0 بايت" if n == 0 else n_units(n, "بايت")
 
 
 def tree_size(p: Path, limit: Optional[int] = None) -> int:
@@ -344,7 +364,7 @@ def explain_error(exc: BaseException) -> Optional[str]:
            5: "لا صلاحية على العنصر (قد يكون محمياً أو مفتوحاً في برنامج آخر)",
            2: "المسار أو العنصر لم يعد موجوداً", 3: "المسار أو العنصر لم يعد موجوداً",
            123: "اسم أو مسار غير صالح على ويندوز", 161: "اسم أو مسار غير صالح على ويندوز",
-           206: "المسار أو الاسم أطول من الحد المسموح", 112: "القرص ممتلئ", 39: "القرص ممتلئ",
+           206: "اسم الملف أو مساره طويل جداً؛ اختصر الاسم", 112: "لا توجد مساحة كافية على القرص؛ فرّغ بعض المساحة ثم أعد المحاولة", 39: "لا توجد مساحة كافية على القرص؛ فرّغ بعض المساحة ثم أعد المحاولة",
            80: "الوجهة موجودة أصلاً", 183: "الوجهة موجودة أصلاً", 1314: "الصلاحية المطلوبة غير ممنوحة"}
     if w in win:   # winerror أدق من errno المترجَم منه
         return win[w]
@@ -362,7 +382,7 @@ def explain_error(exc: BaseException) -> Optional[str]:
         return "المجلد ليس فارغاً"
     if code == _e.EINVAL:
         return "اسم أو مسار غير صالح"
-    return "تعذّرت عملية على نظام الملفات"
+    return "تعذّر إكمال العملية على الملف. تأكد أنه غير مفتوح في برنامج آخر ثم أعد المحاولة"
 
 
 class UndoResult(int):
@@ -933,6 +953,50 @@ def _file_sig(p: Union[str, Path]) -> Optional[List[int]]:
         return None
 
 
+FP_FULL_LIMIT = 4 << 20       # حتى هذا الحجم تُجزَّأ كل بايتات الملف؛ الأكبر يُؤخذ منه عيّنات (بداية/ربع/نصف/ثلاثة أرباع/نهاية) مع الحجم
+_FP_CHUNK = 64 * 1024
+
+
+def entry_kind(p: Union[str, Path]) -> Optional[str]:
+    """نوع العنصر بلا تتبّع الروابط: "file" | "dir" | "link" | "other" | None (غير موجود)."""
+    try:
+        st = os.lstat(str(p))
+    except OSError:
+        return None
+    if stat.S_ISLNK(st.st_mode) or _is_link(Path(str(p))):
+        return "link"
+    if stat.S_ISDIR(st.st_mode):
+        return "dir"
+    return "file" if stat.S_ISREG(st.st_mode) else "other"
+
+
+def content_fingerprint(p: Union[str, Path], full_limit: int = FP_FULL_LIMIT) -> Optional[str]:
+    """بصمة محتوى ملف عادي (sha256): كاملة حتى full_limit بايت، وعيّنات + الحجم لما فوق. None إن لم يكن ملفاً عادياً/تعذّرت القراءة.
+    تُستعمل لحراسة خطوات المكررات: تغيّر المحتوى بعد وضع الخطة يُكتشف حتى لو أُعيد mtime."""
+    import hashlib
+    try:
+        st = os.lstat(str(p))
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        size = int(st.st_size)
+        h = hashlib.sha256()
+        with open(str(p), "rb") as f:
+            if size <= full_limit:
+                while True:
+                    b = f.read(1 << 20)
+                    if not b:
+                        break
+                    h.update(b)
+                return "f:" + h.hexdigest()
+            h.update(str(size).encode())
+            for frac in (0, 0.25, 0.5, 0.75, 1):
+                f.seek(max(0, min(size - _FP_CHUNK, int(size * frac))))
+                h.update(f.read(_FP_CHUNK))
+        return "s:" + h.hexdigest()
+    except OSError:
+        return None
+
+
 def _paths_overlap(a: str, b: str) -> bool:
     a, b = os.path.normcase(a), os.path.normcase(b)
     return a == b or a.startswith(b + os.sep) or b.startswith(a + os.sep)
@@ -1474,6 +1538,14 @@ class FileManager:
         if action in ("move", "rename", "copy"):
             rec["src"] = self._vpath(raw.get("src"))
             rec["dest"] = self._vpath(raw.get("dest"))
+            if action == "rename":
+                # ويندوز: resolve()/validate_path يوحّدان حالة الأحرف مع الموجود فعلاً، فيصير المصدر والوجهة في a.txt→A.txt اسماً واحداً؛
+                # نُبقي الاسمين الحرفيين من النية كي يميّز التعافي بين «لم تُنفَّذ» و«نُفّذت» بالأسماء الحرفية
+                for key in ("src", "dest"):
+                    raw_name = Path(self._path_from_disk(raw.get(key))).name
+                    vp = Path(rec[key])
+                    if raw_name and raw_name != vp.name and raw_name.casefold() == vp.name.casefold():
+                        rec[key] = str(vp.with_name(raw_name))
             rec["is_dir"] = bool(raw.get("is_dir"))
             tmp = raw.get("tmp")
             if tmp is not None and action in ("rename", "copy"):
@@ -1539,16 +1611,21 @@ class FileManager:
         try:
             if action in ("move", "rename"):
                 src, dest, tmp = rec.get("src"), rec.get("dest"), rec.get("tmp")
+                # اسمان يختلفان بحالة الأحرف فقط: على نظام لا يميّزها exists(dest) صحيحة حتى لو لم تُنفَّذ العملية (نفس الملف) فنقارن الأسماء حرفياً
+                case_pair = bool(src and dest) and _case_only_pair(src, dest)
+                exn = _name_listed if case_pair else ex
                 if self._journal_has(action, src=src, dest=dest):
                     pass
+                elif src and dest and src == dest:
+                    pass   # مصدر = وجهة حرفياً: لا أثر ولا شيء يُسجَّل (إدخال كهذا يمرّ بلا معنى ويحجب التراجع)
                 elif ex(tmp):
                     # انقطاع بين خطوتي تغيير حالة الأحرف: الملف باسمه المؤقت المخفي، نعيده لاسمه الأصلي
-                    target = src if not ex(src) else str(self._get_unique_path(Path(src)))
+                    target = src if not exn(src) else str(self._get_unique_path(Path(src)))
                     _safe_move(str(tmp), target)
                     note(f"اكتُشف أن إعادة تسمية '{Path(src).name}' انقطعت في منتصفها؛ أُعيد الملف إلى اسمه الأصلي '{Path(target).name}'.")
-                elif ex(dest) and (not ex(src) or _same_file(src, dest)):
-                    adopted = {"task": task, "action": action, "src": src, "dest": dest}
-                elif ex(src) and not ex(dest):
+                elif exn(dest) and (not exn(src) or (not case_pair and _same_file(src, dest))):
+                    adopted = {"task": task, "action": action, "src": src, "dest": dest, "sig": _file_sig(dest)}
+                elif exn(src) and not exn(dest):
                     pass   # لم تُنفَّذ العملية أصلاً
                 else:
                     note(f"انقطعت عملية {action} على '{Path(str(src)).name}' ولم أستطع الجزم بحالتها؛ تحقق من الملف يدوياً.")
@@ -1571,7 +1648,7 @@ class FileManager:
                     _safe_move(str(tmp), str(moved))
                     note(f"انقطعت عملية نسخ '{Path(str(src)).name}' قبل اكتمالها؛ نُقلت النسخة الناقصة إلى السلة باسم '{moved.name}'.")
                 elif ex(dest):
-                    adopted = {"task": task, "action": "copy", "src": src, "dest": dest, "is_dir": bool(rec.get("is_dir"))}
+                    adopted = {"task": task, "action": "copy", "src": src, "dest": dest, "is_dir": bool(rec.get("is_dir")), "sig": path_signature(dest)}
             elif action == "create_dir":
                 for pth in rec.get("paths") or []:
                     if os.path.isdir(str(pth)) and not self._journal_has("create_dir", path=pth):
@@ -1584,14 +1661,33 @@ class FileManager:
             self._intent_clear()
             return
         if adopted:
+            n_before = len(self.journal)
             if isinstance(adopted, dict):
                 self.journal.append(adopted)
             try:
                 self._save_journal()
                 note(f"اكتُشفت عملية ({action}) نُفّذت قبل انقطاع سابق ولم تُسجَّل، وسُجِّلت الآن فيمكن التراجع عنها.")
             except Exception as exc:
-                note(f"عملية ({action}) نُفّذت قبل انقطاع سابق وتعذّر تسجيلها للتراجع: {explain_error(exc) or 'خطأ'}.")
+                del self.journal[n_before:]   # لم تُحفظ: تبقى النية ليتبنّاها الاستعادة التالية بدل أن تضيع العملية
+                note(f"عملية ({action}) نُفّذت قبل انقطاع سابق وتعذّر تسجيلها للتراجع الآن: {explain_error(exc) or 'خطأ'}؛ ستُسجَّل في أول فرصة قادمة.")
+                return
         self._intent_clear()
+
+    def _resync_journal(self) -> None:
+        """بعد التراجع عن عملية فشل حفظ سجلها: قد يكون الحفظ الفاشل كُتب فعلاً على القرص (فشل بعد التنفيذ) فيبقى فيه إدخال لعملية لم تعد قائمة
+        ويحجب تراجع ما قبله. نعيد كتابة السجل بحالته الحالية (محاولة واحدة؛ فشلها لا يُخفي الخطأ الأصلي)."""
+        try:
+            self._save_journal()
+        except Exception:
+            pass
+
+    def _settle_intent(self) -> None:
+        """بعد استثناء أثناء عملية ملفات: إن كان أثرها على القرص قد وقع فعلاً (فشل بعد التنفيذ) تُتبنّى في السجل فوراً فلا يضيع التراجع عنها،
+        وإن لم تقع (أو أُعيد المؤقت) تُمحى النية. إن تعذّر حفظ السجل تبقى النية ليتبنّاها الاستعادة التالية (بدء التشغيل/العملية التالية)."""
+        try:
+            self._reconcile_intent()
+        except BaseException:   # لا نُخفي الاستثناء الأصلي ولا نتركه معلّقاً بسبب عطب ثانوي
+            pass
 
     def _sweep_orphans(self) -> None:
         """بقايا نسخة مؤقتة يتيمة بعد انقطاع (.cos_copy_tmp_<8 hex>) تنتقل للسلة. (اسم إعادة التسمية المؤقت يُستعاد عبر ملف النية فقط؛ قد يكون اسماً اختاره المستخدم.)"""
@@ -1824,6 +1920,7 @@ class FileManager:
                 except Exception:
                     clean = False
             if clean:
+                self._resync_journal()
                 self._intent_clear()
             raise
         self._intent_clear()
@@ -1862,7 +1959,7 @@ class FileManager:
         try:
             _safe_move(str(source), str(final_dest))
         except BaseException:
-            self._intent_clear()
+            self._settle_intent()
             raise
         self.journal.append({
             "task": self.current_task,
@@ -1877,6 +1974,7 @@ class FileManager:
             self.journal.pop()
             try:
                 os.rename(str(final_dest), str(source))
+                self._resync_journal()
                 self._intent_clear()
             except Exception:
                 pass   # تبقى النية: الاستعادة التالية تتبنّى النقل المنفَّذ
@@ -1933,7 +2031,7 @@ class FileManager:
                 tsize = self.trash_size(self.trash_cap_bytes)
                 if tsize > self.trash_cap_bytes:
                     raise CopyBudgetExceededError(
-                        f"سلة المحذوفات .trash ممتلئة ({human_size(tsize)} > {human_size(self.trash_cap_bytes)}). "
+                        f"سلة المحذوفات .trash ممتلئة ({human_size(tsize)}؛ الحد {human_size(self.trash_cap_bytes)}). "
                         f"أفرغها يدوياً (لا يحذف المساعد شيئاً نهائياً) ثم أعد المحاولة. لم يُنسخ شيء.")
             self._copy_spent[key] = (spent + size, self._copy_spent.get(key, (0, now))[1])
             return size
@@ -1990,7 +2088,7 @@ class FileManager:
             _safe_move(str(tmp), str(final_dest))   # الاسم النهائي لا يظهر إلا مكتملاً
         except BaseException:
             if self._discard_copy_tmp(tmp, final_dest.name):   # نسخة ناقصة يتيمة: تُنقل للسلة لا تُترك
-                self._intent_clear()
+                self._settle_intent()   # لو اكتمل التبديل للاسم النهائي قبل الفشل تُتبنّى النسخة في السجل بدل أن تضيع
             self._refund_copy(charged)
             raise
 
@@ -2008,6 +2106,7 @@ class FileManager:
             self.journal.pop()
             try:  # لا حذف نهائي: النسخة التي لم تُسجَّل تُنقل للسلة
                 _safe_move(str(final_dest), str(self._partial_trash_path(final_dest.name)))
+                self._resync_journal()
                 self._intent_clear()
             except Exception:
                 pass
@@ -2049,13 +2148,12 @@ class FileManager:
             try:
                 _safe_move(str(source), str(tmp))
             except BaseException:
-                self._intent_clear()
+                self._settle_intent()   # الملف باسمه المؤقت؟ يعاد لاسمه؛ لم يتحرك؟ تُمحى النية
                 raise
             try:
                 _safe_move(str(tmp), str(final_dest))
             except BaseException:
-                _safe_move(str(tmp), str(source))
-                self._intent_clear()
+                self._settle_intent()   # لم يكتمل: يعاد من المؤقت لاسمه الأصلي؛ اكتمل فعلاً: يُتبنّى في السجل
                 raise
         else:
             final_dest = self.validate_path(self._get_unique_path(final_target))
@@ -2063,7 +2161,7 @@ class FileManager:
             try:
                 _safe_move(str(source), str(final_dest))
             except BaseException:
-                self._intent_clear()
+                self._settle_intent()
                 raise
         self.journal.append({
             "task": self.current_task,
@@ -2078,6 +2176,7 @@ class FileManager:
             self.journal.pop()
             try:
                 os.rename(str(final_dest), str(source))
+                self._resync_journal()
                 self._intent_clear()
             except Exception:
                 pass
@@ -2106,7 +2205,7 @@ class FileManager:
         try:
             _safe_move(str(p), str(final_dest))
         except BaseException:
-            self._intent_clear()
+            self._settle_intent()
             raise
 
         self.journal.append({
@@ -2121,6 +2220,7 @@ class FileManager:
             self.journal.pop()
             try:
                 os.rename(str(final_dest), str(p))
+                self._resync_journal()
                 self._intent_clear()
             except Exception:
                 pass
@@ -2199,6 +2299,8 @@ class FileManager:
             raw_src, raw_dest = Path(op["src"]), Path(op["dest"])  # الأسماء الخام (validate_path يوحّد الحالة على ويندوز)
             if raw_src.parent == raw_dest.parent and raw_src.name != raw_dest.name \
                     and raw_src.name.casefold() == raw_dest.name.casefold():
+                if not _name_listed(dest.parent / raw_dest.name):
+                    return "missing"   # على نظام لا يميّز الحالة exists صحيحة حتى لو كان الملف أصلاً باسمه القديم (أُلغيت التسمية سابقاً)
                 try:
                     case_only = os.path.lexists(src) and os.path.samefile(src, dest)
                 except OSError:

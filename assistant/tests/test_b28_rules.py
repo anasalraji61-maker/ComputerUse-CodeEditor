@@ -250,7 +250,7 @@ try:
         rep = r.run("T-ren", "x", plan=[PlanStep(1, "move", "a.txt", {"dest": "B/a.txt"})])
         assert rep.success and (ws / "B" / "a (1).txt").exists()
         vals = [str(e.get("value")) for e in rep.evidence]
-        assert any("destination renamed to a (1).txt" in v for v in vals), vals
+        assert any("الوجهة أُعيدت تسميتها إلى «a (1).txt»" in v for v in vals), vals
         # وجهة عادية بلا تنبيه
         (ws / "c.txt").write_text("c", encoding="utf-8")
         rep = r.run("T-plain", "x", plan=[PlanStep(1, "move", "c.txt", {"dest": "B/c.txt"})])

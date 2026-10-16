@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
+from assistant.arabic import n_units
+
 
 class SpendingLimitExceededError(Exception):
     """استثناء عند تجاوز سقف الإنفاق التلقائي."""
@@ -48,7 +50,7 @@ class SQLiteLedger:
         except OSError:
             empty = False
         if empty:  # ملف صفري البايت (انقطاع أثناء الإنشاء/تفريغ): لا إعادة ضبط صامتة للرصيد
-            self._mark_recovered("ملف دفتر النقاط كان فارغاً (0 بايت) فأُنشئ دفتر جديد برصيده الافتراضي.")
+            self._mark_recovered("ملف النقاط كان فارغاً فأنشأت رصيداً جديداً قد يختلف عن رصيدك السابق.")
         for attempt in range(6):
             try:
                 self._init_db(initial_balance, spending_limit)
@@ -118,9 +120,9 @@ class SQLiteLedger:
                 self.db_path.unlink()   # لا نقدر على الأرشفة: نفضّل البدء من جديد على عدم التشغيل
             except OSError:
                 raise exc
-        self._mark_recovered("ملف دفتر النقاط كان تالفاً"
-                             + (f" وحُفظ للفحص باسم {dest.name}" if moved else "")
-                             + "؛ أُنشئ دفتر جديد برصيده الافتراضي (قد تختلف نقاطك عن السابق).")
+        self._mark_recovered("ملف النقاط كان تالفاً"
+                             + (f" (حُفظت نسخته للفحص باسم {dest.name})" if moved else "")
+                             + " فأنشأت رصيداً جديداً قد يختلف عن رصيدك السابق.")
 
     def _reconcile_stuck(self) -> None:
         """مهمة بقيت STARTED أكثر من ساعة (أُغلق التطبيق/انهار أثناءها) تُغلق FAILED بلا خصم، فلا تبقى معلّقة في السجل."""
@@ -296,12 +298,12 @@ class SQLiteLedger:
         with self._get_connection(immediate=True) as conn:
             acc = conn.execute("SELECT balance, total_spent, spending_limit FROM account WHERE id = 1").fetchone()
             if acc["balance"] < estimated_points:
-                raise InsufficientBalanceError(f"الرصيد غير كافٍ ({acc['balance']} < {estimated_points}).")
+                raise InsufficientBalanceError(f"الرصيد غير كافٍ: رصيدك {n_units(acc['balance'], 'نقطة')} والمهمة تحتاج {n_units(estimated_points, 'نقطة')}.")
             if acc["total_spent"] + estimated_points > acc["spending_limit"]:
                 raise SpendingLimitExceededError(
-                    f"تجاوز سقف الإنفاق المحدد ({acc['total_spent'] + estimated_points} > {acc['spending_limit']}).")
+                    f"سقف الإنفاق المحدد {n_units(acc['spending_limit'], 'نقطة')} وهذه المهمة ستتجاوزه (المُنفَق حتى الآن {n_units(acc['total_spent'], 'نقطة')}).")
             if conn.execute("SELECT 1 FROM transactions WHERE task_id = ?", (task_id,)).fetchone():
-                raise ValueError(f"معرّف المهمة '{task_id}' مستعمل من قبل.")
+                raise ValueError("سُجّلت هذه المهمة من قبل ولا يمكن بدؤها مرة ثانية.")
             conn.execute(
                 "INSERT INTO transactions (task_id, task_type, estimated_points, charged_points, status, reason) "
                 "VALUES (?, ?, ?, 0, 'STARTED', 'قيد التنفيذ')",
@@ -317,9 +319,9 @@ class SQLiteLedger:
             balance, total_spent, limit = acc["balance"], acc["total_spent"], acc["spending_limit"]
 
             if total_spent + charged_points > limit:
-                raise SpendingLimitExceededError("تم بلوغ سقف الإنفاق الأقصى.")
+                raise SpendingLimitExceededError("بلغ الإنفاق سقفه الأقصى فلا يمكن خصم نقاط أخرى.")
             if balance < charged_points:
-                raise InsufficientBalanceError("الرصيد غير كافٍ لإتمام الخصم.")
+                raise InsufficientBalanceError("الرصيد غير كافٍ لإتمام الخصم، فلم تُخصم أي نقاط.")
 
             conn.execute(
                 "UPDATE account SET balance = balance - ?, total_spent = total_spent + ? WHERE id = 1",

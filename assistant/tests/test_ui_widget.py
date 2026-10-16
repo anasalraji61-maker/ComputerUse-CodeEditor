@@ -81,7 +81,7 @@ try:
 
         # 4. تراجع عن آخر مهمة
         w.undo_btn.invoke()  # المهمتان الأخيرتان لم تغيّرا شيئاً؛ التراجع يعود لآخر مهمة غيّرت (إنشاء «تجربة»)
-        assert pump(root, lambda: "تم التراجع عن 1" in chat_text(w))
+        assert pump(root, lambda: "تم التراجع عن عملية واحدة" in chat_text(w))
         assert not (base / "ws" / "تجربة").exists()
         w.undo_btn.invoke()  # لا شيء بعدها يُتراجع عنه
         assert pump(root, lambda: "لا توجد مهمة للتراجع" in chat_text(w) or "لا يوجد ما يمكن التراجع" in chat_text(w))
@@ -93,7 +93,7 @@ try:
         assert pump(root, lambda: chat_text(w).count("تم بنجاح ✔") == 2)
         assert (base / "ws" / "للتراجع").is_dir()
         w.undo_btn.invoke()
-        assert pump(root, lambda: chat_text(w).count("تم التراجع عن 1") == 2)
+        assert pump(root, lambda: chat_text(w).count("تم التراجع عن عملية واحدة") == 2)
         assert not (base / "ws" / "للتراجع").exists()
         # 3ب. الأمثلة السريعة تملأ الحقل، وتغيير المجلد يعمل ويرفض غير الصالح
         w.chips[0].invoke()
